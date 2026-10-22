@@ -142,20 +142,22 @@ def parse(db: Session, content: bytes, tenant_ids: list[int] | None, dictionary:
                 raw = _text(cells[col[h]])
                 if raw is None:
                     continue
-                key, value = EDITABLE[h], None if raw in CLEAR else raw
-                if key == "env_type" and value is not None:
-                    if value.upper() not in ENV_BY_TEXT and value not in ENV_BY_TEXT:
-                        raise ValueError(f"环境只能填 {'/'.join(ENV_TYPES.values())}：{value}")
-                    value = ENV_BY_TEXT.get(value) or ENV_BY_TEXT[value.upper()]
+                key = EDITABLE[h]
+                txt = None if raw in CLEAR else raw
+                value: str | bool | None = txt
+                if key == "env_type" and txt is not None:
+                    if txt.upper() not in ENV_BY_TEXT and txt not in ENV_BY_TEXT:
+                        raise ValueError(f"环境只能填 {'/'.join(ENV_TYPES.values())}：{txt}")
+                    value = ENV_BY_TEXT.get(txt) or ENV_BY_TEXT[txt.upper()]
                 elif key in ("critical", "allow_stop"):
-                    value = False if value is None else _bool(value, h)
-                elif key in ("owner", "business") and value is not None:
-                    if len(value) > 64:
+                    value = False if txt is None else _bool(txt, h)
+                elif key in ("owner", "business") and txt is not None:
+                    if len(txt) > 64:
                         raise ValueError(f"{h}不能超过 64 个字符")
                     pool = names["owners" if key == "owner" else "business"]
-                    if dictionary.enforce and value not in pool:
-                        raise ValueError(f"{h}“{value}”不在台账字典中（已开启只能从字典选择）")
-                elif key == "remark" and value is not None and len(value) > 500:
+                    if dictionary.enforce and txt not in pool:
+                        raise ValueError(f"{h}“{txt}”不在台账字典中（已开启只能从字典选择）")
+                elif key == "remark" and txt is not None and len(txt) > 500:
                     raise ValueError("备注不能超过 500 个字符")
                 old = (not (r.expected_state or {}).get("running", True)) if key == "allow_stop" else getattr(r, key)
                 if old != value:

@@ -330,11 +330,11 @@ def patch_resource(rid: int, body: ResourcePatch, db: Session = Depends(get_db),
         new_run = bool(expected["running"])
         if old_run != new_run:
             r.expected_state = {**(r.expected_state or {}), "running": new_run}
-            label = {True: "应保持运行", False: "允许关机"}
+            run_label = {True: "应保持运行", False: "允许关机"}
             _change(db, r, "UPDATED", utcnow(), [{"field": "expected_state.running", "label": "预期状态",
-                                                  "old": label[old_run], "new": label[new_run]}],
+                                                  "old": run_label[old_run], "new": run_label[new_run]}],
                     source="MANUAL", operator=cu.display_name)
-            detail["预期状态"] = [label[old_run], label[new_run]]
+            detail["预期状态"] = [run_label[old_run], run_label[new_run]]
     if detail:
         audit.log("ledger.update", target_type="resource", target_id=r.id, target_name=r.name, tenant_id=r.tenant_id,
                   detail={"changes": detail})

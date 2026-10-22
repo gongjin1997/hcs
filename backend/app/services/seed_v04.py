@@ -39,6 +39,8 @@ log = logging.getLogger(__name__)
 WEEKDAY = "一二三四五六日"
 # 租户B 没有开通 DataArts / MRS / GaussDB / DWS：关闭采集后这些巡检对租户B 不再执行
 OFF_B = ["dgc_realtime_job", "dgc_batch_job", "mrs_cluster", "mrs_job", "gaussdb_instance", "dws_cluster"]
+MRS_TIMEOUT = ("[504] APIGW.0201: Backend timeout（MRS 作业接口 /v2/{project_id}/clusters/{cluster_id}/job-executions，"
+               "已重试 3 次）")
 OFF_B_TASKS = ["dgc_realtime_status", "dgc_batch_instance", "mrs_cluster_status", "mrs_job_status", "gaussdb_status"]
 BIZ_REMARK = {"电商交易": "订单、支付、库存", "电商门户": "PC / H5 门户", "数据平台": "实时 + 离线数仓",
               "容器平台": "CCE 集群与公共组件", "运维监控": "Prometheus / 日志", "测试环境": "非生产，告警降级"}
@@ -86,7 +88,7 @@ def _settings(db: Session, users: dict[str, User], now: datetime) -> None:
     biz = sorted({x for x in db.scalars(select(Resource.business).where(Resource.business.is_not(None))) if x})
     owners = sorted({x for x in db.scalars(select(Resource.owner).where(Resource.owner.is_not(None))) if x})
     report = settings_service.get_report(db)
-    items = [
+    items: list[tuple[str, dict, int]] = [
         ("report", {"cron": report.cron, "enabled": report.enabled,
                     "mail_to": ["ops-report@example.com", "zhaolei@example.com"]}, 14),
         ("platform_alarm", {"mail_to": ["zhaolei@example.com"]}, 14),
@@ -213,7 +215,7 @@ def _platform_alarm(db: Session, a: HcsAccount, now: datetime) -> None:
         start = now - timedelta(minutes=ago)
         last = InspectionRun(task_code="mrs_job_status", tenant_id=a.id, trigger_type="SCHEDULE", started_at=start,
                              finished_at=start + timedelta(seconds=31 + i), status="FAILED", api_calls=4, stats={},
-                             error_summary="[504] APIGW.0201: Backend timeout（MRS 作业接口 /v2/{project_id}/clusters/{cluster_id}/job-executions，已重试 3 次）")
+                             error_summary=MRS_TIMEOUT)
         db.add(last)
     db.commit()
     assert last is not None

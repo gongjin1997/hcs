@@ -274,7 +274,7 @@ def update_group(gid: int, body: GroupIn, db: Session = Depends(get_db), audit: 
     ids, leaders = _check_members(db, body)
     contacts = _contacts(db)
     names = lambda xs: [contacts[i].name for i in xs if i in contacts]  # noqa: E731
-    diff = {}
+    diff: dict[str, list] = {}
     if g.name != body.name.strip():
         diff["名称"] = [g.name, body.name.strip()]
     if list(g.member_ids or []) != ids:
@@ -384,7 +384,9 @@ def simulate(body: SimulateIn, db: Session = Depends(get_db)):
                        first_seen=now, last_seen=now, detail={})
     contacts = _contacts(db)
     groups = {g.code: g for g in db.scalars(select(ContactGroup))}
-    steps, emails, stopped = [], [], False
+    steps: list[dict] = []
+    emails: list[str] = []
+    stopped = False
     for r in db.scalars(select(NotifyRoute).order_by(NotifyRoute.priority, NotifyRoute.id)):
         matched = r.enabled and not stopped and route_matches(r.match or {}, alarm)
         g = groups.get(r.group_code)
