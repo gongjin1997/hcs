@@ -50,6 +50,7 @@ class AlarmEvent(Base):
     severity: Mapped[str] = mapped_column(String(4))                 # P1 / P2 / P3 / P4
     status: Mapped[str] = mapped_column(String(16))                  # FIRING/ACKED/SUPPRESSED/RESOLVED/CLOSED
     suppress_reason: Mapped[str | None] = mapped_column(String(64))
+    silence_id: Mapped[int | None] = mapped_column(Integer)          # 命中的静默 / 维护窗口（SUPPRESSED 时）
     title: Mapped[str] = mapped_column(String(255))
     check_item: Mapped[str] = mapped_column(String(64))
     current_value: Mapped[str | None] = mapped_column(String(64))
@@ -70,7 +71,7 @@ class AlarmEventLog(Base):
     __tablename__ = "alarm_event_log"
     id: Mapped[int] = mapped_column(primary_key=True)
     alarm_id: Mapped[int] = mapped_column(Integer, index=True)
-    action: Mapped[str] = mapped_column(String(32))     # FIRE/UPGRADE/NOTIFY/ACK/SILENCE/RESOLVE/REOPEN/CLOSE/COMMENT
+    action: Mapped[str] = mapped_column(String(32))     # FIRE/UPGRADE/NOTIFY/ACK/SILENCE/UNSILENCE/RESOLVE/REOPEN/CLOSE
     from_status: Mapped[str | None] = mapped_column(String(16))
     to_status: Mapped[str | None] = mapped_column(String(16))
     operator: Mapped[str] = mapped_column(String(64), default="system")

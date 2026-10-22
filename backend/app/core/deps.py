@@ -68,9 +68,26 @@ def load_user(db: Session, token: str | None) -> CurrentUser:
 
 
 def user_from_token(token: str | None) -> CurrentUser:
-    """无法使用依赖注入的场景（SSE 的 Query Token）。"""
+    """无法使用依赖注入的场景。"""
     with SessionLocal() as db:
         return load_user(db, token)
+
+
+def user_from_ticket(ticket: str) -> CurrentUser:
+    """SSE：校验并作废一次性票据，再按票据里的身份查库（停用、改角色立即生效）。"""
+    from app.models import User
+
+    from .security import consume_sse_ticket
+
+    try:
+        payload = consume_sse_ticket(ticket)
+    except jwt.PyJWTError as e:
+        raise _unauthorized("实时推送票据无效或已使用，请刷新页面") from e
+    with SessionLocal() as db:
+        user = db.get(User, int(payload.get("uid", 0)))
+        if user is None or user.username != payload.get("sub") or not user.enabled:
+            raise _unauthorized()
+        return to_current(db, user)
 
 
 def get_current_user(authorization: str | None = Header(default=None), db: Session = Depends(get_db)) -> CurrentUser:

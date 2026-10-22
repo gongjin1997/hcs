@@ -52,19 +52,20 @@ def render_mail(report: Report) -> tuple[str, str, str]:
 
 
 def default_recipients(db: Session, report: Report) -> list[str]:
-    """租户报表发给租户配置的收件人；合并报表发给 REPORT_MAIL_TO。"""
+    """租户报表发给租户配置的收件人（未配置时不发送）；合并报表发给“报表设置”里的收件人（未设置时取 REPORT_MAIL_TO）。"""
+    from app.services.settings_service import get_report
+
     if report.tenant_id is not None:
         t = db.get(HcsAccount, report.tenant_id)
-        if t is not None and t.report_mail_to:
-            return list(t.report_mail_to)
-    return list(get_settings().report_mail_to)
+        return list(t.report_mail_to) if t is not None and t.report_mail_to else []
+    return list(get_report(db).mail_to)
 
 
 def send_report(db: Session, report: Report, to: list[str] | None = None,
                 sender: Callable[[EmailMessage], None] | None = None) -> list[str]:
     recipients = [x.strip() for x in (to or default_recipients(db, report)) if x and x.strip()]
     if not recipients:
-        raise BizError(ErrorCode.BAD_REQUEST, "未指定收件人，租户也未配置报表收件人（REPORT_MAIL_TO）")
+        raise BizError(ErrorCode.BAD_REQUEST, "未指定收件人：租户报表请在租户接入里配置报表收件人，合并报表请在报表设置里配置")
     subject, html, text = render_mail(report)
     msg = build_message(subject=subject, html=html, text=text, recipients=recipients,
                         message_id=f"<report-{report.id}-{int(utcnow().timestamp())}@hcs-inspector>")

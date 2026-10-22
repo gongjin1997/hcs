@@ -17,6 +17,7 @@ from app.hcs import HcsClient, HcsError
 from app.models import InspectionRun, Resource, ResourceChange
 from app.models.base import utcnow
 from app.services.catalog import RESOURCE_TYPES, type_name
+from app.services import collect_switch, platform_watch
 from app.services.tenancy import Target, legacy_target, resolve_targets
 
 from .fetchers import FETCHERS, LedgerRecord
@@ -141,6 +142,7 @@ def sync_ledger(db: Session, *, client: HcsClient | None = None, target: Target 
     except HcsError as e:
         run.status, run.error_summary, run.finished_at = "FAILED", str(e), utcnow()
         db.commit()
+        platform_watch.on_run(db, run)
         return run
     scoped = (Resource.project_ref == target.project_ref) if target.project_ref is not None \
         else Resource.project_ref.is_(None)
@@ -149,7 +151,15 @@ def sync_ledger(db: Session, *, client: HcsClient | None = None, target: Target 
                                               .where(Resource.resource_type == "ecs_server", scoped)).all()),
                  "vpc_names": dict(db.execute(select(Resource.resource_id, Resource.name)
                                               .where(Resource.resource_type == "vpc", scoped)).all())}
-    wanted = [t for t in FETCHERS if not types or t in types]
+    switches = collect_switch.load(db)
+    wanted = [t for t in FETCHERS if (not types or t in types) and switches.enabled(target.tenant_id, t)]
+    skipped = [t for t in FETCHERS if (not types or t in types) and t not in wanted]
+    if not wanted:                                 # 全部类型都已关闭采集（系统管理 → 采集开关）
+        run.status, run.finished_at = "SKIPPED", utcnow()
+        run.error_summary = "已关闭采集：" + "、".join(type_name(t) for t in skipped)
+        run.stats = {"skipped": skipped}
+        db.commit()
+        return run
     errors: list[str] = []
     stats: dict[str, dict] = {}
     now = utcnow()
@@ -163,14 +173,15 @@ def sync_ledger(db: Session, *, client: HcsClient | None = None, target: Target 
                                       project_ref=target.project_ref)
     db.commit()
     changed = sum(v["created"] + v["updated"] + v["deleted"] for v in stats.values())
-    run.stats = stats
     run.resource_total = sum(v["total"] for v in stats.values())
+    run.stats = {**stats, "skipped": skipped} if skipped else stats
     run.abnormal_total = changed                       # 台账同步任务里表示“本次发现的变更数”
     run.status = "FAILED" if not stats else ("PARTIAL" if errors else "SUCCESS")
     run.error_summary = "\n".join(errors[:20]) or None
     run.finished_at, run.api_calls = utcnow(), client.calls
     db.commit()
     log.info("ledger sync [%s] %s: %d resources, %d changes", target.code, run.status, run.resource_total, changed)
+    platform_watch.on_run(db, run)
     return run
 
 

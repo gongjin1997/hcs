@@ -23,7 +23,15 @@ ACTIONS: dict[str, str] = {
     "ledger.update": "维护台账字段", "ledger.sync": "手动同步台账", "ledger.export": "导出台账",
     "report.create": "生成报表", "report.send": "发送报表", "report.delete": "删除报表",
     "probe.save": "保存背压探针", "probe.delete": "删除背压探针", "podevent.collect": "手动采集容器事件",
-    "task.run": "立即执行任务",
+    "task.run": "立即执行任务", "task.update": "修改巡检任务",
+    "silence.create": "新建静默 / 维护窗口", "silence.update": "修改静默 / 维护窗口", "silence.cancel": "取消静默",
+    "alarm.silence": "快速静默告警",
+    "notify.route.create": "新增通知路由", "notify.route.update": "修改通知路由", "notify.route.delete": "删除通知路由",
+    "notify.route.reorder": "调整路由顺序", "notify.group.create": "新增联系组", "notify.group.update": "修改联系组",
+    "notify.group.delete": "删除联系组", "notify.contact.create": "新增联系人", "notify.contact.update": "修改联系人",
+    "notify.contact.delete": "删除联系人", "notify.test_mail": "发送测试邮件",
+    "collect.update": "修改采集开关", "setting.update": "修改系统设置", "report.schedule": "修改报表设置",
+    "ledger.dict": "维护台账字典", "ledger.import": "Excel 导入台账字段",
 }
 
 

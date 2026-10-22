@@ -37,6 +37,10 @@
   expr: {when: "status == 'STOPPING' and status_duration_min > 10", severity: P3,
          title: "作业停止中已持续 {status_duration_min} 分钟"}
   recover: {when: "status != 'STOPPING'"}
+  runbook: |
+    1. 在 DataArts Studio 运维调度中查看作业停止进度，确认是否卡在 Checkpoint / Savepoint 或下游写入阻塞；
+    2. 超过 30 分钟仍未停止时，先确认业务影响再选择强制停止；
+    3. 强制停止后检查作业状态与数据完整性，需要时从最近一次 Checkpoint 重新启动。
 - id: R-DGC-RT-005
   name: 实时作业节点异常
   resource_type: dgc_realtime_job
@@ -46,6 +50,10 @@
          critical_severity: P1, value_field: node_status, title: "作业节点异常（{node_status}）"}
   for_count: 2
   recover: {when: "node_status == 'NORMAL'"}
+  runbook: |
+    1. 在作业监控中查看异常 / 停止的节点及报错日志（常见：源端连接中断、目标表锁等待、内存不足）；
+    2. 修复原因后重启该节点或整个作业，观察数据延迟是否恢复；
+    3. 核心作业持续异常超过 15 分钟需同步业务负责人评估数据补录。
 - id: R-DGC-BAT-001
   name: 批作业实例失败
   resource_type: dgc_batch_job
@@ -63,6 +71,10 @@
   expr: {when: "last_status == 'running-exception'", severity: P2, value_field: last_status,
          title: "批作业运行异常（running-exception）"}
   recover: {when: "last_status != 'running-exception'"}
+  runbook: |
+    1. 在运维调度 → 实例监控中打开该实例，查看失败节点的日志；
+    2. 确认上游依赖与数据源连通性，排查 SQL / 脚本报错；
+    3. 修复后对失败节点执行“重跑”，并检查下游依赖实例是否需要补跑。
 - id: R-DGC-BAT-003
   name: 批作业运行超时
   resource_type: dgc_batch_job
@@ -71,6 +83,10 @@
   expr: {when: "last_status == 'running' and run_minutes > max(p90_minutes * 2, p90_minutes + 30, 30)",
          severity: P2, value_field: run_minutes, title: "批作业已运行 {run_minutes} 分钟，超过基线"}
   recover: {when: "last_status != 'running'"}
+  runbook: |
+    1. 对比该作业近 7 天运行时长（P90），确认是否数据量突增或资源队列拥塞；
+    2. 查看当前运行节点是否卡在等待锁 / 等待资源，必要时联系数据库或队列管理员；
+    3. 影响下游时间窗时，评估终止后重跑或通知下游延后。
 - id: R-MRS-CLU-001
   name: MRS 集群状态异常
   resource_type: mrs_cluster
@@ -80,6 +96,10 @@
          title: "集群状态异常（{cluster_state}）"}
   for_count: 2
   recover: {when: "cluster_state == 'running'"}
+  runbook: |
+    1. 登录 MRS Manager 查看集群告警与服务健康状态，定位异常组件（HDFS / YARN / Hive 等）；
+    2. 检查节点存活、磁盘与网络，按组件告警的修复建议处理；
+    3. 涉及主节点故障时联系平台运维确认主备倒换情况，恢复后观察 30 分钟。
 - id: R-MRS-CLU-002
   name: MRS 集群已冻结
   resource_type: mrs_cluster
@@ -87,6 +107,10 @@
   kind: state
   expr: {when: "cluster_state == 'frozen'", severity: P2, value_field: cluster_state, title: "集群已冻结（frozen）"}
   recover: {when: "cluster_state == 'running'"}
+  runbook: |
+    1. 集群冻结通常由欠费、配额或管理员操作导致，先在 HCS 运营面确认冻结原因；
+    2. 联系租户管理员处理后解冻，确认集群状态恢复为 running；
+    3. 解冻后检查作业是否需要补跑。
 - id: R-MRS-JOB-001
   name: MRS 作业执行失败
   resource_type: mrs_job
@@ -104,6 +128,10 @@
   expr: {when: "job_state == 'ACCEPTED' and status_duration_min > 15", severity: P3, value_field: job_state,
          title: "作业排队已 {status_duration_min} 分钟"}
   recover: {when: "job_state != 'ACCEPTED'"}
+  runbook: |
+    1. 在 YARN ResourceManager 查看作业所在队列的资源使用率与排队作业数；
+    2. 资源不足时与业务协商错峰运行，或临时调整队列容量；
+    3. 排查是否有长时间运行的异常作业占用资源，必要时终止。
 - id: R-GS-001
   name: GaussDB 实例故障
   resource_type: gaussdb_instance
@@ -119,6 +147,10 @@
   kind: state
   expr: {when: "status == 'FROZEN'", severity: P2, title: "实例已冻结（FROZEN）"}
   recover: {when: "status == 'ACTIVE'"}
+  runbook: |
+    1. 实例冻结通常由欠费、配额或管理员操作导致，先在 HCS 运营面确认冻结原因；
+    2. 联系租户管理员处理后解冻，确认实例状态恢复为 ACTIVE；
+    3. 解冻后检查业务连接与主备同步状态。
 - id: R-GS-006
   name: GaussDB 磁盘使用率过高
   resource_type: gaussdb_instance
@@ -145,6 +177,10 @@
     levels: [{severity: P2, op: ">=", threshold: 90}, {severity: P3, op: ">=", threshold: 80}]
   for_count: 3
   recover: {below: 70}
+  runbook: |
+    1. 在 GaussDB 控制台查看 Top SQL 与会话，定位高耗 CPU 的语句；
+    2. 对慢 SQL 做执行计划分析（缺索引、统计信息过期），必要时终止异常会话；
+    3. 持续高于阈值时评估规格扩容或读写分离。
 - id: R-GS-008
   name: GaussDB 内存使用率过高
   resource_type: gaussdb_instance
@@ -157,6 +193,10 @@
     levels: [{severity: P2, op: ">=", threshold: 95}, {severity: P3, op: ">=", threshold: 85}]
   for_count: 3
   recover: {below: 80}
+  runbook: |
+    1. 查看内存使用构成（共享缓冲区、会话内存、排序 / 哈希）与连接数；
+    2. 排查是否有大结果集查询或连接泄漏，必要时终止异常会话；
+    3. 长期高位时评估调整内存参数或扩容规格。
 - id: R-DCS-001
   name: DCS 实例状态异常
   resource_type: dcs_instance
@@ -173,6 +213,10 @@
   expr: {when: "status in ('FROZEN', 'CREATEFAILED') or (status == 'CLOSED' and expected_running)", severity: P2,
          title: "实例状态异常（{status}）"}
   recover: {when: "status == 'RUNNING'"}
+  runbook: |
+    1. FROZEN：确认欠费或管理员冻结原因，处理后解冻；
+    2. CREATEFAILED：查看创建失败原因（配额、子网 IP 不足、规格售罄），删除失败实例后重新创建；
+    3. CLOSED 且应保持运行：确认是否有人误关闭，经业务负责人确认后启动实例。
 - id: R-DCS-003
   name: DCS 实例变更超时
   resource_type: dcs_instance
@@ -181,6 +225,10 @@
   expr: {when: "status in ('RESTARTING', 'EXTENDING', 'RESTORING', 'UPGRADING') and status_duration_min > 60",
          severity: P3, title: "实例 {status} 已持续 {status_duration_min} 分钟"}
   recover: {when: "status == 'RUNNING'"}
+  runbook: |
+    1. 在 DCS 控制台查看实例的后台任务进度（重启 / 扩容 / 恢复 / 升级）；
+    2. 超过 2 小时无进展时联系平台运维排查底层任务；
+    3. 变更完成后检查业务连接与命中率是否正常。
 - id: R-DCS-005
   name: DCS 内存使用率过高
   resource_type: dcs_instance
@@ -211,6 +259,10 @@
     levels: [{severity: P2, op: ">=", threshold: 90}, {severity: P3, op: ">=", threshold: 70}]
   for_count: 3
   recover: {below: 60}
+  runbook: |
+    1. 使用 slowlog 和 info commandstats 定位高耗 CPU 的命令（如 KEYS、大 Key 的 HGETALL、Lua 脚本）；
+    2. 排查热 Key 与大 Key，通知业务改造访问方式；
+    3. 持续高于阈值时评估扩容为集群版或读写分离。
 - id: R-DCS-007
   name: DCS 连接数使用率过高
   resource_type: dcs_instance
@@ -224,6 +276,10 @@
   for_count: 3
   recover: {below: 70}
 # ---------------- ECS 云服务器（任务 ecs_status；使用率类规则需要 CES 或 Prometheus 指标，没有指标时不评估） ----------------
+  runbook: |
+    1. 使用 client list 查看连接来源，确认是否有客户端连接泄漏或连接池配置过大；
+    2. 通知相关业务调整连接池（最大连接数、空闲回收）；
+    3. 确有业务增长时评估调大 maxclients 或扩容实例。
 - id: R-ECS-001
   name: ECS 实例故障
   resource_type: ecs_server

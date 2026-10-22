@@ -3,7 +3,12 @@
 - 报表分“全部租户合并报表”（tenant_id 为空，只有拥有全部租户权限的用户可见）和“租户报表”
 - 权限：report:view 查看 / 导出，report:manage 生成 / 发送，report:delete 删除；写操作记操作审计
 """
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from apscheduler.triggers.cron import CronTrigger
 from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -19,6 +24,7 @@ from app.reports.builder import KINDS
 from app.reports.excel import report_workbook
 from app.reports.service import default_recipients, generate, send_report
 from app.schemas.report import ReportBrief, ReportIn, ReportOut, SendIn
+from app.services import settings_service
 from app.services.tenancy import tenant_map
 
 router = APIRouter(prefix="/reports", tags=["报表中心"])
@@ -82,14 +88,50 @@ def create_report(body: ReportIn, db: Session = Depends(get_db), scope: Scope = 
     return ok(ReportOut.model_validate(rpt).model_copy(update={"tenant_name": _name(tenant_map(db), tenant_id)}))
 
 
-@router.get("/schedule", summary="定时报表配置（只读，来自环境变量 REPORT_CRON / REPORT_MAIL_TO）", dependencies=[VIEW])
-def schedule(db: Session = Depends(get_db), scope: Scope = Depends(get_scope)):
+def _schedule(db: Session, scope: Scope, cu: CurrentUser) -> dict:
     s = get_settings()
-    tenants = [{"id": t.id, "name": t.short_name or t.name, "mail_to": t.report_mail_to or []}
+    cfg = settings_service.get_report(db)
+    tz = ZoneInfo(s.timezone)
+    now = datetime.now(tz)
+    jobs = []
+    for kind in settings_service.REPORT_KINDS:
+        cron = cfg.cron.get(kind)
+        enabled = bool(cron) and cfg.enabled.get(kind, True)
+        nxt = CronTrigger.from_crontab(cron, timezone=tz).get_next_fire_time(None, now) if enabled and cron else None
+        jobs.append({"kind": kind, "name": KINDS[kind], "cron": cron, "enabled": enabled, "next_run": nxt})
+    tenants = [{"id": t.id, "name": t.short_name or t.name, "mail_to": t.report_mail_to or [], "enabled": t.enabled}
                for t in tenant_map(db).values() if scope.allows(t.id)]
-    return ok({"cron": s.report_cron, "mail_to": s.report_mail_to if scope.full else [], "timezone": s.timezone,
-               "kinds": KINDS, "tenants": tenants,
-               "note": "定时任务每个周期生成 1 份全部租户合并报表 + 每个启用租户 1 份租户报表；租户报表发给租户配置的收件人"})
+    return {"kinds": KINDS, "jobs": jobs, "cron": cfg.cron, "enabled": cfg.enabled, "mail_to": cfg.mail_to if scope.full else [],
+            "timezone": s.timezone, "tenants": tenants, "editable": cu.can("report:config") and scope.full,
+            **settings_service.meta(db, "report"),
+            "note": "每个周期生成 1 份全部租户合并报表（发给下面的收件人）+ 每个启用租户 1 份租户报表（发给租户接入里配置的收件人）；"
+                    "收件人为空时只生成不发送"}
+
+
+@router.get("/schedule", summary="定时报表设置（发送时间、启停、合并报表收件人、各租户收件人、下次发送时间）")
+def schedule(db: Session = Depends(get_db), scope: Scope = Depends(get_scope),
+             cu: CurrentUser = Depends(require_perm("report:view"))):
+    return ok(_schedule(db, scope, cu))
+
+
+class ScheduleIn(BaseModel):
+    cron: dict[str, str] | None = None
+    enabled: dict[str, bool] | None = None
+    mail_to: list[str] | None = None
+
+
+@router.put("/schedule", summary="修改定时报表设置（调度进程最迟 30 秒生效）")
+def update_schedule(body: ScheduleIn, db: Session = Depends(get_db), scope: Scope = Depends(get_scope),
+                    audit: Auditor = Depends(get_auditor), cu: CurrentUser = Depends(require_perm("report:config"))):
+    if not scope.full:
+        raise BizError(ErrorCode.FORBIDDEN, "定时报表为全局配置，修改需要全部租户的数据权限", 403)
+    _, diff = settings_service.save(db, "report", body.model_dump(exclude_none=True), cu.display_name or cu.username)
+    if diff:
+        audit.log("report.schedule", target_type="setting", target_id="report", target_name="定时报表设置",
+                  detail={"changes": diff})
+    else:
+        db.commit()
+    return ok(_schedule(db, scope, cu))
 
 
 @router.get("/{rid}", response_model=ApiResponse[ReportOut], summary="报表详情", dependencies=[VIEW])

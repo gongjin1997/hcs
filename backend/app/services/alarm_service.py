@@ -18,6 +18,7 @@ from app.rules.expr import ExprError, evaluate
 from app.rules.model import Rule, render_title
 from app.schemas.alarm import AlarmOut
 
+from . import silence_service
 from .catalog import STATUS_LABEL
 
 REOPEN_WINDOW = timedelta(minutes=30)     # 恢复后 30 分钟内再次触发：重开原告警，避免刷屏
@@ -137,8 +138,11 @@ def close(db: Session, alarm_id: int, operator: str, note: str | None = None) ->
 
 
 # ---------------- 流水线：状态机落库 ----------------
-def enqueue_notification(db: Session, alarm: AlarmEvent, kind: str, now: datetime) -> Notification | None:
-    recipients, routes = resolve_recipients(db, alarm)
+def enqueue_notification(db: Session, alarm: AlarmEvent, kind: str, now: datetime,
+                         recipients: list[str] | None = None) -> Notification | None:
+    """按通知路由写入 Outbox（recipients 指定时直接使用，例如平台告警的兜底收件人）。"""
+    if recipients is None:
+        recipients, _ = resolve_recipients(db, alarm)
     if not recipients:
         log.warning("alarm %s (%s) matched no notify route", alarm.id, alarm.rule_id)
         return None
@@ -184,7 +188,11 @@ def apply_decision(db: Session, *, rule: Rule, decision: Decision, fp: str, reso
             db.add(alarm)
             db.flush()
             _log(db, alarm, "FIRE", None, "FIRING", note=f"{rule.name}：{m.title}", at=now)
-        enqueue_notification(db, alarm, "FIRING", now)
+        silence = silence_service.find_silence(db, alarm, now)
+        if silence is not None:                       # 维护窗口 / 静默期间：照常记录，不发通知
+            silence_service.suppress(db, alarm, silence, now)
+        else:
+            enqueue_notification(db, alarm, "FIRING", now)
         return _event(alarm, "FIRE")
     if active is None:
         return None
@@ -194,7 +202,7 @@ def apply_decision(db: Session, *, rule: Rule, decision: Decision, fp: str, reso
         active.severity, active.title = m.severity, m.title
         active.current_value, active.threshold_text, active.count = m.current_value, m.threshold_text, active.count + 1
         _log(db, active, action, active.status, active.status, note=f"{prev} → {m.severity}（{m.title}）", at=now)
-        if action == "UPGRADE":
+        if action == "UPGRADE" and active.status != "SUPPRESSED":
             enqueue_notification(db, active, "UPGRADE", now)
         return _event(active, action)
     if action == "REFRESH":
@@ -214,6 +222,7 @@ def apply_decision(db: Session, *, rule: Rule, decision: Decision, fp: str, reso
             tpl = (rule.expr.get("title") or rule.name).split("（")[0]     # 恢复后去掉阈值部分，只保留当前值
             active.title = render_title(tpl, facts, value=active.current_value or "-")
         _log(db, active, "RESOLVE", prev, "RESOLVED", note="满足恢复条件，自动恢复", at=now)
-        enqueue_notification(db, active, "RESOLVED", now)
+        if prev != "SUPPRESSED":                      # 静默期间没发过告警通知，恢复也不再通知
+            enqueue_notification(db, active, "RESOLVED", now)
         return _event(active, "RESOLVE")
     return None

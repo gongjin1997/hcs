@@ -27,6 +27,7 @@ def dispatch_pending(db: Session, sender: Callable[[EmailMessage], None] = send,
     if db.bind is not None and db.bind.dialect.name == "postgresql":
         q = q.with_for_update(skip_locked=True)     # 多个 notifier 实例并行消费
     sent = 0
+    failed: list[Notification] = []
     for n in db.scalars(q).all():
         alarm = db.get(AlarmEvent, n.alarm_id) if n.alarm_id else None
         if alarm is None:
@@ -50,8 +51,23 @@ def dispatch_pending(db: Session, sender: Callable[[EmailMessage], None] = send,
             n.error = f"{type(e).__name__}: {e}"[:500]
             if n.retry >= len(BACKOFF):
                 n.status = "FAILED"
+                failed.append(n)
                 log.error("notification %s failed permanently: %s", n.id, n.error)
             else:
                 n.status, n.next_retry_at = "RETRYING", now + timedelta(seconds=BACKOFF[n.retry - 1])
+    _platform_hooks(db, sent, failed)
     db.commit()
     return sent
+
+
+def _platform_hooks(db: Session, sent: int, failed: list[Notification]) -> None:
+    """平台自身告警 R-PLAT-003：通知最终发送失败时告警，之后有通知发送成功时自动恢复。异常不影响发送本身。"""
+    from app.services import platform_watch
+
+    try:
+        for n in failed:
+            platform_watch.on_notification_failed(db, n)
+        if sent:
+            platform_watch.on_notification_sent(db)
+    except Exception:  # noqa: BLE001
+        log.exception("platform watch hook failed")

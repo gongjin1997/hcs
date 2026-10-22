@@ -37,6 +37,9 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         start = time.perf_counter()
         response = await call_next(request)
         response.headers["X-Request-Id"] = rid
+        from . import metrics
+
+        metrics.observe(request.method, request.url.path, response.status_code, time.perf_counter() - start)
         logging.getLogger("access").info(
             "%s %s", request.method, request.url.path,
             extra={"request_id": rid, "method": request.method, "path": request.url.path,

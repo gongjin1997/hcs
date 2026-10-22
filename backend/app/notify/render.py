@@ -11,7 +11,7 @@ from app.core.config import get_settings
 from app.core.security import sign_mail_action
 from app.models import AlarmEvent, AlarmRule
 from app.models.base import utcnow
-from app.services.catalog import RESOURCE_TYPES, SERVICES, SEVERITY_COLOR, SEVERITY_LABEL, STATUS_LABEL
+from app.services.catalog import SERVICES, SEVERITY_COLOR, SEVERITY_LABEL, STATUS_LABEL, type_meta
 
 TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "templates" / "mail"
 MAX_SUBJECT = 120
@@ -62,7 +62,7 @@ def build_subject(alarm: AlarmEvent, kind: str, now: datetime | None = None) -> 
     """主题规范：【级别】【环境·租户】【服务】资源名 巡检项 当前值或状态（阈值），不超过 120 字符。"""
     tenant = (alarm.detail or {}).get("tenant")
     env_tag = get_settings().env_tag + (f"·{tenant}" if tenant else "")
-    tag = RESOURCE_TYPES.get(alarm.resource_type, {}).get("tag", alarm.service)
+    tag = type_meta(alarm.resource_type).get("tag", alarm.service)
     name = alarm.resource_name if not alarm.sub_object else f"{alarm.resource_name} / {alarm.sub_object}"
     if kind == "RESOLVED":
         head, body = f"【已恢复】【{env_tag}】【{tag}】", f"{name} {alarm.title}，持续 {humanize(_duration(alarm, now))}"
@@ -78,7 +78,7 @@ def mail_context(db: Session, alarm: AlarmEvent, kind: str, recipient: str = "",
                  now: datetime | None = None) -> dict:
     s = get_settings()
     rule = db.get(AlarmRule, alarm.rule_id)
-    rt = RESOURCE_TYPES.get(alarm.resource_type, {})
+    rt = type_meta(alarm.resource_type)
     detail = alarm.detail or {}
     resolved = kind == "RESOLVED"
     duration = _duration(alarm, now)

@@ -15,12 +15,15 @@ def load_yaml_rules(path: Path = DEFAULT_RULES) -> list[dict]:
 
 
 def sync_default_rules(db: Session) -> int:
-    """把内置规则写入数据库（已存在的规则不覆盖，保留页面上的调整）。"""
+    """把内置规则写入数据库（已存在的规则不覆盖，保留页面上的调整；只给还没有处理建议的规则补上内置的处理建议）。"""
     added = 0
     for r in load_yaml_rules():
-        if db.get(AlarmRule, r["id"]) is None:
+        row = db.get(AlarmRule, r["id"])
+        if row is None:
             db.add(AlarmRule(**{"scope": {}, "recover": {}, "for_count": 1, **r}, updated_by="system"))
             added += 1
+        elif not (row.runbook or "").strip() and r.get("runbook"):
+            row.runbook = r["runbook"]
     db.commit()
     return added
 

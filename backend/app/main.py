@@ -11,6 +11,7 @@ from sqlalchemy import text
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import __version__, models  # noqa: F401  注册全部 ORM 模型
+from app.api.metrics import router as metrics_router
 from app.api.router import api_router
 from app.core.config import get_settings
 from app.core.db import Base, SessionLocal, engine
@@ -72,6 +73,7 @@ def create_app() -> FastAPI:
         return _err(500, ErrorCode.INTERNAL, "服务器内部错误", {"request_id": getattr(request.state, "request_id", None)})
 
     app.include_router(api_router)
+    app.include_router(metrics_router)
 
     @app.get("/healthz", include_in_schema=False)
     def healthz():

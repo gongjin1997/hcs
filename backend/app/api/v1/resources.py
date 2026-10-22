@@ -1,7 +1,7 @@
 """资源台账：分类与类型、列表、汇总、变更记录、导出 Excel、手动同步、详情、维护管理字段。全部按租户范围过滤。"""
 from datetime import timedelta
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, File, Query, UploadFile
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
@@ -10,6 +10,7 @@ from app.core.db import get_db
 from app.core.deps import CurrentUser, Scope, get_scope, require_perm
 from app.core.response import ApiResponse, BizError, ErrorCode, Page, not_found, ok
 from app.core.xlsx import xlsx_response
+from app.ledger import importer
 from app.ledger.excel import export_ledger
 from app.ledger.sync import LEDGER_TASK, _change, record_manual_change, sync_all
 from app.models import AlarmEvent, InspectionRun, Resource, ResourceChange
@@ -18,6 +19,7 @@ from app.models.base import utcnow
 from app.schemas.alarm import AlarmOut
 from app.schemas.resource import ChangeOut, ResourceOut, ResourcePatch
 from app.services.catalog import CATEGORIES, ENV_TYPES, LEDGER_TYPES, RESOURCE_TYPES, category_types, ledger_categories
+from app.services import collect_switch, settings_service
 from app.services.tenancy import tenant_map
 
 router = APIRouter(prefix="/resources", tags=["资源台账"])
@@ -62,14 +64,25 @@ def resource_types(db: Session = Depends(get_db), scope: Scope = Depends(get_sco
                              .group_by(Resource.resource_type)).all())
     abnormal = dict(db.execute(scope.apply(select(Resource.resource_type, func.count()).where(
         active, Resource.health.notin_(("OK", "UNKNOWN"))), Resource.tenant_id).group_by(Resource.resource_type)).all())
+    sw = collect_switch.load(db)
+    tenants = [t for t in tenant_map(db).values() if scope.allows(t.id)]
+
+    def collect(code: str) -> dict:
+        off = [t.short_name or t.name for t in tenants if not sw.enabled(t.id, code)]
+        return {"enabled": len(off) < len(tenants) or not tenants, "off_tenants": off, "global": sw.enabled(None, code)}
+
     types = [{"code": k, "name": v["name"], "category": v["category"], "service": v["service"],
               "ledger": v["ledger"], "inspected": "group" in v, "columns": v["columns"],
-              "total": counts.get(k, 0), "abnormal": abnormal.get(k, 0)} for k, v in RESOURCE_TYPES.items()]
+              "total": counts.get(k, 0), "abnormal": abnormal.get(k, 0), "collect": collect(k)}
+             for k, v in RESOURCE_TYPES.items()]
     cats = [{**c, "total": sum(t["total"] for t in types if t["category"] == c["code"]),
              "abnormal": sum(t["abnormal"] for t in types if t["category"] == c["code"])} for c in CATEGORIES]
+    d = settings_service.get_ledger_dict(db)
     return ok({"categories": cats, "types": types, "env_types": ENV_TYPES,
                "options": {"business": _distinct(db, Resource.business, scope),
-                           "owner": _distinct(db, Resource.owner, scope)}})
+                           "owner": _distinct(db, Resource.owner, scope)},
+               "dict": {"business": [i.name for i in d.business], "owners": [i.name for i in d.owners],
+                        "enforce": d.enforce}})
 
 
 @router.get("", response_model=ApiResponse[Page[ResourceOut]], summary="台账列表", dependencies=[VIEW])
@@ -208,6 +221,67 @@ def sync_now(resource_type: str | None = None, db: Session = Depends(get_db), sc
                "changes": sum(i["changes"] for i in items)})
 
 
+# ---------------- 台账字典 / Excel 批量导入 ----------------
+@router.get("/dict", summary="台账字典（业务系统 / 负责人的统一取值，含使用次数与字典外的取值）", dependencies=[VIEW])
+def get_dict(db: Session = Depends(get_db), scope: Scope = Depends(get_scope)):
+    d = settings_service.get_ledger_dict(db)
+    out: dict = {"enforce": d.enforce, **settings_service.meta(db, "ledger_dict")}
+    for key, col in (("business", Resource.business), ("owners", Resource.owner)):
+        used = dict(db.execute(scope.apply(select(col, func.count()).where(Resource.lifecycle == "ACTIVE",
+                                                                           col.is_not(None)), Resource.tenant_id)
+                               .group_by(col)).all())
+        items = getattr(d, key)
+        names = {i.name for i in items}
+        out[key] = [{**i.model_dump(), "used": used.get(i.name, 0)} for i in items]
+        out[f"{key}_outside"] = sorted(({"name": k, "used": v} for k, v in used.items() if k and k not in names),
+                                       key=lambda x: -x["used"])
+    return ok(out)
+
+
+@router.put("/dict", summary="保存台账字典（开启“只能从字典选择”后，页面编辑和 Excel 导入只接受字典中的取值）")
+def put_dict(body: dict, db: Session = Depends(get_db), scope: Scope = Depends(get_scope),
+             audit: Auditor = Depends(get_auditor), cu: CurrentUser = Depends(require_perm("ledger:edit"))):
+    if not scope.full:
+        raise BizError(ErrorCode.FORBIDDEN, "台账字典为全局配置，修改需要全部租户的数据权限", 403)
+    value, diff = settings_service.save(db, "ledger_dict", body, cu.display_name or cu.username)
+    if diff:
+        audit.log("ledger.dict", target_type="setting", target_id="ledger_dict", target_name="台账字典",
+                  detail={"changes": {k: v if k == "enforce" else [len(v[0] or []), len(v[1] or [])]
+                                      for k, v in diff.items()}})
+    else:
+        db.commit()
+    return ok(value.model_dump(mode="json"))
+
+
+@router.get("/import/template", summary="下载导入模板（按筛选导出在用资源，已带当前取值）")
+def import_template(resource_type: str | None = None, category: str | None = None, db: Session = Depends(get_db),
+                    scope: Scope = Depends(get_scope), _: CurrentUser = Depends(require_perm("ledger:edit"))):
+    types = [t for t in (_types_for(resource_type, category) or LEDGER_TYPES) if RESOURCE_TYPES[t]["ledger"]]
+    data = importer.template(db, types, scope.tenant_ids)
+    return xlsx_response(data, f"台账管理字段导入模板_{utcnow().astimezone().strftime('%Y%m%d_%H%M')}.xlsx")
+
+
+@router.post("/import", summary="Excel 批量导入管理字段（dry_run=true 只预览；确认后 dry_run=false 写入）")
+def import_ledger(file: UploadFile = File(...), dry_run: bool = Query(True),
+                        skip_errors: bool = Query(False, description="有错误行时跳过错误行，只导入正确的行"),
+                        db: Session = Depends(get_db), scope: Scope = Depends(get_scope),
+                        audit: Auditor = Depends(get_auditor), cu: CurrentUser = Depends(require_perm("ledger:edit"))):
+    content = file.file.read(10 * 1024 * 1024 + 1)
+    if len(content) > 10 * 1024 * 1024:
+        raise BizError(ErrorCode.BAD_REQUEST, "文件不能超过 10 MB")
+    res, todo = importer.parse(db, content, scope.tenant_ids, settings_service.get_ledger_dict(db))
+    out = res.as_dict()
+    if dry_run:
+        return ok({**out, "dry_run": True})
+    if res.errors and not skip_errors:
+        raise BizError(ErrorCode.BAD_REQUEST, f"有 {len(res.errors)} 行校验未通过，请修改后重新上传或选择跳过错误行", 400, out)
+    n = importer.apply(db, todo, cu.display_name or cu.username)
+    audit.log("ledger.import", target_type="ledger", target_name=file.filename or "Excel", tenant_id=scope.single,
+              detail={"rows": res.total, "changed": n, "skipped_errors": len(res.errors),
+                      "resources": [i["name"] for i in res.items[:50]]})
+    return ok({**out, "dry_run": False, "applied": n})
+
+
 @router.get("/{rid}", summary="资源详情（台账信息 + 告警 + 变更记录 + 状态时间线）", dependencies=[VIEW])
 def get_resource(rid: int, db: Session = Depends(get_db), scope: Scope = Depends(get_scope)):
     r = _get(db, scope, rid)
@@ -239,6 +313,12 @@ def patch_resource(rid: int, body: ResourcePatch, db: Session = Depends(get_db),
     data = body.model_dump(exclude_unset=True)
     if "env_type" in data and data["env_type"] not in (None, *ENV_TYPES):
         raise BizError(ErrorCode.BAD_REQUEST, f"环境取值：{'/'.join(ENV_TYPES)}")
+    d = settings_service.get_ledger_dict(db)
+    if d.enforce:                                  # 台账字典：只能从字典中选择
+        for key, items, label in (("owner", d.owners, "负责人"), ("business", d.business, "业务系统")):
+            v = (data.get(key) or "").strip() if isinstance(data.get(key), str) else data.get(key)
+            if v and v != getattr(r, key) and v not in {i.name for i in items}:
+                raise BizError(ErrorCode.BAD_REQUEST, f"{label}“{v}”不在台账字典中（已开启只能从字典选择）")
     expected = data.pop("expected_state", None)
     before = {k: getattr(r, k) for k in data}
     for k, v in data.items():

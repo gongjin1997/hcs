@@ -14,6 +14,7 @@ class InspectionTask(Base):
     name: Mapped[str] = mapped_column(String(64))
     service: Mapped[str] = mapped_column(String(32))
     interval_sec: Mapped[int] = mapped_column(Integer)
+    cron: Mapped[str | None] = mapped_column(String(64))              # 设置后按 crontab 执行（优先于 interval_sec）
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     params: Mapped[dict] = mapped_column(JsonType, default=dict)
 

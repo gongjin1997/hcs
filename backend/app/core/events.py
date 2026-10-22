@@ -25,6 +25,10 @@ class Broadcaster:
     def unsubscribe(self, q: asyncio.Queue) -> None:
         self._subs.discard(q)
 
+    @property
+    def count(self) -> int:
+        return len(self._subs)
+
     def _deliver(self, event: dict) -> None:
         for q in list(self._subs):
             if not q.full():

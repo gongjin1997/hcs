@@ -23,7 +23,8 @@ from app.models.base import utcnow
 from app.rules.evaluator import evaluate_rule
 from app.rules.loader import rules_by_target
 
-from . import alarm_service
+from . import alarm_service, collect_switch, platform_watch
+from .cleanup import CLEANUP_TASK, run_cleanup
 from .catalog import HEALTH_BY_SEVERITY, RESOURCE_TYPES
 from .tenancy import Target, legacy_target, resolve_targets
 
@@ -115,6 +116,8 @@ def process_observations(db: Session, service: str, observations: list[Observati
 def run_task(db: Session, task_code: str, *, client: HcsClient | None = None, target: Target | None = None,
              trigger: str = "SCHEDULE") -> InspectionRun:
     """对单个租户目标执行一次任务（target 为空时按环境变量单账号兜底）。"""
+    if task_code == CLEANUP_TASK:                  # 数据清理：全局执行一次，不区分租户
+        return run_cleanup_task(db, trigger=trigger)
     target = target or legacy_target()
     if task_code == LEDGER_TASK:                   # 台账同步与巡检共用任务调度、运行记录
         return sync_ledger(db, client=client, target=target, trigger=trigger)
@@ -152,16 +155,47 @@ def run_task(db: Session, task_code: str, *, client: HcsClient | None = None, ta
         client_calls = client.calls if client is not None else 0
     run.finished_at, run.api_calls = utcnow(), client_calls
     db.commit()
+    platform_watch.on_run(db, run)
     for ev in events:
         publish(ev)
     return run
 
 
+def run_cleanup_task(db: Session, trigger: str = "SCHEDULE") -> InspectionRun:
+    run = InspectionRun(task_code=CLEANUP_TASK, tenant_id=None, trigger_type=trigger, started_at=utcnow(),
+                        status="RUNNING", stats={})
+    db.add(run)
+    db.commit()
+    try:
+        deleted = run_cleanup(db)
+        run.status, run.stats = "SUCCESS", deleted
+        run.resource_total = sum(deleted.values())
+    except Exception as e:  # noqa: BLE001
+        log.exception("data cleanup failed")
+        db.rollback()
+        run.status, run.error_summary = "FAILED", f"{type(e).__name__}: {e}"[:500]
+    run.finished_at = utcnow()
+    db.commit()
+    platform_watch.on_run(db, run)
+    return run
+
+
+def skipped_targets(db: Session, task_code: str, tenant_ids: list[int] | None = None) -> list[Target]:
+    """因采集开关关闭而跳过的租户目标（立即执行时提示用户）。"""
+    sw = collect_switch.load(db)
+    return [t for t in resolve_targets(db, tenant_ids) if not sw.task_enabled(t.tenant_id, task_code)]
+
+
 def run_all(db: Session, task_code: str, *, trigger: str = "SCHEDULE", tenant_ids: list[int] | None = None,
             http: httpx.Client | None = None, mock_url: str | None = None) -> list[InspectionRun]:
-    """按租户逐个执行（某个租户失败不影响其他租户）。"""
+    """按租户逐个执行（某个租户失败不影响其他租户）；采集开关关闭的租户跳过，不产生运行记录。"""
+    if task_code == CLEANUP_TASK:
+        return [run_cleanup_task(db, trigger=trigger)]
     runs = []
+    sw = collect_switch.load(db)
     for t in resolve_targets(db, tenant_ids):
+        if not sw.task_enabled(t.tenant_id, task_code):
+            continue
         try:
             client = t.client(http=http, mock_url=mock_url)
         except HcsError as e:            # 例如租户未配置 AK/SK：记一条失败的运行记录
@@ -169,6 +203,7 @@ def run_all(db: Session, task_code: str, *, trigger: str = "SCHEDULE", tenant_id
                                 finished_at=utcnow(), status="FAILED", error_summary=str(e), stats={})
             db.add(run)
             db.commit()
+            platform_watch.on_run(db, run)
             runs.append(run)
             continue
         runs.append(run_task(db, task_code, client=client, target=t, trigger=trigger))

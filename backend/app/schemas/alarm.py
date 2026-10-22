@@ -17,6 +17,7 @@ class AlarmOut(ORMModel):
     severity: str
     status: str
     suppress_reason: str | None = None
+    silence_id: int | None = None
     title: str
     check_item: str
     current_value: str | None = None

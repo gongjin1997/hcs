@@ -3,6 +3,7 @@
 SERVICES = {
     "ecs": "ECS", "evs": "EVS", "vpc": "VPC", "elb": "ELB", "rds": "RDS", "dms": "DMS Kafka", "cce": "CCE",
     "dws": "DWS", "css": "CSS", "dataarts": "DataArts Studio", "mrs": "MRS", "gaussdb": "GaussDB", "dcs": "DCS",
+    "platform": "巡检平台",
 }
 
 # 台账分类（资源台账页左侧导航）
@@ -84,6 +85,14 @@ RESOURCE_TYPES: dict[str, dict] = {
 }
 LEDGER_TYPES = [k for k, v in RESOURCE_TYPES.items() if v["ledger"]]
 
+# 平台自身告警的对象类型（service = platform，见 app.services.platform_watch）：不进台账、不参与健康分、没有采集开关
+PLATFORM_TYPES: dict[str, dict] = {
+    "platform_task": {"service": "platform", "name": "巡检任务", "tag": "平台", "ledger": False},
+    "platform_tenant": {"service": "platform", "name": "租户接入", "tag": "平台", "ledger": False},
+    "platform_notify": {"service": "platform", "name": "通知投递", "tag": "平台", "ledger": False},
+    "platform_worker": {"service": "platform", "name": "后台进程", "tag": "平台", "ledger": False},
+}
+
 ENV_TYPES = {"PROD": "生产", "TEST": "测试", "DEV": "开发"}
 # GaussDB 部署形态（台账同步与巡检采集共用同一口径，避免两边写入的属性互相覆盖被误判为变更）
 GAUSSDB_DEPLOY = {"Ha": "主备", "Independent": "独立部署", "Distributed": "分布式"}
@@ -113,8 +122,13 @@ RESOURCE_SCORE = {None: 100, "P4": 95, "P3": 80, "P2": 60, "P1": 0}   # 资源�
 CRITICAL_WEIGHT = 3
 
 
+def type_meta(code: str) -> dict:
+    """资源类型字典（含平台自身告警的对象类型）。"""
+    return RESOURCE_TYPES.get(code) or PLATFORM_TYPES.get(code) or {}
+
+
 def type_name(code: str) -> str:
-    return RESOURCE_TYPES.get(code, {}).get("name", code)
+    return type_meta(code).get("name", code)
 
 
 def category_types(category: str) -> list[str]:

@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     init_admin_password: str | None = None            # 首次部署创建 admin 的口令（python -m app.workers.bootstrap）
     base_url: str = "http://localhost:5173"           # 邮件链接前缀（控制台地址）
     mail_link_secret: str = "change-me-too"
+    metrics_token: str | None = None                  # /metrics 访问令牌（Authorization: Bearer）；为空时不校验，只应在内网暴露
 
     # SMTP（本地开发可用 mailpit：localhost:1025）
     smtp_host: str = "localhost"

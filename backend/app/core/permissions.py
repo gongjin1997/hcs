@@ -11,6 +11,7 @@ PERMISSIONS: list[dict[str, str]] = [
     {"code": "dashboard:view", "name": "查看总览 / 大屏", "group": "总览"},
     {"code": "alarm:view", "name": "查看告警", "group": "告警中心"},
     {"code": "alarm:handle", "name": "认领 / 关闭告警", "group": "告警中心"},
+    {"code": "silence:manage", "name": "创建 / 取消静默与维护窗口", "group": "告警中心"},
     {"code": "podevent:view", "name": "查看容器事件", "group": "容器事件"},
     {"code": "podevent:config", "name": "配置背压探针 / 手动采集", "group": "容器事件"},
     {"code": "ledger:view", "name": "查看资源台账", "group": "资源台账"},
@@ -20,23 +21,28 @@ PERMISSIONS: list[dict[str, str]] = [
     {"code": "report:view", "name": "查看 / 导出报表", "group": "报表中心"},
     {"code": "report:manage", "name": "生成 / 发送报表", "group": "报表中心"},
     {"code": "report:delete", "name": "删除报表", "group": "报表中心"},
+    {"code": "report:config", "name": "报表设置（发送时间 / 收件人）", "group": "报表中心"},
     {"code": "rule:view", "name": "查看规则", "group": "规则管理"},
     {"code": "rule:edit", "name": "修改规则", "group": "规则管理"},
     {"code": "notify:view", "name": "查看通知路由与记录", "group": "通知"},
+    {"code": "notify:manage", "name": "编辑通知路由 / 联系组 / 联系人", "group": "通知"},
     {"code": "task:view", "name": "查看巡检任务", "group": "系统管理"},
     {"code": "task:run", "name": "立即执行任务", "group": "系统管理"},
+    {"code": "task:edit", "name": "修改任务周期 / 启停", "group": "系统管理"},
+    {"code": "collect:manage", "name": "采集开关（按资源类型启停）", "group": "系统管理"},
     {"code": "tenant:view", "name": "查看租户接入", "group": "系统管理"},
     {"code": "tenant:manage", "name": "管理租户接入（含 AK/SK）", "group": "系统管理"},
     {"code": "user:manage", "name": "用户管理", "group": "系统管理"},
     {"code": "role:manage", "name": "角色与权限", "group": "系统管理"},
     {"code": "audit:view", "name": "查看操作审计", "group": "系统管理"},
+    {"code": "setting:manage", "name": "系统设置（数据保留 / 平台告警）", "group": "系统管理"},
 ]
 PERMISSION_CODES: list[str] = [p["code"] for p in PERMISSIONS]
 PERMISSION_NAMES: dict[str, str] = {p["code"]: p["name"] for p in PERMISSIONS}
 
 _VIEW = ["dashboard:view", "alarm:view", "podevent:view", "ledger:view", "report:view", "rule:view", "notify:view",
          "task:view"]
-_SYSTEM = {"tenant:manage", "user:manage", "role:manage"}
+_SYSTEM = {"tenant:manage", "user:manage", "role:manage", "setting:manage"}
 
 BUILTIN_ROLES: list[dict] = [
     {"code": "admin", "name": "平台管理员", "permissions": [ALL],
@@ -45,8 +51,8 @@ BUILTIN_ROLES: list[dict] = [
      "description": "全部业务功能（含规则修改、报表删除、操作审计），不含系统管理"},
     {"code": "oncall", "name": "值班运维",
      "permissions": [*_VIEW, "tenant:view", "alarm:handle", "ledger:edit", "ledger:sync", "ledger:export",
-                     "report:manage", "task:run"],
-     "description": "日常值班：处置告警、维护台账、生成 / 发送报表、执行巡检任务"},
+                     "report:manage", "task:run", "silence:manage"],
+     "description": "日常值班：处置告警、静默 / 维护窗口、维护台账、生成 / 发送报表、执行巡检任务"},
     {"code": "viewer", "name": "只读访客", "permissions": list(_VIEW),
      "description": "只能查看，不能做任何修改（适合领导、业务方）"},
 ]
@@ -66,3 +72,10 @@ def normalize(perms: list[str]) -> list[str]:
     if unknown:
         raise ValueError(f"未知权限点：{', '.join(unknown)}")
     return [ALL] if ALL in perms else [c for c in PERMISSION_CODES if c in perms]
+
+
+# 各版本新增的权限点 → 升级时自动补给哪些内置角色（迁移脚本使用；自定义角色不自动修改）
+ADDED_IN: dict[str, dict[str, list[str]]] = {
+    "0.4.0": {"ops_lead": ["silence:manage", "report:config", "notify:manage", "task:edit", "collect:manage"],
+              "oncall": ["silence:manage"]},
+}

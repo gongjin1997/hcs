@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.collectors.base import Observation, RunContext
 from app.core.config import get_settings
+from app.services import settings_service
 from app.hcs import HcsError
 from app.ledger.fetchers import parse_time
 from app.models import PodEvent, PodProbe, PodState, Resource
@@ -92,7 +93,9 @@ class _Run:
         self.db_: Session = ctx.db
         self.bp = re.compile(s.pod_backpressure_pattern)
         self.recover = timedelta(minutes=s.pod_backpressure_recover_min)
-        self.retention = timedelta(days=s.pod_event_retention_days)
+        # 保留天数以“系统设置 → 数据保留”为准（未设置时取环境变量 INSPECTOR_POD_EVENT_RETENTION_DAYS）
+        self.retention = timedelta(days=settings_service.get_retention(ctx.db).pod_event_days) if ctx.db is not None \
+            else timedelta(days=s.pod_event_retention_days)
         self.exclude = set(ctx.params.get("exclude_namespaces", ["kube-public", "kube-node-lease"]))
         self.probes = list(self.db_.scalars(select(PodProbe).where(
             PodProbe.tenant_id == ctx.tenant_id, PodProbe.enabled.is_(True)))) if ctx.tenant_id is not None else []

@@ -37,7 +37,47 @@ def create_token(sub: str, uid: int, remember: bool = False) -> str:
 
 
 def decode_token(token: str) -> dict:
-    return jwt.decode(token, get_settings().jwt_secret, algorithms=[ALGO])
+    payload = jwt.decode(token, get_settings().jwt_secret, algorithms=[ALGO])
+    if payload.get("typ"):                       # SSE 票据等专用令牌不能当作登录令牌使用
+        raise jwt.InvalidTokenError("not an access token")
+    return payload
+
+
+SSE_TTL = 60
+_used_tickets: dict[str, float] = {}
+
+
+def create_sse_ticket(sub: str, uid: int) -> str:
+    """SSE 一次性票据：EventSource 不能设置请求头，用 60 秒有效、只能使用一次的票据代替把登录令牌放进 URL
+    （登录令牌出现在 URL 中会被 Nginx 访问日志、浏览器历史记录下来）。"""
+    now = int(time.time())
+    payload = {"sub": sub, "uid": uid, "typ": "sse", "jti": base64.urlsafe_b64encode(os.urandom(12)).decode(),
+               "iat": now, "exp": now + SSE_TTL}
+    return jwt.encode(payload, get_settings().jwt_secret, algorithm=ALGO)
+
+
+def consume_sse_ticket(ticket: str) -> dict:
+    """校验并作废票据（配置 Redis 时多进程共享已用记录）。失败抛 jwt.PyJWTError。"""
+    payload = jwt.decode(ticket, get_settings().jwt_secret, algorithms=[ALGO])
+    if payload.get("typ") != "sse" or not payload.get("jti"):
+        raise jwt.InvalidTokenError("not an sse ticket")
+    jti, now = str(payload["jti"]), time.time()
+    url = get_settings().redis_url
+    if url:
+        try:
+            import redis
+
+            if not redis.Redis.from_url(url).set(f"inspector:sse:{jti}", 1, nx=True, ex=SSE_TTL * 2):
+                raise jwt.InvalidTokenError("ticket already used")
+            return payload
+        except redis.RedisError:
+            pass                                 # Redis 不可用时退回进程内记录
+    for k in [k for k, exp in _used_tickets.items() if exp < now]:
+        _used_tickets.pop(k, None)
+    if jti in _used_tickets:
+        raise jwt.InvalidTokenError("ticket already used")
+    _used_tickets[jti] = now + SSE_TTL * 2
+    return payload
 
 
 def _mail_sig(msg: str) -> str:

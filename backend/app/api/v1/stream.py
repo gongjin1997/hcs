@@ -1,20 +1,32 @@
+"""告警实时推送（SSE）。
+
+EventSource 不能设置请求头：前端先用登录令牌换取 60 秒有效、只能用一次的票据（POST /stream/ticket），
+再用票据建立连接（GET /stream/alarms?ticket=...），登录令牌不会出现在 URL 和 Nginx 访问日志里。
+连接断开后前端重新换票据再连（见 frontend/src/composables/useAlarmStream.ts）。
+"""
 import asyncio
 import json
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 
-from app.core.deps import scope_of, user_from_token
+from app.core.deps import CurrentUser, require_perm, scope_of, user_from_ticket
 from app.core.events import broadcaster
-from app.core.response import BizError, ErrorCode
+from app.core.response import BizError, ErrorCode, ok
+from app.core.security import SSE_TTL, create_sse_ticket
 
 router = APIRouter(tags=["实时推送"])
 
 
+@router.post("/stream/ticket", summary="换取 SSE 一次性票据（60 秒内有效，只能使用一次）")
+def ticket(cu: CurrentUser = Depends(require_perm("alarm:view"))):
+    return ok({"ticket": create_sse_ticket(cu.username, cu.id), "expires_in": SSE_TTL})
+
+
 @router.get("/stream/alarms", summary="告警实时推送（SSE，按用户租户范围过滤）")
-async def alarm_stream(request: Request, token: str = Query(..., description="EventSource 无法设置 Header，Token 走 Query"),
+async def alarm_stream(request: Request, ticket: str = Query(..., description="POST /stream/ticket 换取的一次性票据"),
                        tenant: str | None = Query(None, description="顶部租户切换（可选）")):
-    user = user_from_token(token)
+    user = await asyncio.to_thread(user_from_ticket, ticket)
     if not user.can("alarm:view"):
         raise BizError(ErrorCode.FORBIDDEN, "缺少权限：查看告警", 403)
     scope = scope_of(user, tenant)
