@@ -22,7 +22,7 @@ def test_dashboard(client, admin, tenant_ids):
     assert 0 <= data["health_score"] <= 100
     assert [g["code"] for g in data["groups"]] == ["ecs", "dgc_realtime", "dgc_batch", "mrs", "gaussdb", "dcs", "cce"]
     assert len(data["trend"]["hours"]) == 24
-    assert data["kpis"]["active_alarms"] == 29 and data["kpis"]["p1"] == 4 and data["kpis"]["resources"] == 97
+    assert data["kpis"]["active_alarms"] == 30 and data["kpis"]["p1"] == 4 and data["kpis"]["resources"] == 97
     assert data["ledger"]["total"] == 196 and len(data["ledger"]["by_category"]) == 5
     tenants = {t["code"]: t for t in data["tenants"]}
     assert set(tenants) == {"tenant-a", "tenant-b"}
@@ -33,7 +33,7 @@ def test_dashboard(client, admin, tenant_ids):
     assert data["pods"]["restarts_24h"] > 0 and data["pods"]["top_restart"][0]["workload"] == "web/portal-api"
     # 顶部切换到租户A：只统计租户A 的数据
     a = client.get("/api/v1/dashboard/summary", headers={**admin, "X-Tenant-Id": str(tenant_ids["tenant-a"])}).json()
-    assert a["data"]["ledger"]["total"] == 138 and a["data"]["kpis"]["active_alarms"] == 22
+    assert a["data"]["ledger"]["total"] == 138 and a["data"]["kpis"]["active_alarms"] == 23   # 含 1 条平台告警
     assert [t["code"] for t in a["data"]["tenants"]] == ["tenant-a"]
 
 
@@ -74,7 +74,8 @@ def test_oncall_can_operate_but_not_manage(client):
 
 def test_resources_and_rules(client, admin):
     meta = client.get("/api/v1/resources/types", headers=admin).json()["data"]
-    assert set(meta) == {"categories", "types", "env_types", "options"}
+    assert set(meta) == {"categories", "types", "env_types", "options", "dict"}
+    assert all(t["collect"]["enabled"] for t in meta["types"])
     assert "电商交易" in meta["options"]["business"] and "张伟" in meta["options"]["owner"]
     assert {t["code"] for t in meta["types"]} >= {"ecs_server", "dcs_instance", "dgc_realtime_job", "cce_workload"}
     page = client.get("/api/v1/resources", params={"resource_type": "dcs_instance"}, headers=admin).json()["data"]

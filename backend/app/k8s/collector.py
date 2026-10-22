@@ -19,11 +19,11 @@ from sqlalchemy.orm import Session
 
 from app.collectors.base import Observation, RunContext
 from app.core.config import get_settings
-from app.services import settings_service
 from app.hcs import HcsError
 from app.ledger.fetchers import parse_time
 from app.models import PodEvent, PodProbe, PodState, Resource
 from app.models.base import utcnow
+from app.services import settings_service
 
 from .catalog import EVENT_TYPES, RESTART_TYPES, classify, match_selector, workload_from_name, workload_of
 from .kube import KubeApi, aggregate, parse_metric

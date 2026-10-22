@@ -18,8 +18,8 @@ from app.models.alarm import ACTIVE_STATUSES
 from app.models.base import utcnow
 from app.schemas.alarm import AlarmOut
 from app.schemas.resource import ChangeOut, ResourceOut, ResourcePatch
-from app.services.catalog import CATEGORIES, ENV_TYPES, LEDGER_TYPES, RESOURCE_TYPES, category_types, ledger_categories
 from app.services import collect_switch, settings_service
+from app.services.catalog import CATEGORIES, ENV_TYPES, LEDGER_TYPES, RESOURCE_TYPES, category_types, ledger_categories
 from app.services.tenancy import tenant_map
 
 router = APIRouter(prefix="/resources", tags=["资源台账"])

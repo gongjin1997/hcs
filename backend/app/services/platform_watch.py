@@ -15,13 +15,24 @@ import os
 import re
 import socket
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import __version__
-from app.models import AlarmEvent, AlarmEventLog, HcsAccount, InspectionRun, InspectionTask, Notification, Role, User
-from app.models import WorkerHeartbeat
+from app.core.config import get_settings
+from app.models import (
+    AlarmEvent,
+    AlarmEventLog,
+    HcsAccount,
+    InspectionRun,
+    InspectionTask,
+    Notification,
+    Role,
+    User,
+    WorkerHeartbeat,
+)
 from app.models.alarm import ACTIVE_STATUSES
 from app.models.base import utcnow
 
@@ -60,7 +71,7 @@ def fallback_recipients(db: Session) -> list[str]:
 def raise_alarm(db: Session, rule_id: str, key: str, *, name: str, title: str, tenant_id: int | None = None,
                 detail: dict | None = None, now: datetime | None = None) -> AlarmEvent | None:
     """产生（或刷新）一条平台告警；已存在活动告警时只刷新标题和次数。返回新产生的告警。"""
-    from . import alarm_service, silence_service        # 延迟导入：alarm_service → platform_watch 不形成循环
+    from . import alarm_service, silence_service  # 延迟导入：alarm_service → platform_watch 不形成循环
 
     cfg = settings_service.get_platform_alarm(db)
     if not cfg.enabled:
@@ -76,7 +87,9 @@ def raise_alarm(db: Session, rule_id: str, key: str, *, name: str, title: str, t
                        service=PLATFORM, resource_type=rule["resource_type"], resource_name=name[:255], sub_object="",
                        severity=cfg.severity, status="FIRING", title=title[:255], check_item=rule["check_item"],
                        current_value=None, threshold_text=None, owner=None, first_seen=now, last_seen=now,
-                       detail={"platform": True, "key": key, **(detail or {})})
+                       detail={"platform": True, "key": key,
+                               **({"tenant": _tenant_label(db, tenant_id)} if tenant_id is not None else {}),
+                               **(detail or {})})
     db.add(alarm)
     db.flush()
     db.add(AlarmEventLog(alarm_id=alarm.id, action="FIRE", to_status="FIRING", operator="system",
@@ -108,6 +121,10 @@ def resolve_alarm(db: Session, rule_id: str, key: str, note: str, now: datetime 
         if to:
             alarm_service.enqueue_notification(db, active, "RESOLVED", now, recipients=to)
     return True
+
+
+def _local(t: datetime) -> str:
+    return t.astimezone(ZoneInfo(get_settings().timezone)).strftime("%m-%d %H:%M:%S")
 
 
 def _tenant_label(db: Session, tenant_id: int | None) -> str:
@@ -142,8 +159,8 @@ def _on_run(db: Session, run: InspectionRun) -> None:
         return
     error = (run.error_summary or "")[:300]
     if cfg.auth_fail_alarm and run.tenant_id is not None and AUTH_ERROR.search(error):
-        raise_alarm(db, "R-PLAT-002", f"tenant:{run.tenant_id}", name=f"{tenant} · HCS 认证",
-                    title=f"{tenant} 调用 HCS 接口认证失败（{task_name}）", tenant_id=run.tenant_id,
+        raise_alarm(db, "R-PLAT-002", f"tenant:{run.tenant_id}", name="HCS 接口认证",
+                    title=f"认证失败（{task_name}）：{error[:60]}", tenant_id=run.tenant_id,
                     detail={"task": run.task_code, "error": error})
     recent = list(db.scalars(select(InspectionRun.status).where(
         InspectionRun.task_code == run.task_code,
@@ -151,8 +168,8 @@ def _on_run(db: Session, run: InspectionRun) -> None:
         InspectionRun.status != "RUNNING").order_by(InspectionRun.started_at.desc(), InspectionRun.id.desc())
         .limit(cfg.task_fail_threshold)))
     if len(recent) >= cfg.task_fail_threshold and all(s == "FAILED" for s in recent):
-        raise_alarm(db, "R-PLAT-001", key, name=f"{task_name} · {tenant}",
-                    title=f"{task_name}（{tenant}）连续 {cfg.task_fail_threshold} 次执行失败", tenant_id=run.tenant_id,
+        raise_alarm(db, "R-PLAT-001", key, name=task_name,
+                    title=f"连续 {cfg.task_fail_threshold} 次执行失败：{error[:60]}", tenant_id=run.tenant_id,
                     detail={"task": run.task_code, "error": error, "threshold": cfg.task_fail_threshold})
 
 
@@ -163,8 +180,8 @@ def on_notification_failed(db: Session, n: Notification) -> None:
     alarm = db.get(AlarmEvent, n.alarm_id) if n.alarm_id else None
     if alarm is not None and alarm.service == PLATFORM and alarm.rule_id == "R-PLAT-003":
         return                                   # 通知失败告警本身发不出去时不再套娃
-    raise_alarm(db, "R-PLAT-003", "smtp", name="通知投递 · SMTP",
-                title=f"告警通知重试 {n.retry} 次后仍发送失败：{(n.error or '')[:80]}",
+    raise_alarm(db, "R-PLAT-003", "smtp", name="告警通知（SMTP）",
+                title=f"重试 {n.retry} 次后仍发送失败：{(n.error or '')[:60]}",
                 detail={"notification_id": n.id, "error": (n.error or "")[:300], "recipients": n.recipients[:5]})
 
 
@@ -198,7 +215,7 @@ def check_heartbeats(db: Session, workers: list[str] | None = None, now: datetim
             late.append(name)
             mins = int((now - hb.beat_at).total_seconds() // 60)
             raise_alarm(db, "R-PLAT-004", name, name=f"{WORKERS.get(name, name)}（{hb.host}）",
-                        title=f"{WORKERS.get(name, name)} 已 {mins} 分钟没有心跳（{hb.host}）",
+                        title=f"已 {mins} 分钟没有心跳（最后心跳 {_local(hb.beat_at)}）",
                         detail={"worker": name, "host": hb.host, "beat_at": hb.beat_at.isoformat()}, now=now)
         else:
             resolve_alarm(db, "R-PLAT-004", name, f"{WORKERS.get(name, name)} 心跳已恢复", now=now)

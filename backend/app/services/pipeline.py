@@ -24,8 +24,8 @@ from app.rules.evaluator import evaluate_rule
 from app.rules.loader import rules_by_target
 
 from . import alarm_service, collect_switch, platform_watch
-from .cleanup import CLEANUP_TASK, run_cleanup
 from .catalog import HEALTH_BY_SEVERITY, RESOURCE_TYPES
+from .cleanup import CLEANUP_TASK, run_cleanup
 from .tenancy import Target, legacy_target, resolve_targets
 
 log = logging.getLogger(__name__)

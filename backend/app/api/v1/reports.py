@@ -101,11 +101,12 @@ def _schedule(db: Session, scope: Scope, cu: CurrentUser) -> dict:
         jobs.append({"kind": kind, "name": KINDS[kind], "cron": cron, "enabled": enabled, "next_run": nxt})
     tenants = [{"id": t.id, "name": t.short_name or t.name, "mail_to": t.report_mail_to or [], "enabled": t.enabled}
                for t in tenant_map(db).values() if scope.allows(t.id)]
-    return {"kinds": KINDS, "jobs": jobs, "cron": cfg.cron, "enabled": cfg.enabled, "mail_to": cfg.mail_to if scope.full else [],
+    return {"kinds": KINDS, "jobs": jobs, "cron": cfg.cron, "enabled": cfg.enabled,
+            "mail_to": cfg.mail_to if scope.full else [],
             "timezone": s.timezone, "tenants": tenants, "editable": cu.can("report:config") and scope.full,
             **settings_service.meta(db, "report"),
-            "note": "每个周期生成 1 份全部租户合并报表（发给下面的收件人）+ 每个启用租户 1 份租户报表（发给租户接入里配置的收件人）；"
-                    "收件人为空时只生成不发送"}
+            "note": "每个周期生成 1 份全部租户合并报表（发给下面的收件人）+ 每个启用租户 1 份租户报表"
+                    "（发给租户接入里配置的收件人）；收件人为空时只生成不发送"}
 
 
 @router.get("/schedule", summary="定时报表设置（发送时间、启停、合并报表收件人、各租户收件人、下次发送时间）")

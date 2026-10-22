@@ -16,8 +16,8 @@ from sqlalchemy.orm import Session
 from app.hcs import HcsClient, HcsError
 from app.models import InspectionRun, Resource, ResourceChange
 from app.models.base import utcnow
-from app.services.catalog import RESOURCE_TYPES, type_name
 from app.services import collect_switch, platform_watch
+from app.services.catalog import RESOURCE_TYPES, type_name
 from app.services.tenancy import Target, legacy_target, resolve_targets
 
 from .fetchers import FETCHERS, LedgerRecord

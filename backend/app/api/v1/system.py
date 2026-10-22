@@ -22,11 +22,11 @@ from app.core.events import broadcaster
 from app.core.response import BizError, ErrorCode, not_found, ok
 from app.ledger.sync import LEDGER_TASK
 from app.metrics import CAPABILITIES, SOURCES
-from app.models import AlarmEvent, InspectionRun, InspectionTask, Notification, Silence, WorkerHeartbeat
+from app.models import AlarmEvent, InspectionRun, InspectionTask, Notification, WorkerHeartbeat
 from app.models.alarm import ACTIVE_STATUSES
 from app.models.base import utcnow
 from app.schemas.alarm import AlarmOut
-from app.services import collect_switch, pipeline, platform_watch, settings_service
+from app.services import collect_switch, pipeline, platform_watch, settings_service, silence_service
 from app.services.cleanup import CLEANUP_TASK
 from app.services.tenancy import tenant_map
 
@@ -325,8 +325,7 @@ def platform(db: Session = Depends(get_db), scope: Scope = Depends(get_scope),
     alarms = db.scalars(alarms_q.order_by(AlarmEvent.first_seen.desc()).limit(20)).all()
     cleanup = db.scalar(select(InspectionRun).where(InspectionRun.task_code == CLEANUP_TASK)
                         .order_by(InspectionRun.started_at.desc()).limit(1))
-    silences = sum(1 for x in db.scalars(select(Silence).where(Silence.cancelled_at.is_(None), Silence.ends_at > now))
-                   if x.starts_at <= now)
+    silences = len(silence_service.active_silences(db, now))
     redis_ok = None
     if s.redis_url:
         try:

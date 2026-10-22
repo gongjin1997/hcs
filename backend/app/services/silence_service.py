@@ -171,7 +171,10 @@ def unsuppress(db: Session, alarm: AlarmEvent, now: datetime, note: str) -> None
 def sweep(db: Session, now: datetime | None = None, only: Silence | None = None) -> dict:
     """每分钟执行（通知进程）：静默结束的告警恢复为 FIRING 并补发通知；新进入生效期的静默抑制匹配的告警。"""
     now = now or utcnow()
-    actives = [only] if only is not None and is_active(only, now) else active_silences(db, now)
+    if only is not None:                               # 新建 / 修改后只处理这一个静默（未生效的不做任何事）
+        actives = [only] if is_active(only, now) else []
+    else:
+        actives = active_silences(db, now)
     active_ids = {s.id for s in actives}
     released = suppressed = 0
     if only is None:

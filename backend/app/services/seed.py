@@ -50,6 +50,7 @@ from mock_hcs.app import app as mock_app
 
 from . import seed_history as hist
 from .seed_profiles import PROFILES, apply_profiles
+from .seed_v04 import seed_v04
 
 log = logging.getLogger(__name__)
 MOCK = "http://mock"                       # 进程内 Mock HCS（不依赖单独启动的 Mock 服务）
@@ -337,5 +338,6 @@ def seed_demo(db: Session) -> bool:
     _adjust_alarms(db, utcnow())
 
     hist.seed_history(db, tenants, users, start, utcnow())
+    seed_v04(db, tenants, users)
     log.info("demo data seeded: tenants=%s, profiles=%s", list(tenants), list(PROFILES))
     return True

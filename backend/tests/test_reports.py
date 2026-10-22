@@ -65,8 +65,10 @@ def test_export_report_excel(client, admin, tenant_ids):
 def test_send_report_mail(client, admin, monkeypatch):
     sent: list[EmailMessage] = []
     monkeypatch.setattr(report_service, "smtp_send", sent.append)
-    rid = _reports(client, admin, kind="DAILY")["items"][0]["id"]
-    assert client.post(f"/api/v1/reports/{rid}/send", json={}, headers=admin).status_code == 400   # 未配置收件人
+    rid = _reports(client, admin, kind="DAILY", tenant_id="global")["items"][0]["id"]
+    r = client.post(f"/api/v1/reports/{rid}/send", json={}, headers=admin)        # 合并报表：发给“报表设置”里的收件人
+    assert r.status_code == 200 and r.json()["data"]["sent_to"] == ["ops-report@example.com", "zhaolei@example.com"]
+    sent.clear()
     assert client.post(f"/api/v1/reports/{rid}/send", json={"to": ["bad"]}, headers=admin).status_code == 400
     r = client.post(f"/api/v1/reports/{rid}/send", json={"to": ["ops@example.com"]}, headers=admin)
     assert r.status_code == 200 and r.json()["data"]["sent_to"] == ["ops@example.com"]

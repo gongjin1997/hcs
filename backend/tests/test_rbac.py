@@ -17,7 +17,10 @@ def test_builtin_roles_and_permission_catalog(client, admin):
     assert "tenant:manage" not in roles["ops_lead"]["permissions"]
     groups = client.get("/api/v1/system/permissions", headers=admin).json()["data"]
     codes = [i["code"] for g in groups for i in g["items"]]
-    assert len(codes) == len(set(codes)) == 22 and {"tenant:manage", "podevent:config", "audit:view"} <= set(codes)
+    assert len(codes) == len(set(codes)) == 28 and {"tenant:manage", "podevent:config", "audit:view"} <= set(codes)
+    assert {"silence:manage", "report:config", "notify:manage", "task:edit", "collect:manage", "setting:manage"} <= set(codes)
+    assert "silence:manage" in roles["oncall"]["permissions"] and "collect:manage" not in roles["oncall"]["permissions"]
+    assert "setting:manage" not in roles["ops_lead"]["permissions"] and "collect:manage" in roles["ops_lead"]["permissions"]
 
 
 def test_custom_role_lifecycle(client, admin):
