@@ -1,0 +1,62 @@
+[project]
+name = "hcs-inspector"
+version = "0.3.0"
+description = "HCS 云服务巡检平台 - 后端"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "sqlalchemy>=2.0.30",
+  "alembic>=1.13",
+  "pydantic>=2.7",
+  "pydantic-settings>=2.3",
+  "pyjwt>=2.8",
+  "httpx>=0.27",
+  "jinja2>=3.1",
+  "pyyaml>=6.0",
+  "apscheduler>=3.10,<4",
+  "redis>=5.0",
+  "cryptography>=42",
+  "openpyxl>=3.1",
+]
+
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.1"]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10"]
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*", "mock_hcs*"]
+
+[tool.setuptools.package-data]
+app = ["templates/mail/*.j2", "rules/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = [
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated",
+    "ignore:You should not use the 'timeout' argument with the TestClient",
+]
+
+[tool.ruff]
+line-length = 128
+target-version = "py311"
+extend-exclude = ["migrations/versions"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"mock_hcs/inventory*.py" = ["E501"]     # 演示资源清单按表格排版，一行一个资源
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Header", "app.core.deps.require_perm"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+check_untyped_defs = true

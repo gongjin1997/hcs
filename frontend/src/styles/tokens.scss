@@ -1,0 +1,48 @@
+// ================= 设计令牌（Design Tokens）=================
+// 业务色只在这里定义；组件中通过 CSS 变量引用，主题切换 / 私有化换肤只需覆盖本文件
+:root {
+  // 品牌色与 Element Plus 主题覆盖（含 light / dark 梯度，保证 Tag、Button 等派生色一致）
+  --el-color-primary: #1d63f0; --el-color-primary-light-3: #6192f4; --el-color-primary-light-5: #8eb1f8; --el-color-primary-light-7: #bbd0fa; --el-color-primary-light-8: #d2e0fc; --el-color-primary-light-9: #e8effe; --el-color-primary-dark-2: #174fc0;
+  --el-color-success: #2e7d32; --el-color-success-light-3: #6da470; --el-color-success-light-5: #96be98; --el-color-success-light-7: #c0d8c2; --el-color-success-light-8: #d5e5d6; --el-color-success-light-9: #eaf2ea; --el-color-success-dark-2: #256428;
+  --el-color-warning: #f57c00; --el-color-warning-light-3: #f8a34c; --el-color-warning-light-5: #fabe80; --el-color-warning-light-7: #fcd8b2; --el-color-warning-light-8: #fde5cc; --el-color-warning-light-9: #fef2e6; --el-color-warning-dark-2: #c46300;
+  --el-color-danger: #d93026; --el-color-danger-light-3: #e46e67; --el-color-danger-light-5: #ec9892; --el-color-danger-light-7: #f4c1be; --el-color-danger-light-8: #f7d6d4; --el-color-danger-light-9: #fbeae9; --el-color-danger-dark-2: #ae261e;
+  --el-color-info: #8c8c8c; --el-color-info-light-3: #aeaeae; --el-color-info-light-5: #c6c6c6; --el-color-info-light-7: #dcdcdc; --el-color-info-light-8: #e8e8e8; --el-color-info-light-9: #f4f4f4; --el-color-info-dark-2: #707070;
+  --el-border-radius-base: 6px; --el-border-color-lighter: #eef0f4; --el-fill-color-light: #f5f7fa;
+  --el-font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', 'Hiragino Sans GB', 'Noto Sans SC', 'Noto Sans CJK SC', 'Helvetica Neue', Arial, sans-serif;
+
+  // 告警级别（与邮件模板、大屏一致）
+  --hi-p1: #d93026; --hi-p1-bg: #fdecea;
+  --hi-p2: #f57c00; --hi-p2-bg: #fff3e0;
+  --hi-p3: #f9a825; --hi-p3-bg: #fff8e1;
+  --hi-p4: #1976d2; --hi-p4-bg: #e3f2fd;
+  --hi-ok: #2e7d32; --hi-ok-bg: #e8f5e9;
+  --hi-unknown: #8c8c8c; --hi-unknown-bg: #f2f3f5;
+
+  // 中性色（浅色主题：白底卡片 + 细边框，减少阴影层级）
+  --hi-bg-page: #f4f6fa;
+  --hi-bg-card: #ffffff;
+  --hi-bg-soft: #f7f8fa;
+  --hi-bg-hover: #f2f6ff;
+  --hi-border: #e5e8ef;
+  --hi-border-light: #eef0f4;
+  --hi-text-1: #1d2129;
+  --hi-text-2: #4e5969;
+  --hi-text-3: #86909c;
+
+  // 侧边栏（浅色）
+  --hi-sider-bg: #ffffff;
+  --hi-sider-text: #4e5969;
+  --hi-sider-active-bg: #eef4ff;
+
+  // 尺寸、圆角、阴影、字体
+  --hi-sider-width: 220px;
+  --hi-sider-collapsed: 64px;
+  --hi-header-height: 56px;
+  --hi-radius: 10px;
+  --hi-radius-sm: 6px;
+  --hi-gap: 16px;
+  --hi-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+  --hi-shadow-hover: 0 6px 18px rgba(16, 24, 40, 0.08);
+  --hi-font-num: 'DIN Alternate', 'DIN Pro', Bahnschrift, 'Roboto', var(--el-font-family);
+  --hi-font-mono: 'JetBrains Mono', SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+}

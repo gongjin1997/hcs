@@ -1,0 +1,116 @@
+{# 报表邮件：正文给出关键数字与结论，完整明细见附件 Excel。table 布局 + 内联样式 #}
+{% set th = "background:#f7f8fa;border:1px solid #e5e6eb;color:#666666;text-align:left;font-weight:normal;" %}
+{% set td = "border:1px solid #e5e6eb;" %}
+{% set sevc = {"P1": "#D93026", "P2": "#F57C00", "P3": "#F9A825", "P4": "#1976D2"} %}
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{ r.title }}</title></head>
+<body style="margin:0;padding:0;background:#f4f5f7;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f5f7;font-family:'Microsoft YaHei','PingFang SC',Arial,sans-serif;">
+<tr><td align="center" style="padding:16px;">
+<table width="720" cellpadding="0" cellspacing="0" style="max-width:720px;width:100%;background:#ffffff;border:1px solid #e5e6eb;">
+  <tr><td style="background:#1d63f0;color:#ffffff;padding:16px 20px;">
+    <div style="font-size:18px;font-weight:bold;">{{ r.title }}</div>
+    <div style="font-size:12px;opacity:.85;margin-top:4px;">
+      {% if r.period.label %}统计周期：{{ r.period.label }}　{% endif %}生成时间：{{ r.generated_at | isodt }}
+    </div>
+  </td></tr>
+  <tr><td style="padding:16px 20px;font-size:14px;color:#333333;">
+    {% set ov = r.overview %}
+    <table width="100%" cellpadding="0" cellspacing="8" style="font-size:12px;color:#666666;">
+      <tr>
+      {% if r.kind == "LEDGER" %}
+        {% set cards = [("资源总数", ov.resources, "个"), ("未分配负责人", ov.unassigned, "个"), ("疑似闲置", ov.idle, "个"),
+                        ("近 30 天变更", r.ledger.changes_count.values() | sum, "条")] %}
+      {% else %}
+        {% set cards = [("新增告警", ov.new_alarms, "条"), ("P1 紧急", ov.p1, "条"),
+                        ("平均恢复", ov.mttr_min if ov.mttr_min is not none else "-", "分钟"),
+                        ("巡检成功率", ov.run_success_rate, "%")] %}
+      {% endif %}
+      {% for label, value, unit in cards %}
+        <td width="25%" style="background:#f7f8fa;border-radius:6px;padding:10px 12px;">
+          {{ label }}<br><span style="font-size:22px;font-weight:bold;color:#1f2329;">{{ value }}</span> {{ unit }}
+        </td>
+      {% endfor %}
+      </tr>
+    </table>
+
+    <h4 style="margin:16px 0 8px;">结论</h4>
+    <ol style="margin:0;padding-left:20px;line-height:1.8;font-size:13px;">
+      {% for line in r.conclusion %}<li>{{ line }}</li>{% endfor %}
+    </ol>
+
+    {% if r.kind != "LEDGER" and r.key_alarms %}
+    <h4 style="margin:16px 0 8px;">重点告警（P1 / P2，前 10 条）</h4>
+    <table width="100%" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-size:12px;">
+      <tr><th style="{{ th }}">级别</th><th style="{{ th }}">资源</th><th style="{{ th }}">告警</th>
+          <th style="{{ th }}">首次发生</th><th style="{{ th }}">持续</th></tr>
+      {% for a in r.key_alarms[:10] %}
+      <tr><td style="{{ td }}color:{{ sevc[a.severity] }};font-weight:bold;">{{ a.severity }}</td>
+          <td style="{{ td }}">{{ a.resource_name }}</td><td style="{{ td }}">{{ a.title }}</td>
+          <td style="{{ td }}">{{ a.first_seen | isodt("%m-%d %H:%M") }}</td>
+          <td style="{{ td }}">{{ (a.duration_min * 60) | humanize }}</td></tr>
+      {% endfor %}
+    </table>
+    {% endif %}
+
+    {% if r.kind != "LEDGER" and r.by_service %}
+    <h4 style="margin:16px 0 8px;">按服务</h4>
+    <table width="100%" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-size:12px;">
+      <tr><th style="{{ th }}">服务</th><th style="{{ th }}">告警数</th><th style="{{ th }}">P1</th><th style="{{ th }}">P2</th>
+          <th style="{{ th }}">P3</th><th style="{{ th }}">P4</th></tr>
+      {% for s in r.by_service %}
+      <tr><td style="{{ td }}">{{ s.name }}</td><td style="{{ td }}">{{ s.count }}</td><td style="{{ td }}">{{ s.p1 }}</td>
+          <td style="{{ td }}">{{ s.p2 }}</td><td style="{{ td }}">{{ s.p3 }}</td><td style="{{ td }}">{{ s.p4 }}</td></tr>
+      {% endfor %}
+    </table>
+    {% endif %}
+
+    {% if r.kind != "LEDGER" and r.by_tenant %}
+    <h4 style="margin:16px 0 8px;">分租户</h4>
+    <table width="100%" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-size:12px;">
+      <tr><th style="{{ th }}">租户</th><th style="{{ th }}">新增告警</th><th style="{{ th }}">P1</th><th style="{{ th }}">P2</th>
+          <th style="{{ th }}">当前健康分</th></tr>
+      {% for t in r.by_tenant %}
+      <tr><td style="{{ td }}">{{ t.name }}</td><td style="{{ td }}">{{ t.new_alarms }}</td><td style="{{ td }}">{{ t.p1 }}</td>
+          <td style="{{ td }}">{{ t.p2 }}</td><td style="{{ td }}">{{ t.health_score }}</td></tr>
+      {% endfor %}
+    </table>
+    {% endif %}
+
+    {% if r.kind != "LEDGER" and (r.ecs or r.pods) %}
+    <h4 style="margin:16px 0 8px;">ECS 与容器</h4>
+    <table width="100%" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-size:12px;">
+      <tr><th style="{{ th }}">ECS 总数</th><th style="{{ th }}">运行中</th><th style="{{ th }}">关机 / 故障</th>
+          <th style="{{ th }}">状态变更 / 重启</th><th style="{{ th }}">容器重启（OOM）</th><th style="{{ th }}">背压</th></tr>
+      <tr><td style="{{ td }}">{{ r.ecs.total }}</td><td style="{{ td }}">{{ r.ecs.active }}</td>
+          <td style="{{ td }}">{{ r.ecs.shutoff }} / {{ r.ecs.error }}</td>
+          <td style="{{ td }}">{{ r.ecs.status_changes }} / {{ r.ecs.reboots }}</td>
+          <td style="{{ td }}">{{ r.pods.restarts }}（{{ r.pods.oom }}）</td>
+          <td style="{{ td }}">{{ r.pods.backpressure }} 次 / {{ r.pods.backpressure_min }} 分钟</td></tr>
+    </table>
+    {% endif %}
+
+    <h4 style="margin:16px 0 8px;">资源台账</h4>
+    <table width="100%" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-size:12px;">
+      <tr>{% for c in r.ledger.by_category %}<th style="{{ th }}">{{ c.name }}</th>{% endfor %}<th style="{{ th }}">合计</th></tr>
+      <tr>{% for c in r.ledger.by_category %}<td style="{{ td }}">{{ c.count }}</td>{% endfor %}<td style="{{ td }}"><b>{{ r.ledger.total }}</b></td></tr>
+    </table>
+    {% if r.ledger.changes %}
+    <ul style="margin:8px 0 0;padding-left:18px;font-size:12px;line-height:1.7;color:#555555;">
+      {% for c in r.ledger.changes[:8] %}
+      <li>[{{ {"CREATED": "新增", "UPDATED": "变更", "DELETED": "释放", "STATUS": "状态变更", "REBOOT": "重启"}.get(c.change_type, c.change_type) }}] {{ c.type_name }} {{ c.name }}{% if c.summary %}：{{ c.summary }}{% endif %}</li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+
+    <p style="margin:18px 0 6px;">
+      <a href="{{ link }}" style="display:inline-block;padding:8px 16px;color:#ffffff;background:#1d63f0;text-decoration:none;border-radius:4px;font-size:13px;">在平台中查看</a>
+    </p>
+  </td></tr>
+  <tr><td style="background:#fafafa;color:#999999;font-size:12px;padding:10px 20px;line-height:1.6;">
+    本邮件由 HCS 巡检平台按计划自动发送（{{ env_tag }}），完整明细见附件 Excel。请勿直接回复。
+  </td></tr>
+</table>
+</td></tr>
+</table>
+</body></html>

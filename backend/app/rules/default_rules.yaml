@@ -1,0 +1,374 @@
+# 内置规则（启动时写入 alarm_rule 表；之后以数据库为准，可在“规则管理”页面调整）
+# kind=state：expr.when 为条件表达式；kind=threshold：expr.value + levels 多级阈值；recover 为恢复条件（滞回）
+- id: R-DGC-RT-001
+  name: 实时作业运行异常
+  resource_type: dgc_realtime_job
+  check_item: job_status
+  kind: state
+  expr: {when: "status == 'EXCEPTION'", severity: P1, title: "实时作业运行异常（EXCEPTION）"}
+  for_count: 2
+  recover: {when: "status == 'NORMAL'"}
+  runbook: |
+    1. 在 DataArts Studio 运维调度中查看作业运行日志，定位异常节点与报错信息；
+    2. 检查上游 Kafka / 源库连通性与 Checkpoint 是否连续失败；
+    3. 确认原因后从最近一次 Checkpoint 恢复作业，并观察 5 分钟。
+- id: R-DGC-RT-002
+  name: 实时作业非预期停止
+  resource_type: dgc_realtime_job
+  check_item: job_status
+  kind: state
+  expr: {when: "status == 'STOPPED' and expected_running", severity: P1, title: "实时作业非预期停止（STOPPED）"}
+  recover: {when: "status == 'NORMAL'"}
+  runbook: 确认是否为计划内停止；若非计划停止，联系作业负责人确认后重新启动作业。
+- id: R-DGC-RT-003
+  name: 实时作业长时间启动中
+  resource_type: dgc_realtime_job
+  check_item: job_status
+  kind: state
+  expr: {when: "status == 'STARTING' and status_duration_min > 10", severity: P2,
+         title: "作业启动中已持续 {status_duration_min} 分钟"}
+  recover: {when: "status != 'STARTING'"}
+  runbook: 检查资源队列是否不足、MRS / DLI 集群是否可用，必要时停止后重新提交。
+- id: R-DGC-RT-004
+  name: 实时作业长时间停止中
+  resource_type: dgc_realtime_job
+  check_item: job_status
+  kind: state
+  expr: {when: "status == 'STOPPING' and status_duration_min > 10", severity: P3,
+         title: "作业停止中已持续 {status_duration_min} 分钟"}
+  recover: {when: "status != 'STOPPING'"}
+- id: R-DGC-RT-005
+  name: 实时作业节点异常
+  resource_type: dgc_realtime_job
+  check_item: node_status
+  kind: state
+  expr: {when: "job_status == 'NORMAL' and node_status in ('EXCEPTION', 'STOPPED')", severity: P2,
+         critical_severity: P1, value_field: node_status, title: "作业节点异常（{node_status}）"}
+  for_count: 2
+  recover: {when: "node_status == 'NORMAL'"}
+- id: R-DGC-BAT-001
+  name: 批作业实例失败
+  resource_type: dgc_batch_job
+  check_item: instance_status
+  kind: state
+  expr: {when: "last_status == 'fail'", severity: P2, critical_severity: P1, value_field: last_status,
+         title: "批作业实例失败（fail）"}
+  recover: {when: "last_status == 'success'"}
+  runbook: 查看实例日志定位失败节点；修复后在运维调度中重跑失败实例，并确认下游依赖作业已补跑。
+- id: R-DGC-BAT-002
+  name: 批作业运行异常
+  resource_type: dgc_batch_job
+  check_item: instance_status
+  kind: state
+  expr: {when: "last_status == 'running-exception'", severity: P2, value_field: last_status,
+         title: "批作业运行异常（running-exception）"}
+  recover: {when: "last_status != 'running-exception'"}
+- id: R-DGC-BAT-003
+  name: 批作业运行超时
+  resource_type: dgc_batch_job
+  check_item: instance_status
+  kind: state
+  expr: {when: "last_status == 'running' and run_minutes > max(p90_minutes * 2, p90_minutes + 30, 30)",
+         severity: P2, value_field: run_minutes, title: "批作业已运行 {run_minutes} 分钟，超过基线"}
+  recover: {when: "last_status != 'running'"}
+- id: R-MRS-CLU-001
+  name: MRS 集群状态异常
+  resource_type: mrs_cluster
+  check_item: cluster_status
+  kind: state
+  expr: {when: "cluster_state in ('abnormal', 'failed')", severity: P1, value_field: cluster_state,
+         title: "集群状态异常（{cluster_state}）"}
+  for_count: 2
+  recover: {when: "cluster_state == 'running'"}
+- id: R-MRS-CLU-002
+  name: MRS 集群已冻结
+  resource_type: mrs_cluster
+  check_item: cluster_status
+  kind: state
+  expr: {when: "cluster_state == 'frozen'", severity: P2, value_field: cluster_state, title: "集群已冻结（frozen）"}
+  recover: {when: "cluster_state == 'running'"}
+- id: R-MRS-JOB-001
+  name: MRS 作业执行失败
+  resource_type: mrs_job
+  check_item: job_status
+  kind: state
+  expr: {when: "job_state == 'FAILED' or job_result == 'FAILED'", severity: P2, critical_severity: P1,
+         value_field: job_result, title: "作业执行失败（{job_result}）"}
+  recover: {when: "job_result == 'SUCCEEDED'"}
+  runbook: 通过 MRS Manager / Yarn 查看 application 日志；资源不足时调整队列配额后重新提交。
+- id: R-MRS-JOB-003
+  name: MRS 作业排队超时
+  resource_type: mrs_job
+  check_item: job_status
+  kind: state
+  expr: {when: "job_state == 'ACCEPTED' and status_duration_min > 15", severity: P3, value_field: job_state,
+         title: "作业排队已 {status_duration_min} 分钟"}
+  recover: {when: "job_state != 'ACCEPTED'"}
+- id: R-GS-001
+  name: GaussDB 实例故障
+  resource_type: gaussdb_instance
+  check_item: instance_status
+  kind: state
+  expr: {when: "status in ('FAILED', 'STORAGE FULL')", severity: P1, title: "实例状态异常（{status}）"}
+  recover: {when: "status == 'ACTIVE'"}
+  runbook: 立即联系 DBA；STORAGE FULL 时优先清理归档日志或扩容磁盘，FAILED 时检查主备节点状态并联系平台运维。
+- id: R-GS-002
+  name: GaussDB 实例冻结
+  resource_type: gaussdb_instance
+  check_item: instance_status
+  kind: state
+  expr: {when: "status == 'FROZEN'", severity: P2, title: "实例已冻结（FROZEN）"}
+  recover: {when: "status == 'ACTIVE'"}
+- id: R-GS-006
+  name: GaussDB 磁盘使用率过高
+  resource_type: gaussdb_instance
+  check_item: disk
+  kind: threshold
+  expr:
+    value: disk_usage
+    unit: "%"
+    title: "磁盘使用率 {value}（{threshold}）"
+    levels: [{severity: P1, op: ">=", threshold: 90}, {severity: P2, op: ">=", threshold: 85},
+             {severity: P3, op: ">=", threshold: 75}]
+  for_count: 2
+  recover: {below: 70}
+  runbook: 清理过期分区与归档日志、排查大表膨胀（VACUUM）；预计 7 天内写满时提交扩容申请。
+- id: R-GS-007
+  name: GaussDB CPU 使用率过高
+  resource_type: gaussdb_instance
+  check_item: cpu
+  kind: threshold
+  expr:
+    value: cpu_usage
+    unit: "%"
+    title: "CPU 使用率 {value}（{threshold}）"
+    levels: [{severity: P2, op: ">=", threshold: 90}, {severity: P3, op: ">=", threshold: 80}]
+  for_count: 3
+  recover: {below: 70}
+- id: R-GS-008
+  name: GaussDB 内存使用率过高
+  resource_type: gaussdb_instance
+  check_item: memory
+  kind: threshold
+  expr:
+    value: mem_usage
+    unit: "%"
+    title: "内存使用率 {value}（{threshold}）"
+    levels: [{severity: P2, op: ">=", threshold: 95}, {severity: P3, op: ">=", threshold: 85}]
+  for_count: 3
+  recover: {below: 80}
+- id: R-DCS-001
+  name: DCS 实例状态异常
+  resource_type: dcs_instance
+  check_item: instance_status
+  kind: state
+  expr: {when: "status == 'ERROR'", severity: P1, title: "实例状态异常（ERROR）"}
+  recover: {when: "status == 'RUNNING'"}
+  runbook: 检查实例所在节点与网络，必要时提交工单联系 HCS 平台运维；评估业务是否需要切换到备用缓存。
+- id: R-DCS-002
+  name: DCS 实例冻结或创建失败
+  resource_type: dcs_instance
+  check_item: instance_status
+  kind: state
+  expr: {when: "status in ('FROZEN', 'CREATEFAILED') or (status == 'CLOSED' and expected_running)", severity: P2,
+         title: "实例状态异常（{status}）"}
+  recover: {when: "status == 'RUNNING'"}
+- id: R-DCS-003
+  name: DCS 实例变更超时
+  resource_type: dcs_instance
+  check_item: instance_status
+  kind: state
+  expr: {when: "status in ('RESTARTING', 'EXTENDING', 'RESTORING', 'UPGRADING') and status_duration_min > 60",
+         severity: P3, title: "实例 {status} 已持续 {status_duration_min} 分钟"}
+  recover: {when: "status == 'RUNNING'"}
+- id: R-DCS-005
+  name: DCS 内存使用率过高
+  resource_type: dcs_instance
+  check_item: memory
+  kind: threshold
+  expr:
+    value: memory_usage
+    unit: "%"
+    title: "内存使用率 {value}（{threshold}）"
+    levels: [{severity: P1, op: ">=", threshold: 95}, {severity: P2, op: ">=", threshold: 90},
+             {severity: P3, op: ">=", threshold: 80}]
+  for_count: 3
+  recover: {below: 75}
+  repeat_interval_sec: 3600
+  runbook: |
+    1. 使用 DCS 控制台“缓存分析 - 大 Key 分析”定位大 Key，确认是否有未设置过期时间的 Key；
+    2. 检查淘汰策略（maxmemory-policy）是否符合业务预期；
+    3. 若业务数据正常增长，提交规格变更（扩容）申请。
+- id: R-DCS-006
+  name: DCS CPU 使用率过高
+  resource_type: dcs_instance
+  check_item: cpu
+  kind: threshold
+  expr:
+    value: cpu_usage
+    unit: "%"
+    title: "CPU 使用率 {value}（{threshold}）"
+    levels: [{severity: P2, op: ">=", threshold: 90}, {severity: P3, op: ">=", threshold: 70}]
+  for_count: 3
+  recover: {below: 60}
+- id: R-DCS-007
+  name: DCS 连接数使用率过高
+  resource_type: dcs_instance
+  check_item: connections
+  kind: threshold
+  expr:
+    value: "connected_clients * 100 / max_clients"
+    unit: "%"
+    title: "连接数使用率 {value}（{threshold}）"
+    levels: [{severity: P2, op: ">=", threshold: 90}, {severity: P3, op: ">=", threshold: 80}]
+  for_count: 3
+  recover: {below: 70}
+# ---------------- ECS 云服务器（任务 ecs_status；使用率类规则需要 CES 或 Prometheus 指标，没有指标时不评估） ----------------
+- id: R-ECS-001
+  name: ECS 实例故障
+  resource_type: ecs_server
+  check_item: instance_status
+  kind: state
+  expr: {when: "status == 'ERROR'", severity: P2, critical_severity: P1, title: "云服务器状态异常（ERROR 故障）"}
+  runbook: |
+    1. 在 ECS 控制台查看实例详情与“操作日志”，确认最近的操作（变更规格、迁移、重装）是否失败；
+    2. 尝试“强制重启”；仍为 ERROR 时提交工单联系 HCS 平台运维排查所在物理主机；
+    3. 业务有多实例时先确认 ELB 已摘除该实例。
+- id: R-ECS-002
+  name: ECS 非预期关机
+  resource_type: ecs_server
+  check_item: instance_status
+  kind: state
+  expr: {when: "status == 'SHUTOFF' and expected_running", severity: P3, critical_severity: P2,
+         title: "云服务器处于关机状态（已持续 {status_duration_min} 分钟）"}
+  for_count: 2
+  runbook: |
+    1. 查看 ECS“操作日志”或云审计（CTS）确认是否有人执行了关机；计划内关机请在台账中把该实例的预期状态改为“允许关机”；
+    2. 非计划关机：开机后登录系统查看 /var/log/messages、dmesg，排查内核崩溃、OOM、物理主机故障。
+- id: R-ECS-003
+  name: ECS 状态长时间未完成
+  resource_type: ecs_server
+  check_item: instance_status
+  kind: state
+  expr: {when: "transitional and status_duration_min >= 30", severity: P3,
+         title: "{status_text} 已持续 {status_duration_min} 分钟"}
+  runbook: 变更规格 / 迁移 / 重启超过 30 分钟未完成：查看 ECS 任务状态（task_state），规格变更待确认时请在控制台确认或回退；长时间卡住请提交工单。
+- id: R-ECS-004
+  name: ECS CPU 使用率过高
+  resource_type: ecs_server
+  check_item: cpu
+  kind: threshold
+  expr:
+    value: cpu_util
+    unit: "%"
+    title: "CPU 使用率 {value}（{threshold}）"
+    levels: [{severity: P2, op: ">=", threshold: 95}, {severity: P3, op: ">=", threshold: 85}]
+  for_count: 3
+  recover: {below: 75}
+  repeat_interval_sec: 3600
+  runbook: 登录实例用 top / pidstat 定位高 CPU 进程；确认是否为批处理高峰，持续偏高时评估扩容或横向扩展。
+- id: R-ECS-005
+  name: ECS 内存使用率过高
+  resource_type: ecs_server
+  check_item: memory
+  kind: threshold
+  expr:
+    value: mem_util
+    unit: "%"
+    title: "内存使用率 {value}（{threshold}）"
+    levels: [{severity: P2, op: ">=", threshold: 95}, {severity: P3, op: ">=", threshold: 90}]
+  for_count: 3
+  recover: {below: 80}
+  repeat_interval_sec: 3600
+  runbook: 用 free -m、ps aux --sort=-rss 定位占用内存的进程，排查内存泄漏；接近 100% 时有被 OOM Killer 杀进程的风险。
+- id: R-ECS-006
+  name: ECS 磁盘使用率过高
+  resource_type: ecs_server
+  check_item: disk
+  kind: threshold
+  expr:
+    value: disk_util
+    unit: "%"
+    title: "磁盘 {disk_mount} 使用率 {value}（{threshold}）"
+    levels: [{severity: P2, op: ">=", threshold: 95}, {severity: P3, op: ">=", threshold: 85}]
+  for_count: 2
+  recover: {below: 80}
+  repeat_interval_sec: 7200
+  runbook: 用 du -sh 定位大目录，清理过期日志 / 临时文件，检查 logrotate；业务数据增长导致时扩容 EVS 并扩展文件系统。
+- id: R-ECS-007
+  name: ECS 频繁重启
+  resource_type: ecs_server
+  check_item: reboot
+  kind: threshold
+  expr:
+    value: reboots_24h
+    unit: " 次"
+    title: "24 小时内重启 {value}（{threshold}）"
+    levels: [{severity: P3, op: ">=", threshold: 3}, {severity: P4, op: ">=", threshold: 1}]
+  recover: {below: 1}
+  repeat_interval_sec: 86400
+  runbook: 结合资源详情中的“状态变更 / 重启”时间线与系统日志（last reboot、/var/log/messages）确认重启原因：人为操作、内核崩溃、HA 迁移。
+# ---------------- CCE 容器（任务 cce_pod_events；按工作负载汇总） ----------------
+- id: R-CCE-POD-001
+  name: Pod 频繁重启
+  resource_type: cce_workload
+  check_item: pod_restart
+  kind: threshold
+  expr:
+    value: restarts_10m
+    unit: " 次"
+    title: "近 10 分钟重启 {value}（{threshold}）"
+    levels: [{severity: P2, op: ">=", threshold: 5}, {severity: P3, op: ">=", threshold: 3}]
+  recover: {below: 1}
+  repeat_interval_sec: 3600
+  runbook: |
+    1. 打开“容器事件”中该 Pod 的时间线，查看上次退出原因（Error / OOMKilled）与退出码；
+    2. kubectl logs --previous 查看上一次容器日志；健康检查失败导致的重启检查 liveness 探针阈值。
+- id: R-CCE-POD-002
+  name: 容器 OOM
+  resource_type: cce_workload
+  check_item: pod_oom
+  kind: threshold
+  expr:
+    value: oom_1h
+    unit: " 次"
+    title: "近 1 小时 OOM {value}（{threshold}）"
+    levels: [{severity: P2, op: ">=", threshold: 3}, {severity: P3, op: ">=", threshold: 1}]
+  recover: {below: 1}
+  repeat_interval_sec: 3600
+  runbook: 容器内存超过 limits 被内核杀死（OOMKilled）：检查 JVM / 进程堆内存配置与 limits 是否匹配，排查内存泄漏，必要时调大 limits。
+- id: R-CCE-POD-003
+  name: Pod CrashLoopBackOff
+  resource_type: cce_workload
+  check_item: pod_crashloop
+  kind: state
+  expr: {when: "crashloop_pods > 0", severity: P2, critical_severity: P1,
+         title: "{crashloop_pods} 个 Pod 处于 CrashLoopBackOff"}
+  runbook: 容器启动后反复退出：查看 Pod 时间线中的退出码与上次日志，常见原因是配置错误、依赖服务不可达、镜像版本问题。
+- id: R-CCE-POD-004
+  name: 持续背压
+  resource_type: cce_workload
+  check_item: pod_backpressure
+  kind: threshold
+  expr:
+    value: backpressure_min
+    unit: " 分钟"
+    title: "背压已持续 {value}（{threshold}）"
+    levels: [{severity: P2, op: ">=", threshold: 30}, {severity: P3, op: ">=", threshold: 5}]
+  recover: {below: 1}
+  repeat_interval_sec: 3600
+  runbook: |
+    1. Flink：在 Flink Web UI 查看 BackPressure 页定位瓶颈算子，检查下游（Kafka / 数据库）写入延迟与并行度；
+    2. 网关 / 消费者：检查上游流量突增与下游处理能力，必要时扩容副本（HPA）。
+- id: R-CCE-POD-005
+  name: Pod 被驱逐
+  resource_type: cce_workload
+  check_item: pod_evicted
+  kind: threshold
+  expr:
+    value: evicted_1h
+    unit: " 个"
+    title: "近 1 小时被驱逐 {value}（{threshold}）"
+    levels: [{severity: P3, op: ">=", threshold: 1}]
+  recover: {below: 1}
+  runbook: 节点资源压力（内存 / 磁盘）导致驱逐：查看节点 Conditions 与 kubelet 日志，清理节点磁盘或调整 Pod requests。

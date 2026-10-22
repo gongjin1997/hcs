@@ -1,0 +1,145 @@
+# HCS 巡检平台 K8s 部署参考（kubectl -n hcs-inspector apply -f deploy/k8s/hcs-inspector.yaml）
+# 生产建议用 Helm 管理：迁移 Job 作为 pre-install/pre-upgrade hook；Secret 由 KMS / Vault 注入，勿明文入库。
+# 镜像：registry.example.com/hcs-inspector/backend:<tag>、registry.example.com/hcs-inspector/web:<tag>
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: inspector-config}
+data:
+  INSPECTOR_ENV: prod
+  INSPECTOR_ENV_TAG: PROD
+  INSPECTOR_DEMO_SEED: "false"            # 生产不写演示数据（prod 环境即使误配也会被忽略）
+  INSPECTOR_TIMEZONE: Asia/Shanghai
+  INSPECTOR_BASE_URL: https://inspector.example.com
+  INSPECTOR_REDIS_URL: redis://inspector-redis:6379/0
+  INSPECTOR_SMTP_HOST: smtp.example.com
+  INSPECTOR_SMTP_PORT: "465"
+  INSPECTOR_SMTP_USER: inspector@example.com
+  INSPECTOR_SMTP_SENDER: HCS 巡检平台 <inspector@example.com>
+  INSPECTOR_HCS_IAM_URL: https://iam-apigateway-proxy.example.com
+  INSPECTOR_HCS_DOMAIN: vdc_ops
+  INSPECTOR_HCS_USERNAME: inspector_ro
+  INSPECTOR_HCS_PROJECT_ID: 0a1b2c3d4e5f
+  INSPECTOR_HCS_WORKSPACES: '["ws-realtime","ws-bigdata"]'
+  # Endpoint 默认按 {service}.{region}.{domain} 拼接；局点地址不规则时整体覆盖（JSON），台账同步需 ecs/evs/vpc/elb/rds/dms/cce/dws/css
+  # INSPECTOR_HCS_ENDPOINTS: '{"ecs":"ecs.region-01.example.com", ...}'
+  INSPECTOR_REPORT_MAIL_TO: '["ops-team@example.com"]'   # 日报 / 周报 / 月报收件人
+  # INSPECTOR_REPORT_CRON: '{"DAILY":"30 8 * * *","WEEKLY":"0 9 * * mon","MONTHLY":"0 9 1 * *"}'
+---
+apiVersion: v1
+kind: Secret
+metadata: {name: inspector-secret}
+type: Opaque
+stringData:   # 占位值，部署时由流水线 / 密钥系统覆盖
+  INSPECTOR_DATABASE_URL: postgresql+psycopg://inspector:CHANGE_ME@pg-primary:5432/inspector
+  INSPECTOR_JWT_SECRET: CHANGE_ME                    # openssl rand -hex 32
+  INSPECTOR_MAIL_LINK_SECRET: CHANGE_ME
+  INSPECTOR_HCS_PASSWORD: CHANGE_ME
+  INSPECTOR_MASTER_KEY: CHANGE_ME_BASE64_32_BYTES   # openssl rand -base64 32；加密入库的 HCS 凭据，丢失后需重新录入
+  INSPECTOR_SMTP_PASSWORD: CHANGE_ME
+  INSPECTOR_INIT_ADMIN_PASSWORD: CHANGE_ME           # 仅首次部署创建 admin 用，完成后删除
+---
+apiVersion: batch/v1
+kind: Job
+metadata: {name: inspector-migrate}
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: registry.example.com/hcs-inspector/backend:latest
+          command: ["sh", "-c", "alembic upgrade head && python -m app.workers.bootstrap"]   # 迁移 + 幂等初始化
+          envFrom: [{configMapRef: {name: inspector-config}}, {secretRef: {name: inspector-secret}}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: inspector-api, labels: {app: inspector-api}}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: inspector-api}}
+  template:
+    metadata: {labels: {app: inspector-api}}
+    spec:
+      containers:
+        - name: api
+          image: registry.example.com/hcs-inspector/backend:latest
+          ports: [{containerPort: 8000}]
+          envFrom: [{configMapRef: {name: inspector-config}}, {secretRef: {name: inspector-secret}}]
+          readinessProbe: {httpGet: {path: /readyz, port: 8000}, periodSeconds: 10}
+          livenessProbe: {httpGet: {path: /healthz, port: 8000}, periodSeconds: 20}
+          resources: {requests: {cpu: 250m, memory: 512Mi}, limits: {cpu: "1", memory: 1Gi}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: inspector-scheduler, labels: {app: inspector-scheduler}}
+spec:
+  replicas: 2   # 每个巡检任务通过 Redis 锁保证同一时刻只执行一次，多副本仅用于高可用
+  selector: {matchLabels: {app: inspector-scheduler}}
+  template:
+    metadata: {labels: {app: inspector-scheduler}}
+    spec:
+      containers:
+        - name: scheduler
+          image: registry.example.com/hcs-inspector/backend:latest
+          command: ["python", "-m", "app.workers.scheduler"]
+          envFrom: [{configMapRef: {name: inspector-config}}, {secretRef: {name: inspector-secret}}]
+          resources: {requests: {cpu: 250m, memory: 512Mi}, limits: {cpu: "1", memory: 1Gi}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: inspector-notifier, labels: {app: inspector-notifier}}
+spec:
+  replicas: 2   # Outbox 取件使用 FOR UPDATE SKIP LOCKED（PostgreSQL），多副本并行不重复发送
+  selector: {matchLabels: {app: inspector-notifier}}
+  template:
+    metadata: {labels: {app: inspector-notifier}}
+    spec:
+      containers:
+        - name: notifier
+          image: registry.example.com/hcs-inspector/backend:latest
+          command: ["python", "-m", "app.workers.notifier"]
+          envFrom: [{configMapRef: {name: inspector-config}}, {secretRef: {name: inspector-secret}}]
+          resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {cpu: 500m, memory: 512Mi}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: inspector-web, labels: {app: inspector-web}}
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: inspector-web}}
+  template:
+    metadata: {labels: {app: inspector-web}}
+    spec:
+      containers:
+        - name: web
+          image: registry.example.com/hcs-inspector/web:latest
+          ports: [{containerPort: 80}]
+          readinessProbe: {httpGet: {path: /, port: 80}}
+          resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {cpu: 200m, memory: 128Mi}}
+---
+# Service 名称为 api，与 frontend/nginx.conf 中的 upstream（http://api:8000）一致
+apiVersion: v1
+kind: Service
+metadata: {name: api}
+spec: {selector: {app: inspector-api}, ports: [{port: 8000, targetPort: 8000}]}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: inspector-web}
+spec: {selector: {app: inspector-web}, ports: [{port: 80, targetPort: 80}]}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: inspector
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"        # SSE 实时推送
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+spec:
+  ingressClassName: nginx
+  tls: [{hosts: [inspector.example.com], secretName: inspector-tls}]
+  rules:
+    - host: inspector.example.com
+      http:
+        paths: [{path: /, pathType: Prefix, backend: {service: {name: inspector-web, port: {number: 80}}}}]

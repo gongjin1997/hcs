@@ -1,0 +1,9 @@
+{{ r.title }}
+{% if r.period.label %}统计周期：{{ r.period.label }}
+{% endif %}生成时间：{{ r.generated_at | isodt }}
+
+结论：
+{% for line in r.conclusion %}{{ loop.index }}. {{ line }}
+{% endfor %}
+
+完整明细见附件 Excel，在线查看：{{ link }}

@@ -1,0 +1,12 @@
+{{ badge }} {{ alarm.resource_name }} {{ alarm.title }}
+状态：{{ alarm.status_text }}    持续：{{ alarm.duration | humanize }}    次数：{{ alarm.count }}
+资源：{{ alarm.service }} / {{ alarm.resource_name }}（{{ alarm.resource_id }}）
+位置：{{ alarm.tenant }} / {{ alarm.region }} / {{ alarm.project }} / {{ alarm.workspace or "-" }}
+巡检项：{{ alarm.check_item }}    当前值：{{ alarm.current_value }}    阈值：{{ alarm.threshold_text }}
+首次：{{ alarm.first_seen | dt }}    最近：{{ alarm.last_seen | dt }}
+
+处置建议：
+{{ alarm.runbook }}
+
+查看详情：{{ links.detail }}
+确认告警：{{ links.ack }}

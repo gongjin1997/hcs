@@ -1,0 +1,63 @@
+{# 告警 / 升级 / 重复 / 恢复邮件共用模板：table 布局 + 内联样式，不依赖外部 CSS / JS / 外链图片 #}
+{% set btn = "display:inline-block;padding:8px 16px;margin:0 8px 8px 0;color:#ffffff;text-decoration:none;border-radius:4px;font-size:13px;" %}
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{ alarm.title }}</title></head>
+<body style="margin:0;padding:0;background:#f4f5f7;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f5f7;font-family:'Microsoft YaHei','PingFang SC',Arial,sans-serif;">
+<tr><td align="center" style="padding:16px;">
+<table width="720" cellpadding="0" cellspacing="0" style="max-width:720px;width:100%;background:#ffffff;border:1px solid #e5e6eb;">
+  <tr><td style="background:{{ color }};color:#ffffff;padding:14px 20px;font-size:18px;font-weight:bold;">
+    {{ badge }}&nbsp;{{ alarm.resource_name }}&nbsp;{{ alarm.title }}
+  </td></tr>
+  <tr><td style="padding:16px 20px;font-size:14px;color:#333333;">
+    <p style="margin:0 0 12px;line-height:1.6;">{{ alarm.summary }}</p>
+    <table width="100%" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-size:13px;">
+      {% for k, v in [
+          ("告警编号", alarm.id), ("告警级别", alarm.severity_text), ("当前状态", alarm.status_text),
+          ("所属租户", alarm.tenant),
+          ("服务 / 资源类型", alarm.service ~ " / " ~ alarm.resource_type_text),
+          ("资源名称", alarm.resource_name ~ "（" ~ alarm.resource_id ~ "）"),
+          ("区域 / 项目 / 工作空间", alarm.region ~ " / " ~ alarm.project ~ " / " ~ (alarm.workspace or "-")),
+          ("巡检项", alarm.check_item), ("当前值", alarm.current_value), ("阈值", alarm.threshold_text),
+          ("首次发生", alarm.first_seen | dt), ("最近检测", alarm.last_seen | dt),
+          ("持续时长", alarm.duration | humanize), ("累计次数", alarm.count), ("负责人", alarm.owner or "-")] %}
+      <tr>
+        <td style="width:160px;background:#f7f8fa;border:1px solid #e5e6eb;color:#666666;">{{ k }}</td>
+        <td style="border:1px solid #e5e6eb;">{{ v }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% if alarm.details %}
+    <h4 style="margin:16px 0 8px;">详细信息</h4>
+    <pre style="background:#f7f8fa;padding:10px;margin:0;font-size:12px;white-space:pre-wrap;">{{ alarm.details | truncate(2000) }}</pre>
+    {% endif %}
+    {% if trend_cid %}
+    <h4 style="margin:16px 0 8px;">最近 1 小时趋势</h4>
+    <img src="cid:{{ trend_cid }}" width="680" alt="趋势图" style="display:block;border:0;">
+    {% endif %}
+    {% if not resolved %}
+    <h4 style="margin:16px 0 8px;">处置建议</h4>
+    <div style="font-size:13px;line-height:1.7;">{{ alarm.runbook | nl2br }}</div>
+    {% endif %}
+    <p style="margin:18px 0 6px;">
+      <a href="{{ links.detail }}" style="{{ btn }}background:#1677ff;">查看详情</a>
+      {% if not resolved %}
+      <a href="{{ links.ack }}" style="{{ btn }}background:#52c41a;">确认告警</a>
+      <a href="{{ links.silence }}" style="{{ btn }}background:#8c8c8c;">静默 2 小时</a>
+      {% endif %}
+      <a href="{{ links.console }}" style="{{ btn }}background:#595959;">打开 HCS 控制台</a>
+    </p>
+    {% if related %}
+    <h4 style="margin:16px 0 8px;">关联告警（{{ related | length }}）</h4>
+    <ul style="margin:0;padding-left:18px;font-size:13px;">
+      {% for r in related %}<li>{{ r.title }}（{{ r.first_seen | dt }}）</li>{% endfor %}
+    </ul>
+    {% endif %}
+  </td></tr>
+  <tr><td style="background:#fafafa;color:#999999;font-size:12px;padding:10px 20px;line-height:1.6;">
+    本邮件由 HCS 巡检平台自动发送（规则 {{ alarm.rule_id }}，路由 {{ route_name }}）。调整订阅：{{ links.subscription }}。请勿直接回复。
+  </td></tr>
+</table>
+</td></tr>
+</table>
+</body></html>

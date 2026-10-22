@@ -1,0 +1,58 @@
+# GitLab CI 参考流水线（CodeArts / Jenkins 可按相同阶段迁移）
+stages: [check, build, deploy]
+
+variables:
+  REGISTRY: registry.example.com/hcs-inspector
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+
+backend-check:
+  stage: check
+  image: python:3.12-slim
+  cache: {key: pip, paths: [.cache/pip]}
+  script:
+    - cd backend && pip install -e ".[dev]"
+    - ruff check .
+    - mypy app mock_hcs
+    - pytest -q
+    - INSPECTOR_DATABASE_URL=sqlite:///./ci.db alembic upgrade head && INSPECTOR_DATABASE_URL=sqlite:///./ci.db alembic check
+    - INSPECTOR_DATABASE_URL=sqlite:///./ci.db INSPECTOR_DEMO_SEED=false python -m app.workers.bootstrap   # 初始化脚本冒烟
+
+frontend-check:
+  stage: check
+  image: node:20-alpine
+  cache: {key: npm, paths: [frontend/node_modules]}
+  script:
+    - cd frontend && npm ci
+    - npm run typecheck
+    - npm run build
+
+build-images:
+  stage: build
+  image: docker:27
+  services: [docker:27-dind]
+  rules: [{if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_TAG'}]
+  script:
+    - docker build -t $REGISTRY/backend:$CI_COMMIT_SHORT_SHA backend
+    - docker build -t $REGISTRY/web:$CI_COMMIT_SHORT_SHA frontend
+    - docker push $REGISTRY/backend:$CI_COMMIT_SHORT_SHA
+    - docker push $REGISTRY/web:$CI_COMMIT_SHORT_SHA
+
+deploy-staging:
+  stage: deploy
+  image: bitnami/kubectl:latest
+  rules: [{if: '$CI_COMMIT_BRANCH == "main"'}]
+  environment: staging
+  script:
+    - kubectl -n hcs-inspector-staging set image deploy/inspector-api api=$REGISTRY/backend:$CI_COMMIT_SHORT_SHA
+    - kubectl -n hcs-inspector-staging set image deploy/inspector-scheduler scheduler=$REGISTRY/backend:$CI_COMMIT_SHORT_SHA
+    - kubectl -n hcs-inspector-staging set image deploy/inspector-notifier notifier=$REGISTRY/backend:$CI_COMMIT_SHORT_SHA
+    - kubectl -n hcs-inspector-staging set image deploy/inspector-web web=$REGISTRY/web:$CI_COMMIT_SHORT_SHA
+
+deploy-prod:
+  stage: deploy
+  image: bitnami/kubectl:latest
+  rules: [{if: '$CI_COMMIT_TAG'}]
+  when: manual          # 生产发布需人工确认
+  environment: production
+  script:
+    - echo "使用 Helm 发布：helm upgrade --install inspector ./deploy/helm --set image.tag=$CI_COMMIT_TAG"
