@@ -58,6 +58,7 @@ class AlarmDetailOut(AlarmOut):
     runbook: str | None = None
     logs: list[AlarmLogOut] = []
     notifications: list[NotificationOut] = []
+    silence: dict | None = None              # 命中的静默 / 维护窗口（已抑制时）
 
 
 class AlarmStats(BaseModel):

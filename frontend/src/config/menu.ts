@@ -1,11 +1,11 @@
 import { Bell, Box, Coin, Document, Message, MuteNotification, Odometer, Setting, SetUp } from '@element-plus/icons-vue'
 import { type Component, markRaw } from 'vue'
+import { SYSTEM_PERMS } from '@/router/perms'
 import { useUserStore } from '@/stores/user'
 
 export interface MenuItem { path: string; title: string; icon: Component; perm: string | string[]; badge?: 'firing' }
 export interface MenuGroup { title: string; items: MenuItem[] }
 
-const SYSTEM_PERMS = ['tenant:view', 'task:view', 'user:manage', 'role:manage', 'audit:view']
 
 /** 侧边栏菜单：按角色权限点过滤（与路由 meta.perm 一致） */
 export const MENU: MenuGroup[] = [

@@ -31,7 +31,7 @@
       </div>
       <div class="foot">运维组内部使用 · 账号由管理员开通</div>
     </div>
-    <footer>© 2026 HCS-Inspector · v0.3.0 · 适配 HCS 8.5.1</footer>
+    <footer>© 2026 HCS-Inspector · v{{ APP_VERSION }} · 适配 HCS 8.5.1</footer>
   </div>
 </template>
 
@@ -70,6 +70,7 @@ async function submit() {
     loading.value = false
   }
 }
+const APP_VERSION = __APP_VERSION__
 </script>
 
 <style scoped lang="scss">

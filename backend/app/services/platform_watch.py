@@ -41,10 +41,26 @@ from . import settings_service
 log = logging.getLogger(__name__)
 PLATFORM = "platform"
 RULES: dict[str, dict[str, str]] = {
-    "R-PLAT-001": {"name": "巡检任务连续失败", "resource_type": "platform_task", "check_item": "task_failures"},
-    "R-PLAT-002": {"name": "租户认证失败", "resource_type": "platform_tenant", "check_item": "tenant_auth"},
-    "R-PLAT-003": {"name": "通知发送失败", "resource_type": "platform_notify", "check_item": "notify_failed"},
-    "R-PLAT-004": {"name": "后台进程心跳超时", "resource_type": "platform_worker", "check_item": "heartbeat"},
+    "R-PLAT-001": {"name": "巡检任务连续失败", "resource_type": "platform_task", "check_item": "task_failures",
+                   "runbook": "1. 系统管理 → 巡检任务，展开该任务查看各租户最近运行的错误摘要\n"
+                              "2. 超时 / 5xx：在巡检服务器上执行 make probe TENANT=<租户代码> ONLY=<服务>，确认接口可达、耗时\n"
+                              "3. 404 / 字段缺失：核对租户接入里的服务 Endpoint、项目 ID 是否正确（不同 Region 的地址不同）\n"
+                              "4. 修复后点“立即执行”，执行成功即自动恢复；该服务确实不用时可在“采集开关”关闭"},
+    "R-PLAT-002": {"name": "租户认证失败", "resource_type": "platform_tenant", "check_item": "tenant_auth",
+                   "runbook": "1. 系统管理 → 租户接入，对该租户点“连通性测试”查看认证步骤的报错\n"
+                              "2. 401：IAM 用户密码已修改 / 账号被锁定，或 AK/SK 已删除；更新凭据后保存\n"
+                              "3. 403：账号缺少对应服务的只读权限（例如 MRS ReadOnlyAccess），请联系租户管理员授权\n"
+                              "4. 该租户任一任务执行成功后自动恢复"},
+    "R-PLAT-003": {"name": "通知发送失败", "resource_type": "platform_notify", "check_item": "notify_failed",
+                   "runbook": "1. 通知管理 → SMTP 与测试邮件，向自己发一封测试邮件，查看报错\n"
+                              "2. Connection refused / timeout：检查 SMTP 地址、端口、防火墙；STARTTLS 与端口是否匹配\n"
+                              "3. 535 / Authentication：检查 .env 中的 SMTP 账号密码，修改后执行 make restart\n"
+                              "4. 550 / 收件人被拒：检查联系人邮箱、邮件网关白名单；之后有通知发送成功即自动恢复"},
+    "R-PLAT-004": {"name": "后台进程心跳超时", "resource_type": "platform_worker", "check_item": "heartbeat",
+                   "runbook": "1. 在部署目录执行 make status 查看 scheduler / notifier 容器是否在运行、是否反复重启\n"
+                              "2. make logs S=scheduler（或 notifier）查看最近的报错（常见：数据库连接失败、磁盘满）\n"
+                              "3. 执行 docker compose up -d scheduler notifier 重新拉起；心跳恢复后自动恢复\n"
+                              "4. 调度进程停止期间巡检不会执行，恢复后检查“巡检任务”页各任务的最近运行"},
 }
 AUTH_ERROR = re.compile(r"\[(401|403)\]")
 WORKERS = {"scheduler": "调度进程", "notifier": "通知进程"}

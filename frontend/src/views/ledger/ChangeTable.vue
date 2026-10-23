@@ -26,7 +26,7 @@
           <span v-else class="text-3">{{ row.change_type === 'CREATED' ? '新资源纳入台账' : '已在 HCS 中释放' }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="来源" width="100"><template #default="{ row }"><span :class="row.source === 'MANUAL' ? 'manual' : 'text-2'">{{ CHANGE_SOURCE[row.source] ?? row.source }}</span></template></el-table-column>
+      <el-table-column label="来源" width="100"><template #default="{ row }"><span :class="row.source === 'MANUAL' || row.source === 'IMPORT' ? 'manual' : 'text-2'">{{ CHANGE_SOURCE[row.source] ?? row.source }}</span></template></el-table-column>
       <el-table-column label="操作人" width="96"><template #default="{ row }">{{ row.operator === 'system' ? (row.source === 'INSPECT' ? '巡检发现' : '自动同步') : row.operator }}</template></el-table-column>
       <template #empty><el-empty description="所选时间范围内无变更" :image-size="70" /></template>
     </el-table>

@@ -3,14 +3,14 @@ import { TOKEN_KEY } from '@/api/request'
 import BasicLayout from '@/layouts/BasicLayout.vue'
 import { useAppStore } from '@/stores/app'
 import { useUserStore } from '@/stores/user'
+import { SYSTEM_PERMS } from './perms'
 
 declare module 'vue-router' {
   /** perm：访问页面需要的权限点（数组 = 满足任一）；public：无需登录 */
   interface RouteMeta { title?: string; perm?: string | string[]; public?: boolean }
 }
 
-/** 系统管理页：任一子模块有权限即可进入（页内 Tab 再按权限显示） */
-export const SYSTEM_PERMS = ['tenant:view', 'task:view', 'user:manage', 'role:manage', 'audit:view']
+export { SYSTEM_PERMS } from './perms'
 
 const routes: RouteRecordRaw[] = [
   { path: '/login', component: () => import('@/views/login/LoginView.vue'), meta: { title: '登录', public: true } },
@@ -28,7 +28,7 @@ const routes: RouteRecordRaw[] = [
       { path: 'resources', redirect: (to) => ({ path: '/ledger', query: to.query }) },   // 兼容旧链接（邮件 / 收藏夹）
       { path: 'rules', component: () => import('@/views/rules/RuleListView.vue'), meta: { title: '规则管理', perm: 'rule:view' } },
       { path: 'notify', component: () => import('@/views/notify/NotifyView.vue'), meta: { title: '通知管理', perm: 'notify:view' } },
-      { path: 'silences', component: () => import('@/views/misc/PlaceholderView.vue'), meta: { title: '维护与静默', perm: 'alarm:view' } },
+      { path: 'silences', component: () => import('@/views/silences/SilenceView.vue'), meta: { title: '维护与静默', perm: 'alarm:view' } },
       { path: 'reports', component: () => import('@/views/reports/ReportView.vue'), meta: { title: '报表中心', perm: 'report:view' } },
       { path: 'system', component: () => import('@/views/system/SystemView.vue'), meta: { title: '系统管理', perm: SYSTEM_PERMS } },
       { path: '403', component: () => import('@/views/misc/ErrorView.vue'), props: { code: 403 }, meta: { title: '无权限' } },

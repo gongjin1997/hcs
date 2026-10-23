@@ -57,7 +57,7 @@ export interface SystemInfo {
 export interface Alarm {
   id: number; rule_id: string; service: string; resource_type: string; resource_name: string
   resource_ref: number | null; tenant_id: number | null; sub_object: string; severity: Severity; status: AlarmStatus
-  suppress_reason: string | null; title: string; check_item: string; current_value: string | null
+  suppress_reason: string | null; silence_id?: number | null; title: string; check_item: string; current_value: string | null
   threshold_text: string | null; owner: string | null; first_seen: string; last_seen: string
   resolved_at: string | null; count: number; ack_by: string | null; ack_at: string | null
 }
@@ -68,6 +68,7 @@ export interface NotificationRow {
 }
 export interface AlarmDetail extends Alarm {
   fingerprint: string; detail: Record<string, any>; runbook: string | null; logs: AlarmLog[]; notifications: NotificationRow[]
+  silence?: SilenceBrief | null
 }
 export interface AlarmStats { FIRING: number; ACKED: number; SUPPRESSED: number; P1: number; P2: number; P3: number; P4: number }
 
@@ -85,11 +86,15 @@ export interface LedgerColumn { key: string; label: string; width?: number }
 export interface ResourceType {
   code: string; name: string; category: string; service: string; ledger: boolean; inspected: boolean
   columns: LedgerColumn[]; total: number; abnormal: number
+  /** v0.4 采集开关：enabled = 当前范围内至少一个租户在采集；off_tenants = 已关闭采集的租户 */
+  collect?: { enabled: boolean; off_tenants: string[]; global: boolean }
 }
 export interface ResourceCategory { code: string; name: string; total: number; abnormal: number }
 export interface ResourceMeta {
   categories: ResourceCategory[]; types: ResourceType[]; env_types: Record<string, string>
   options: { business: string[]; owner: string[] }
+  /** v0.4 台账字典 */
+  dict?: { business: string[]; owners: string[]; enforce: boolean }
 }
 export interface LedgerSummary {
   total: number; type_count: number; by_category: { code: string; name: string; total: number }[]
@@ -103,7 +108,7 @@ export type ChangeType = 'CREATED' | 'UPDATED' | 'DELETED' | 'STATUS' | 'REBOOT'
 export interface FieldChange { field: string; label: string; old: unknown; new: unknown }
 export interface ResourceChange {
   id: number; tenant_id: number | null; resource_ref: number; resource_type: string; resource_id: string; name: string; change_type: ChangeType
-  changes: FieldChange[]; source: 'SYNC' | 'MANUAL' | 'INSPECT'; operator: string; detected_at: string
+  changes: FieldChange[]; source: 'SYNC' | 'MANUAL' | 'INSPECT' | 'IMPORT'; operator: string; detected_at: string
 }
 export interface ResourceDetail {
   resource: Resource; alarms: Alarm[]; changes: ResourceChange[]; status_changes: ResourceChange[]
@@ -235,3 +240,119 @@ export interface Probe extends ProbeIn {
   id: number; tenant_name: string; updated_by: string | null; updated_at: string | null
   last_result: { at: string; pods: number; hit: number; max: number | null; errors: string[] } | null
 }
+
+// ================================================================ v0.4
+// ---- 静默与维护窗口 ----
+export type SilenceKind = 'SILENCE' | 'MAINTENANCE'
+/** ACTIVE 生效中 / WAITING 周期窗口之间（本周期未到）/ PENDING 待生效 / EXPIRED 已结束 / CANCELLED 已取消 */
+export type SilenceStatus = 'ACTIVE' | 'WAITING' | 'PENDING' | 'EXPIRED' | 'CANCELLED'
+export interface SilenceMatchers {
+  tenant_ids?: number[]; services?: string[]; resource_types?: string[]; rule_ids?: string[]; severities?: string[]
+  resource_refs?: number[]; fingerprints?: string[]; name_contains?: string
+}
+/** 每周重复：weekdays 1=周一 … 7=周日；start / end 为平台时区 HH:mm，end ≤ start 表示跨午夜 */
+export interface SilenceRecurrence { weekdays?: number[]; start?: string; end?: string }
+export interface Silence {
+  id: number; name: string; kind: SilenceKind; matchers: SilenceMatchers; recurrence: SilenceRecurrence
+  starts_at: string; ends_at: string; reason: string; created_by: string; created_at: string; updated_at: string
+  cancelled_by: string | null; cancelled_at: string | null; status: SilenceStatus
+  next_window: { start: string; end: string } | null; describe: string; suppressed_now: number; suppressed_total: number; editable: boolean
+}
+export interface SilenceIn {
+  name: string; kind: SilenceKind; matchers: SilenceMatchers; starts_at?: string | null; ends_at: string
+  recurrence?: SilenceRecurrence | null; reason: string
+}
+export interface SilencePreview { total: number; critical: number; by_severity: Record<Severity, number>; items: Alarm[] }
+export interface SilenceBrief {
+  id: number; name: string; kind: SilenceKind; starts_at: string; ends_at: string; created_by: string; reason: string; status: SilenceStatus
+}
+
+// ---- 采集开关（按资源类型 × 租户启停采集）----
+export interface SwitchCell { setting: boolean | null; effective: boolean; resources: number; active_alarms: number }
+export interface SwitchType {
+  code: string; name: string; service: string; service_name: string; category: string; ledger: boolean; tasks: string[]
+  global: boolean; tenants: Record<string, SwitchCell>
+}
+export interface SwitchTenant { id: number; code: string; name: string; short_name: string; color: string; enabled: boolean }
+export interface CollectSwitches {
+  categories: { code: string; name: string }[]; types: SwitchType[]; tenants: SwitchTenant[]
+  task_types: Record<string, string[]>; global_editable: boolean
+}
+/** tenant_id = 0 表示全局默认；租户 enabled = null 表示跟随全局 */
+export interface SwitchItem { resource_type: string; tenant_id: number; enabled: boolean | null }
+export interface SwitchImpact { stop: string[]; start: string[]; active_alarms: number }
+
+// ---- 系统设置 ----
+export interface SettingField { key: string; label: string; default: unknown; ge?: number; le?: number }
+export interface SettingItem<T = Record<string, any>> {
+  label: string; value: T; editable: boolean; fields: SettingField[]; updated_by: string | null; updated_at: string | null; customized: boolean
+}
+export interface Retention {
+  inspection_run_days: number; notification_days: number; alarm_closed_days: number; audit_log_days: number
+  resource_change_days: number; released_resource_days: number; report_days: number; pod_event_days: number
+}
+export interface PlatformAlarmSetting {
+  enabled: boolean; task_fail_threshold: number; auth_fail_alarm: boolean; notify_fail_alarm: boolean
+  heartbeat_timeout_min: number; severity: 'P1' | 'P2' | 'P3'; mail_to: string[]
+}
+export interface ReportSetting { cron: Record<string, string>; enabled: Record<string, boolean>; mail_to: string[] }
+export interface DictItem { name: string; remark: string | null; used?: number }
+export interface LedgerDictSetting { business: DictItem[]; owners: DictItem[]; enforce: boolean }
+export interface SystemSettings {
+  retention?: SettingItem<Retention>; report?: SettingItem<ReportSetting>
+  platform_alarm?: SettingItem<PlatformAlarmSetting>; ledger_dict?: SettingItem<LedgerDictSetting>
+}
+
+// ---- 平台状态 ----
+export interface WorkerStatus {
+  name: string; label: string; status: 'OK' | 'LATE' | 'NEVER'; host?: string; pid?: number; version?: string
+  started_at?: string; beat_at?: string; age_sec?: number; info?: Record<string, any>
+}
+export interface TaskHealthTenant {
+  tenant_id: number | null; tenant_name: string | null; last_status: string; last_at: string; fails: number; last_success_at: string | null
+}
+export interface TaskHealth {
+  code: string; name: string; enabled: boolean; interval_sec: number; cron: string | null; tenants: TaskHealthTenant[]; status: 'OK' | 'WARN' | 'FAILED'
+}
+export interface PlatformStatus {
+  version: string; env: string; timezone: string; api_started_at: string; database: string | null
+  redis: { configured: boolean; ok: boolean | null }; sse_subscribers: number; metrics: { path: string; token_required: boolean }
+  workers: WorkerStatus[]; heartbeat_timeout_min: number
+  outbox: { sent_24h: number; failed_24h: number; merged_24h: number; pending: number; retrying: number; oldest_pending_at: string | null; last_sent_at: string | null }
+  tasks: TaskHealth[]; task_fail_threshold: number; platform_alarms: Alarm[]; active_silences: number
+  cleanup: { started_at: string; status: string; stats: Record<string, number>; deleted: number } | null
+  platform_alarm: PlatformAlarmSetting
+}
+
+// ---- 台账字典 / Excel 导入 ----
+export interface LedgerDict {
+  enforce: boolean; business: DictItem[]; owners: DictItem[]; business_outside: { name: string; used: number }[]
+  owners_outside: { name: string; used: number }[]; updated_by: string | null; updated_at: string | null; customized: boolean
+}
+export interface ImportChange { field: string; label: string; old: string; new: string }
+export interface ImportResult {
+  total: number; matched: number; changed: number; unchanged: number; error_count: number; dry_run: boolean; applied?: number
+  errors: { row: number; resource_id: string | null; name: string | null; message: string }[]
+  items: { row: number; id: number; resource_id: string; name: string; type_name: string; tenant: string; changes: ImportChange[] }[]
+}
+
+// ---- 通知配置维护 ----
+export interface Contact {
+  id: number; name: string; email: string; phone: string | null; enabled: boolean; groups: { code: string; name: string; leader: boolean }[]
+}
+export interface ContactIn { name: string; email: string; phone?: string | null; enabled: boolean }
+export interface GroupIn { code: string; name: string; member_ids: number[]; leader_ids: number[] }
+export interface Escalation { after_min: number; to: string; severities: string[] }
+export interface RouteIn {
+  name: string; priority: number; match: { tenant_ids?: number[]; services?: string[]; severities?: string[]; resource_types?: string[] }
+  group_code: string; escalation: Escalation[]; continue_match: boolean; enabled: boolean
+}
+export interface SimulateStep {
+  id: number; name: string; priority: number; enabled: boolean; skipped: boolean; matched: boolean; group_name: string
+  recipients: { id: number; name: string; email: string }[]; continue_match: boolean
+}
+export interface SimulateResult {
+  steps: SimulateStep[]; recipients: string[]; escalation: { route: string; after_min: number; emails: string[]; names: string[]; note: string }[]
+  silence: { id: number; name: string; kind: SilenceKind } | null; platform_fallback: string[] | null
+}
+export interface SmtpInfo { host: string; port: number; starttls: boolean; auth: boolean; sender: string; reply_to: string | null; env_tag: string; base_url: string }

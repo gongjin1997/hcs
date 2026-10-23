@@ -27,11 +27,11 @@
             <el-form class="mgmt" label-width="84px" :disabled="r.lifecycle === 'DELETED' || !canEdit">
               <el-row :gutter="16">
                 <el-col :span="12"><el-form-item label="负责人">
-                  <el-select v-model="edit.owner" filterable allow-create clearable default-first-option placeholder="未分配">
+                  <el-select v-model="edit.owner" filterable :allow-create="!enforce" clearable default-first-option :placeholder="enforce ? '从台账字典选择' : '未分配'">
                     <el-option v-for="o in options.owner" :key="o" :label="o" :value="o" />
                   </el-select></el-form-item></el-col>
                 <el-col :span="12"><el-form-item label="业务系统">
-                  <el-select v-model="edit.business" filterable allow-create clearable default-first-option placeholder="未填写">
+                  <el-select v-model="edit.business" filterable :allow-create="!enforce" clearable default-first-option :placeholder="enforce ? '从台账字典选择' : '未填写'">
                     <el-option v-for="o in options.business" :key="o" :label="o" :value="o" />
                   </el-select></el-form-item></el-col>
                 <el-col :span="12"><el-form-item label="环境">
@@ -151,7 +151,7 @@ import { CHANGE_SOURCE, CHANGE_TYPE, ENV_TYPE, SERVICES, rawStatusType, statusTe
 import { durationOf, fmtTime, fromNow } from '@/utils/format'
 import { ATTR_LABEL, METRIC_LABEL, fmtValue } from './columns'
 
-const props = defineProps<{ modelValue: boolean; resourceId: number | null; inspectedTypes: string[]; options: { owner: string[]; business: string[] } }>()
+const props = defineProps<{ modelValue: boolean; resourceId: number | null; inspectedTypes: string[]; options: { owner: string[]; business: string[] }; enforce?: boolean }>()
 const emit = defineEmits<{ 'update:modelValue': [boolean]; saved: [] }>()
 
 const data = ref<ResourceDetail | null>(null)

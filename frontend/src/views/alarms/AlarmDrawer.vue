@@ -21,13 +21,28 @@
           <div class="actions">
             <el-button v-if="a.status === 'FIRING'" type="primary" :icon="Check" :disabled="!canAck" :loading="acting === 'ack'" @click="doAck">认领</el-button>
             <el-button :icon="CircleClose" :disabled="!canAck || ['RESOLVED', 'CLOSED'].includes(a.status)" :loading="acting === 'close'" @click="doClose">关闭</el-button>
-            <el-tooltip content="静默能力随“维护与静默”模块提供（规划 v1.1）" placement="top">
-              <span><el-button :icon="MuteNotification" disabled>静默 2 小时</el-button></span>
+            <el-button v-if="a.silence" :icon="MuteNotification" @click="goSilence(a.silence.id)">查看静默</el-button>
+            <el-tooltip v-else-if="!canSilence" content="需要“创建 / 取消静默与维护窗口”权限" placement="top">
+              <span><el-button :icon="MuteNotification" disabled>静默</el-button></span>
             </el-tooltip>
+            <el-button v-else :icon="MuteNotification" :disabled="!active" @click="openQuick">静默</el-button>
             <el-button :icon="Message" @click="openPreview">邮件预览</el-button>
             <el-button :icon="Link" @click="copyLink">复制链接</el-button>
           </div>
         </div>
+
+        <!-- 被静默 / 维护窗口抑制：说明来源，结束后仍未恢复会补发通知 -->
+        <el-alert v-if="a.silence" class="silence-alert" type="info" :closable="false" show-icon>
+          <template #title>
+            已被{{ SILENCE_KIND[a.silence.kind]?.label ?? '静默' }}“{{ a.silence.name }}”抑制
+            <el-tag size="small" :type="SILENCE_STATUS[a.silence.status]?.type" effect="plain">{{ SILENCE_STATUS[a.silence.status]?.label }}</el-tag>
+          </template>
+          <div class="s-body">
+            {{ fmtTime(a.silence.starts_at, 'MM-DD HH:mm') }} ~ {{ fmtTime(a.silence.ends_at, 'MM-DD HH:mm') }} · {{ a.silence.created_by }} 创建
+            <template v-if="a.silence.reason"> · {{ a.silence.reason }}</template>
+            <div class="text-3">窗口内不发通知、不升级；结束后告警仍未恢复会自动补发通知。</div>
+          </div>
+        </el-alert>
 
         <!-- 关键数值 -->
         <div class="kv">
@@ -89,6 +104,33 @@
       </template>
     </div>
 
+    <el-dialog v-model="quick.visible" title="静默告警" width="560px" append-to-body class="quick-dialog">
+      <el-form label-width="80px">
+        <el-form-item label="范围">
+          <el-radio-group v-model="quick.target" class="targets">
+            <el-radio value="alarm">只这条告警<span class="text-3">（{{ a?.title }}）</span></el-radio>
+            <el-radio value="resource" :disabled="!a?.resource_ref">该资源的全部告警<span class="text-3">（{{ a?.resource_name }}）</span></el-radio>
+            <el-radio value="rule">这条规则的全部告警<span class="text-3">（{{ a?.rule_id }}{{ a?.tenant_id ? '，仅当前租户' : '' }}）</span></el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="时长">
+          <el-radio-group v-model="quick.minutes" size="small">
+            <el-radio-button v-for="d in DURATIONS" :key="d.v" :value="d.v">{{ d.label }}</el-radio-button>
+          </el-radio-group>
+          <div class="text-3 until">到 {{ quickUntil }} 自动结束，可在“维护与静默”中提前结束</div>
+        </el-form-item>
+        <el-form-item label="原因">
+          <el-input v-model="quick.reason" type="textarea" :rows="2" maxlength="500" show-word-limit placeholder="例如：已知问题处理中 / 变更单号（会写入告警时间线和审计）" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-link type="primary" class="adv" :underline="false" @click="openAdvanced">更多设置（级别、每周重复…）</el-link>
+        <el-button @click="quick.visible = false">取消</el-button>
+        <el-button type="primary" :loading="quick.saving" @click="doQuick">静默 {{ DURATIONS.find((d) => d.v === quick.minutes)?.label }}</el-button>
+      </template>
+    </el-dialog>
+    <SilenceDialog v-model:visible="advanced.visible" :preset="advanced.preset" @saved="onAdvancedSaved" />
+
     <el-dialog v-model="preview.visible" title="邮件预览" width="820px" append-to-body top="5vh" class="mail-dialog">
       <div class="mail-head">
         <el-radio-group v-model="preview.kind" size="small" @change="loadPreview">
@@ -112,19 +154,24 @@
 import { Check, CircleClose, Close, Link, Message, MuteNotification, Right } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, reactive, ref, watch } from 'vue'
-import { ackAlarm, closeAlarm, getAlarm, previewMail } from '@/api'
+import dayjs from 'dayjs'
+import { useRouter } from 'vue-router'
+import { ackAlarm, closeAlarm, getAlarm, previewMail, quickSilence } from '@/api'
 import SeverityTag from '@/components/SeverityTag.vue'
 import StatusTag from '@/components/StatusTag.vue'
 import TenantTag from '@/components/TenantTag.vue'
 import { useUserStore } from '@/stores/user'
-import type { AlarmDetail } from '@/types'
-import { ALARM_STATUS, LOG_ACTION, NOTIFY_KIND, NOTIFY_STATUS, RESOURCE_TYPES, SERVICES, SEVERITY } from '@/utils/dict'
+import type { AlarmDetail, Silence, SilenceIn } from '@/types'
+import { ALARM_STATUS, LOG_ACTION, NOTIFY_KIND, NOTIFY_STATUS, RESOURCE_TYPES, SERVICES, SEVERITY, SILENCE_KIND, SILENCE_STATUS } from '@/utils/dict'
 import { durationOf, fmtTime } from '@/utils/format'
+import SilenceDialog from '@/views/silences/SilenceDialog.vue'
 
 const props = defineProps<{ modelValue: number | null }>()
 const emit = defineEmits<{ 'update:modelValue': [v: number | null]; changed: [] }>()
 
+const router = useRouter()
 const canAck = computed(() => useUserStore().can('alarm:handle'))
+const canSilence = computed(() => useUserStore().can('silence:manage'))
 const a = ref<AlarmDetail>()
 const loading = ref(false)
 const acting = ref<'' | 'ack' | 'close'>('')
@@ -175,6 +222,45 @@ async function openPreview() {
   preview.visible = true
   await loadPreview()
 }
+// ---- 静默：快速静默（只这条 / 该资源 / 该规则）或打开完整表单 ----
+const DURATIONS = [
+  { v: 30, label: '30 分钟' }, { v: 60, label: '1 小时' }, { v: 120, label: '2 小时' }, { v: 240, label: '4 小时' },
+  { v: 480, label: '8 小时' }, { v: 1440, label: '1 天' }, { v: 4320, label: '3 天' },
+]
+const quick = reactive({ visible: false, target: 'alarm' as 'alarm' | 'resource' | 'rule', minutes: 120, reason: '', saving: false })
+const quickUntil = computed(() => dayjs().add(quick.minutes, 'minute').format('MM-DD HH:mm'))
+function openQuick() {
+  Object.assign(quick, { visible: true, target: 'alarm', minutes: 120, reason: '' })
+}
+async function doQuick() {
+  quick.saving = true
+  try {
+    const res = await quickSilence(a.value!.id, { minutes: quick.minutes, target: quick.target, reason: quick.reason.trim() })
+    ElMessage.success(`已静默至 ${fmtTime(res.silence.ends_at, 'MM-DD HH:mm')}${res.suppressed > 1 ? `，共抑制 ${res.suppressed} 条告警` : ''}`)
+    quick.visible = false
+    await load(a.value!.id)
+    emit('changed')
+  } finally { quick.saving = false }
+}
+const advanced = reactive({ visible: false, preset: null as Partial<SilenceIn> | null })
+function openAdvanced() {
+  const x = a.value!
+  const tenant = x.tenant_id ? { tenant_ids: [x.tenant_id] } : {}
+  const matchers = quick.target === 'resource' && x.resource_ref ? { ...tenant, resource_refs: [x.resource_ref] }
+    : quick.target === 'rule' ? { ...tenant, rule_ids: [x.rule_id] } : { ...tenant, fingerprints: [x.fingerprint] }
+  advanced.preset = { kind: 'SILENCE', name: `静默：${x.resource_name} · ${x.title}`.slice(0, 128), matchers, reason: quick.reason }
+  quick.visible = false
+  advanced.visible = true
+}
+async function onAdvancedSaved(_: Silence) {
+  await load(a.value!.id)
+  emit('changed')
+}
+function goSilence(id: number) {
+  close()
+  router.push({ path: '/silences', query: { id: String(id) } })
+}
+
 async function copyLink() {
   const url = `${location.origin}/alarms?id=${a.value!.id}`
   try {
@@ -203,6 +289,12 @@ async function copyLink() {
   b { font-size: 15px; color: var(--hi-text-1); }
 }
 .tabs { margin-top: 12px; }
+.silence-alert { margin-top: 14px; :deep(.el-alert__title) { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; }
+  .s-body { margin-top: 4px; font-size: 13px; line-height: 1.7; color: var(--hi-text-2); } }
+.targets { display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  .el-radio { height: 28px; margin-right: 0; } .text-3 { margin-left: 4px; font-size: 12px; } }
+.until { width: 100%; margin-top: 6px; font-size: 12px; }
+.adv { float: left; line-height: 32px; }
 .timeline { padding: 4px 4px 0; }
 .log { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   .flow { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--hi-text-2); padding: 0 8px; border-radius: 10px; background: var(--hi-bg-soft); } }

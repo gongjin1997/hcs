@@ -24,7 +24,7 @@
         </nav>
       </el-scrollbar>
       <div class="sider-foot">
-        <span v-show="!app.collapsed" class="ver">v0.3.0 · HCS 8.5.1</span>
+        <span v-show="!app.collapsed" class="ver">v{{ APP_VERSION }} · HCS 8.5.1</span>
         <el-button text circle @click="app.toggle()"><el-icon :size="16"><component :is="app.collapsed ? Expand : Fold" /></el-icon></el-button>
       </div>
     </el-aside>
@@ -186,6 +186,7 @@ function onCommand(cmd: string) {
     router.push('/login')
   }
 }
+const APP_VERSION = __APP_VERSION__
 </script>
 
 <style scoped lang="scss">

@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.collectors.base import Observation
 from app.core.events import publish
 from app.core.response import BizError, ErrorCode, not_found
-from app.models import AlarmEvent, AlarmEventLog, AlarmRule, Notification, Resource
+from app.models import AlarmEvent, AlarmEventLog, AlarmRule, Notification, Resource, Silence
 from app.models.alarm import ACTIVE_STATUSES
 from app.models.base import utcnow
 from app.notify.render import build_subject
@@ -79,11 +79,18 @@ def get_alarm(db: Session, alarm_id: int) -> AlarmEvent:
 
 
 def alarm_detail(db: Session, alarm: AlarmEvent) -> dict:
+    from . import platform_watch, silence_service
+
     rule = db.get(AlarmRule, alarm.rule_id)
+    runbook = rule.runbook if rule else platform_watch.RULES.get(alarm.rule_id, {}).get("runbook")
     logs = db.scalars(select(AlarmEventLog).where(AlarmEventLog.alarm_id == alarm.id).order_by(AlarmEventLog.at))
     notes = db.scalars(select(Notification).where(Notification.alarm_id == alarm.id).order_by(Notification.id))
+    silence = None
+    if alarm.silence_id is not None and (s := db.get(Silence, alarm.silence_id)) is not None:
+        silence = {"id": s.id, "name": s.name, "kind": s.kind, "starts_at": s.starts_at, "ends_at": s.ends_at,
+                   "created_by": s.created_by, "reason": s.reason, "status": silence_service.status_of(s, utcnow())}
     return {**AlarmOut.model_validate(alarm).model_dump(), "fingerprint": alarm.fingerprint, "detail": alarm.detail,
-            "runbook": rule.runbook if rule else None, "logs": list(logs), "notifications": list(notes)}
+            "runbook": runbook, "logs": list(logs), "notifications": list(notes), "silence": silence}
 
 
 # ---------------- 人工操作 ----------------

@@ -25,7 +25,7 @@ export const HEALTH: Record<string, { label: string; color: string }> = {
 }
 export const SERVICES: Record<string, string> = {
   dataarts: 'DataArts Studio', mrs: 'MRS', gaussdb: 'GaussDB', dcs: 'DCS', ecs: 'ECS', evs: 'EVS', vpc: 'VPC', elb: 'ELB',
-  rds: 'RDS', dms: 'DMS Kafka', cce: 'CCE', dws: 'DWS', css: 'CSS', ledger: '全部服务',
+  rds: 'RDS', dms: 'DMS Kafka', cce: 'CCE', dws: 'DWS', css: 'CSS', ledger: '全部服务', platform: '巡检平台',
 }
 /** 资源类型名称（与后端 services/catalog.py RESOURCE_TYPES 一致；台账页以 /resources/types 接口为准） */
 export const RESOURCE_TYPES: Record<string, string> = {
@@ -33,6 +33,8 @@ export const RESOURCE_TYPES: Record<string, string> = {
   eip: '弹性公网 IP', elb: '负载均衡 ELB', rds_instance: '云数据库 RDS', gaussdb_instance: 'GaussDB 实例', dcs_instance: 'DCS 缓存实例',
   kafka_instance: 'Kafka 实例', mrs_cluster: 'MRS 集群', dws_cluster: 'DWS 数据仓库', css_cluster: 'CSS 云搜索',
   dgc_realtime_job: '实时作业', dgc_batch_job: '批作业', mrs_job: 'MRS 作业', cce_workload: '容器工作负载',
+  // 平台自身告警（服务 = platform）
+  platform_task: '巡检任务', platform_tenant: '租户接入', platform_notify: '通知投递', platform_worker: '后台进程',
 }
 export const typeName = (code?: string | null) => (code ? RESOURCE_TYPES[code] ?? code : '-')
 
@@ -47,7 +49,7 @@ export const CHANGE_TYPE: Record<string, { label: string; type: TagType; color: 
 /** 台账变更（新增 / 变更 / 释放）与巡检发现的状态类变更（状态变更 / 重启）分开展示 */
 export const LEDGER_CHANGE_TYPES = ['CREATED', 'UPDATED', 'DELETED'] as const
 export const STATUS_CHANGE_TYPES = ['STATUS', 'REBOOT'] as const
-export const CHANGE_SOURCE: Record<string, string> = { SYNC: '同步发现', MANUAL: '人工维护', INSPECT: '巡检发现' }
+export const CHANGE_SOURCE: Record<string, string> = { SYNC: '同步发现', MANUAL: '人工维护', INSPECT: '巡检发现', IMPORT: 'Excel 导入' }
 export const ENV_TYPE: Record<string, { label: string; type: TagType }> = {
   PROD: { label: '生产', type: 'danger' }, TEST: { label: '测试', type: 'warning' }, DEV: { label: '开发', type: 'info' },
 }
@@ -79,7 +81,7 @@ export const LOG_ACTION: Record<string, { label: string; color: string }> = {
   ACK: { label: '认领', color: '#F9A825' }, SILENCE: { label: '静默 / 抑制', color: '#8C8C8C' },
   RESOLVE: { label: '自动恢复', color: '#2E7D32' }, REOPEN: { label: '重新打开', color: '#D93026' },
   CLOSE: { label: '关闭', color: '#8C8C8C' }, COMMENT: { label: '备注', color: '#4e5969' },
-  ESCALATE: { label: '未处理升级', color: '#B3261E' },
+  ESCALATE: { label: '未处理升级', color: '#B3261E' }, UNSILENCE: { label: '解除抑制', color: '#1d63f0' },
 }
 
 // 资源原始状态 → 标签颜色（各服务状态枚举见架构文档“状态映射”章节）
@@ -160,4 +162,34 @@ export const POD_PHASE: Record<string, { label: string; type: TagType }> = {
 // ---- 审计 ----
 export const AUDIT_RESULT: Record<string, { label: string; type: TagType }> = {
   SUCCESS: { label: '成功', type: 'success' }, FAILED: { label: '失败', type: 'danger' },
+}
+
+// ---- v0.4：静默与维护窗口 ----
+export const SILENCE_KIND: Record<string, { label: string; type: TagType; desc: string }> = {
+  SILENCE: { label: '静默', type: 'info', desc: '临时屏蔽通知（例如已知问题处理中），到期自动结束' },
+  MAINTENANCE: { label: '维护窗口', type: 'warning', desc: '计划内变更 / 压测期间屏蔽通知，可按周重复' },
+}
+export const SILENCE_STATUS: Record<string, { label: string; type: TagType; color: string }> = {
+  ACTIVE: { label: '生效中', type: 'success', color: '#2E7D32' },
+  WAITING: { label: '周期等待', type: 'primary', color: '#1d63f0' },
+  PENDING: { label: '待生效', type: 'warning', color: '#F57C00' },
+  EXPIRED: { label: '已结束', type: 'info', color: '#8C8C8C' },
+  CANCELLED: { label: '已取消', type: 'info', color: '#B0B0B0' },
+}
+export const WEEKDAYS: { value: number; label: string }[] = [
+  { value: 1, label: '周一' }, { value: 2, label: '周二' }, { value: 3, label: '周三' }, { value: 4, label: '周四' },
+  { value: 5, label: '周五' }, { value: 6, label: '周六' }, { value: 7, label: '周日' },
+]
+/** 后台进程心跳 */
+export const WORKER_STATUS: Record<string, { label: string; type: TagType }> = {
+  OK: { label: '运行中', type: 'success' }, LATE: { label: '心跳超时', type: 'danger' }, NEVER: { label: '未启动', type: 'info' },
+}
+export const TASK_HEALTH: Record<string, { label: string; type: TagType }> = {
+  OK: { label: '正常', type: 'success' }, WARN: { label: '有失败', type: 'warning' }, FAILED: { label: '连续失败', type: 'danger' },
+}
+/** 数据清理统计的表名 → 中文 */
+export const CLEANUP_TABLE: Record<string, string> = {
+  inspection_run: '运行记录', notification: '通知记录', alarm_event_log: '告警时间线', alarm_event: '已恢复告警', audit_log: '操作审计',
+  resource_change: '台账变更', resource: '已释放资源', report: '历史报表', pod_event: '容器事件', pod_state: 'Pod 快照',
+  alarm_silence: '已结束静默', eval_state: '规则评估状态',
 }

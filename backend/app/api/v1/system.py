@@ -4,7 +4,8 @@
 - 采集开关：按资源类型（全局 + 每个租户单独设置）启停台账同步和巡检，collect:manage；部分租户用户只能改自己租户的设置
 - 系统设置：数据保留 / 平台自身告警（setting:manage）、定时报表（report:config）、台账字典（ledger:edit）
 """
-from datetime import timedelta
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import APIRouter, Depends
@@ -63,8 +64,25 @@ class TaskPatch(BaseModel):
 
 
 def _next_runs(db: Session) -> dict[str, str | None]:
+    """调度进程心跳里上报的下次执行时间；调度进程没有运行或心跳超时时返回空（改用估算值）。"""
     hb = db.get(WorkerHeartbeat, "scheduler")
-    return dict((hb.info or {}).get("jobs") or {}) if hb else {}
+    timeout = settings_service.get_platform_alarm(db).heartbeat_timeout_min
+    if hb is None or utcnow() - hb.beat_at > timedelta(minutes=timeout):
+        return {}
+    return dict((hb.info or {}).get("jobs") or {})
+
+
+def _estimate_next(t: InspectionTask, last: datetime | None, now: datetime) -> datetime | None:
+    """调度进程未上报时按周期 / crontab 估算下次执行时间（仅供参考）。"""
+    if not t.enabled:
+        return None
+    if t.cron:
+        try:
+            return CronTrigger.from_crontab(t.cron, timezone=ZoneInfo(get_settings().timezone)).get_next_fire_time(None, now)
+        except ValueError:
+            return None
+    nxt = (last or now) + timedelta(seconds=t.interval_sec)
+    return max(nxt, now)
 
 
 def _tenant_name(tm: dict, tid: int | None) -> str | None:
@@ -82,13 +100,16 @@ def tasks(db: Session = Depends(get_db), scope: Scope = Depends(get_scope),
           _: object = Depends(require_perm("task:view"))):
     tm = tenant_map(db)
     nxt = _next_runs(db)
+    now = utcnow()
     out = []
     for t in db.scalars(select(InspectionTask).order_by(InspectionTask.code)):
         q = scope.apply(select(InspectionRun).where(InspectionRun.task_code == t.code), InspectionRun.tenant_id,
                         include_global=True)
         runs = db.scalars(q.order_by(InspectionRun.started_at.desc()).limit(12)).all()
+        next_run = nxt.get(t.code) if nxt else _estimate_next(t, runs[0].started_at if runs else None, now)
         out.append({"code": t.code, "name": t.name, "service": t.service, "interval_sec": t.interval_sec,
-                    "cron": t.cron, "enabled": t.enabled, "params": t.params, "next_run": nxt.get(t.code),
+                    "cron": t.cron, "enabled": t.enabled, "params": t.params, "next_run": next_run,
+                    "next_run_source": "scheduler" if nxt else "estimate",
                     "types": collect_switch.TASK_TYPES.get(t.code, []), "note": TASK_NOTES.get(t.code),
                     "min_interval": MIN_INTERVAL.get(t.code, 30), "skipped_tenants": _skipped(db, t.code, scope, tm),
                     "runs": [{"id": r.id, "tenant_id": r.tenant_id, "tenant_name": _tenant_name(tm, r.tenant_id),
@@ -234,8 +255,8 @@ def _fields(key: str) -> list[dict]:
     model = settings_service.MODELS[key]
     out = []
     for name, f in model.model_fields.items():
-        item: dict = {"key": name, "label": f.description or name, "default": f.default
-                      if not callable(f.default) else None}
+        item: dict = {"key": name, "label": f.description or name,
+                      "default": f.get_default(call_default_factory=True)}
         for m in f.metadata:
             for attr in ("ge", "le"):
                 if hasattr(m, attr):

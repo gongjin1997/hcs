@@ -5,6 +5,8 @@
         <i :class="summary.last_sync.status === 'SUCCESS' ? 'ok' : 'warn'" />最近同步 {{ fromNow(summary.last_sync.started_at) }}
         · {{ TASK_STATUS[summary.last_sync.status]?.label ?? summary.last_sync.status }}
       </span>
+      <el-button :icon="Collection" @click="dictVisible = true">字典</el-button>
+      <el-button v-perm="'ledger:edit'" :icon="Upload" @click="importVisible = true">Excel 导入</el-button>
       <el-button v-perm="'ledger:sync'" :icon="Refresh" :loading="syncing" @click="onSync">立即同步</el-button>
       <el-button v-perm="'ledger:export'" type="primary" :icon="Download" :loading="exporting" @click="onExport">导出 Excel</el-button>
     </PageHeader>
@@ -49,8 +51,12 @@
             <el-icon><component :is="catIcon(c.code)" /></el-icon><span>{{ INSPECT_ONLY_CAT[c.code] ?? c.name }}</span>
             <em class="num">{{ c.total }}</em>
           </div>
-          <div v-for="t in typesOf(c.code)" :key="t.code" class="nav-item" :class="{ active: sel.kind === 'type' && sel.code === t.code }" @click="pickType(t.code)">
+          <div v-for="t in typesOf(c.code)" :key="t.code" class="nav-item" :class="{ active: sel.kind === 'type' && sel.code === t.code, off: t.collect && !t.collect.enabled }" @click="pickType(t.code)">
             <span class="ellipsis">{{ t.name }}</span>
+            <el-tooltip v-if="t.collect?.off_tenants.length" placement="right"
+                        :content="t.collect.enabled ? `${t.collect.off_tenants.join('、')} 已关闭采集（系统管理 → 采集开关）` : '已关闭采集：不同步台账、不巡检（系统管理 → 采集开关）'">
+              <i class="sw">{{ t.collect.enabled ? '部分' : '关' }}</i>
+            </el-tooltip>
             <i v-if="t.abnormal" class="abn num">{{ t.abnormal }}</i>
             <em class="num">{{ t.total }}</em>
           </div>
@@ -155,7 +161,11 @@
     </div>
 
     <ResourceDrawer v-model="drawer.visible" :resource-id="drawer.id" :inspected-types="inspectedTypes"
-                    :options="meta?.options ?? { owner: [], business: [] }" @saved="onSaved" />
+                    :options="drawerOptions" :enforce="meta?.dict?.enforce" @saved="onSaved" />
+    <LedgerDictDialog v-model:visible="dictVisible" @saved="reloadMeta" />
+    <LedgerImportDialog v-model:visible="importVisible" :resource-type="sel.kind === 'type' ? sel.code : undefined"
+                        :category="sel.kind === 'category' ? sel.code : sel.kind === 'all' ? 'ledger' : undefined"
+                        :scope-text="importScope" @imported="onImported" />
 
     <!-- 疑似闲置清单 -->
     <el-dialog v-model="idleVisible" title="疑似闲置资源" width="720px">
@@ -172,7 +182,7 @@
 </template>
 
 <script setup lang="ts">
-import { Box, Coin, Connection, Cpu, DataAnalysis, Download, Files, Operation, Refresh, RefreshLeft, Search } from '@element-plus/icons-vue'
+import { Box, Coin, Collection, Connection, Cpu, DataAnalysis, Download, Files, Operation, Refresh, RefreshLeft, Search, Upload } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, markRaw, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -186,6 +196,8 @@ import type { LedgerSummary, Resource, ResourceMeta } from '@/types'
 import { ENV_TYPE, HEALTH, IDLE_STATES, TASK_STATUS, rawStatusType, statusText, typeName, usageColor } from '@/utils/dict'
 import { fmtTime, fromNow } from '@/utils/format'
 import ChangeTable from './ChangeTable.vue'
+import LedgerDictDialog from './LedgerDictDialog.vue'
+import LedgerImportDialog from './LedgerImportDialog.vue'
 import { MONITOR_COLUMNS, fmtValue, pick } from './columns'
 import ResourceDrawer from './ResourceDrawer.vue'
 
@@ -277,6 +289,28 @@ const drawer = reactive({ visible: false, id: null as number | null })
 function openDetail(id: number) { drawer.id = id; drawer.visible = true }
 async function onSaved() { await Promise.all([load(), loadMeta()]); changeRef.value?.reload() }
 
+// ---- v0.4：台账字典 / Excel 导入 ----
+const dictVisible = ref(false)
+const importVisible = ref(false)
+const uniq = (a: string[], b: string[]) => [...new Set([...a, ...b])].sort((x, y) => x.localeCompare(y, 'zh-CN'))
+/** 资源详情下拉：字典取值 + 已在用的取值；开启“只能从字典选择”时只给字典取值 */
+const drawerOptions = computed(() => {
+  const d = meta.value?.dict
+  const o = meta.value?.options ?? { owner: [], business: [] }
+  if (!d) return o
+  return d.enforce ? { owner: d.owners, business: d.business } : { owner: uniq(d.owners, o.owner), business: uniq(d.business, o.business) }
+})
+const importScope = computed(() => {
+  if (sel.kind === 'type') return typeName(sel.code)
+  if (sel.kind === 'category') return meta.value?.categories.find((c) => c.code === sel.code)?.name ?? sel.code
+  return '全部台账资源'
+})
+async function reloadMeta() { await loadMeta() }
+async function onImported() {
+  await Promise.all([load(), loadMeta()])
+  changeRef.value?.reload()
+}
+
 // ---- 汇总 / 同步 / 导出 ----
 const loadMeta = async () => { [meta.value, summary.value] = await Promise.all([resourceMeta(), ledgerSummary()]) }
 const idleTotal = computed(() => (summary.value ? Object.values(summary.value.idle).reduce((a, b) => a + b, 0) : 0))
@@ -346,6 +380,8 @@ watch(() => route.query.id, (id) => { if (typeof id === 'string') openDetail(Num
   .root { font-weight: 600; color: var(--hi-text-1); margin-bottom: 4px; }
   .nav-cat { margin-top: 6px; font-weight: 600; color: var(--hi-text-1); }
   .nav-item { padding-left: 34px;
+    &.off { color: var(--hi-text-3); .ellipsis { text-decoration: line-through; text-decoration-color: rgba(0, 0, 0, 0.25); } }
+    .sw { font-style: normal; height: 16px; padding: 0 5px; border-radius: 8px; font-size: 11px; line-height: 16px; color: var(--hi-text-3); background: var(--hi-unknown-bg); border: 1px solid var(--hi-border); }
     .abn { font-style: normal; min-width: 18px; height: 16px; padding: 0 5px; border-radius: 8px; background: var(--hi-p1-bg); color: var(--hi-p1); font-size: 11px; display: grid; place-items: center; } } }
 .main { flex: 1; min-width: 0; padding-top: 6px;
   .main-tabs :deep(.el-tabs__header) { margin-bottom: 14px; }

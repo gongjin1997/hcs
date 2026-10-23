@@ -35,7 +35,7 @@ class Retention(BaseModel):
 
     inspection_run_days: int = Field(90, ge=7, le=3650, description="巡检 / 同步运行记录")
     notification_days: int = Field(90, ge=7, le=3650, description="通知发送记录")
-    alarm_closed_days: int = Field(180, ge=30, le=3650, description="已恢复 / 已关闭的告警（含处理时间线）")
+    alarm_closed_days: int = Field(180, ge=30, le=3650, description="已结束的告警（含处理时间线）")
     audit_log_days: int = Field(180, ge=90, le=3650, description="操作审计（建议不少于 180 天）")
     resource_change_days: int = Field(365, ge=30, le=3650, description="台账变更记录")
     released_resource_days: int = Field(365, ge=30, le=3650, description="云上已释放的资源")
@@ -46,9 +46,9 @@ class Retention(BaseModel):
 class ReportSettings(BaseModel):
     """定时报表：每类报表的发送时间（crontab，平台时区）、是否启用、合并报表收件人。租户报表收件人在租户接入里配置。"""
 
-    cron: dict[str, str] = {}
-    enabled: dict[str, bool] = {}
-    mail_to: list[str] = []
+    cron: dict[str, str] = Field(default_factory=dict, description="发送时间（crontab：分 时 日 月 周）")
+    enabled: dict[str, bool] = Field(default_factory=dict, description="是否启用")
+    mail_to: list[str] = Field(default_factory=list, description="合并报表收件人")
 
     @field_validator("cron")
     @classmethod
@@ -74,12 +74,12 @@ class ReportSettings(BaseModel):
 class PlatformAlarm(BaseModel):
     """平台自身告警：任务连续失败、租户认证失败、通知最终发送失败、后台进程心跳超时。"""
 
-    enabled: bool = True
-    task_fail_threshold: int = Field(3, ge=1, le=20, description="同一任务同一租户连续失败 N 次告警")
-    auth_fail_alarm: bool = True
-    notify_fail_alarm: bool = True
-    heartbeat_timeout_min: int = Field(3, ge=1, le=60, description="调度 / 通知进程超过 N 分钟无心跳告警")
-    severity: Literal["P1", "P2", "P3"] = "P2"
+    enabled: bool = Field(True, description="启用平台自身告警")
+    task_fail_threshold: int = Field(3, ge=1, le=20, description="任务连续失败 N 次告警（按租户计）")
+    auth_fail_alarm: bool = Field(True, description="租户认证失败（401/403）立即告警")
+    notify_fail_alarm: bool = Field(True, description="通知重试 5 次仍失败时告警")
+    heartbeat_timeout_min: int = Field(3, ge=1, le=60, description="后台进程无心跳 N 分钟告警")
+    severity: Literal["P1", "P2", "P3"] = Field("P2", description="平台告警级别")
     mail_to: list[str] = Field(default_factory=list, description="没有通知路由命中时的收件人；为空发给有邮箱的平台管理员")
 
     @field_validator("mail_to")
@@ -96,9 +96,9 @@ class DictItem(BaseModel):
 class LedgerDict(BaseModel):
     """台账字典：业务系统、负责人的统一取值（台账编辑和 Excel 导入时使用，避免同一个系统多种写法）。"""
 
-    business: list[DictItem] = []
-    owners: list[DictItem] = []
-    enforce: bool = False          # 开启后只能从字典中选择（Excel 导入时字典外的取值会被拒绝）
+    business: list[DictItem] = Field(default_factory=list, description="业务系统")
+    owners: list[DictItem] = Field(default_factory=list, description="负责人")
+    enforce: bool = Field(False, description="只能从字典选择（Excel 导入时字典外的取值会被拒绝）")
 
     @field_validator("business", "owners")
     @classmethod
