@@ -1,0 +1,7 @@
+# 从源码构建镜像（仓库内使用）：docker compose -f docker-compose.yml -f docker-compose.build.yml build
+# 离线局点不需要本文件：用 scripts/offline-bundle.sh 打包的镜像 docker load 即可
+services:
+  migrate:
+    build: {context: ../backend, args: {PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.org/simple}"}}
+  web:
+    build: {context: ../frontend, args: {NPM_REGISTRY: "${NPM_REGISTRY:-https://registry.npmjs.org}"}}

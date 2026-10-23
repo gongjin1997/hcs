@@ -3,7 +3,7 @@
 - 巡检任务、台账同步（ledger_sync）、数据清理（data_cleanup）：按任务的周期（interval_sec）或 crontab（cron）执行；
   max_instances=1（不重叠）、coalesce（错过的合并为一次）、jitter（打散请求）；每次执行按租户逐个跑（某个租户失败不影响
   其他租户，各自一条运行记录；采集开关关闭的租户跳过）
-- 报表：按“报表中心 → 报表设置”（未设置时取环境变量 INSPECTOR_REPORT_CRON）生成日报 / 周报 / 月报并发送
+- 报表：按“系统管理 → 巡检任务 → 修改发送时间 / 收件人”（未设置时取环境变量 INSPECTOR_REPORT_CRON）生成日报 / 周报 / 月报并发送
 - 每 30 秒同步一次任务配置：页面上修改周期 / crontab / 启停、报表发送时间后无需重启（最迟 30 秒生效）
 - 每 30 秒写心跳（含各作业下次执行时间，巡检任务页显示），并检查通知进程心跳（超时产生平台告警 R-PLAT-004）
 - 多副本部署时用 Redis 锁保证同一作业同一时刻只在一个副本上执行（docker-compose 单机部署保持 1 个副本即可）
@@ -21,7 +21,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import select
 
 from app.collectors.registry import TASKS
-from app.core.config import get_settings
+from app.core.config import ensure_prod_ready, get_settings
 from app.core.db import SessionLocal
 from app.core.logging import setup_logging
 from app.ledger.sync import LEDGER_TASK
@@ -149,6 +149,7 @@ class JobSync:
 
 def main() -> None:
     setup_logging()
+    ensure_prod_ready()
     s = get_settings()
     sched = BlockingScheduler(timezone=s.timezone,
                               job_defaults={"max_instances": 1, "coalesce": True, "misfire_grace_time": 30})

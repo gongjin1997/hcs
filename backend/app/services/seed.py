@@ -65,6 +65,8 @@ DEMO_USERS = [  # 用户名, 口令, 显示名, 邮箱, 角色, 租户范围（N
     ("viewer", "viewer123", "刘洋", "liuyang@example.com", "viewer", None, True),
     ("chenjing", "chenjing123", "陈静", "chenjing@example.com", "oncall", None, False),
 ]
+# 登录页“演示账号（点击填入）”：只在非 prod + 演示数据时由 GET /auth/login-options 返回
+DEMO_HINTS = [(u, p, r) for u, p, _, _, r, _, _ in DEMO_USERS if u in ("admin", "oncall")]
 CONTACTS = [("张伟", "zhangwei@example.com", "13800000001"), ("李娜", "lina@example.com", "13800000002"),
             ("陈静", "chenjing@example.com", "13800000003"), ("赵磊", "zhaolei@example.com", "13800000004"),
             ("王芳", "wangfang@example.com", "13800000005"), ("刘强", "liuqiang@example.com", "13800000006"),

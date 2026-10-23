@@ -19,3 +19,16 @@ dist/
 .vscode/*
 !.vscode/extensions.json
 .DS_Store
+
+# 部署目录运行时文件（含密钥 / 数据，不入库）
+deploy/.env
+deploy/.env.bak*
+deploy/.env.before-restore*
+deploy/data/
+deploy/backups/
+deploy/exports/
+deploy/images/
+deploy/nginx/certs/*
+!deploy/nginx/certs/README.md
+deploy/certs/*
+!deploy/certs/README.md

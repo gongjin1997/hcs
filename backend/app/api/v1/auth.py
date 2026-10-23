@@ -29,6 +29,23 @@ def user_out(db: Session, user: User) -> UserOut:
                    is_admin=cu.is_admin)
 
 
+@router.get("/login-options", summary="登录页选项（公开）：平台版本；演示环境附带演示账号")
+def login_options(db: Session = Depends(get_db)):
+    """演示账号只在“非 prod 且开启演示数据、演示用户仍存在”时返回；生产环境登录页不会出现任何账号提示。"""
+    from app import __version__
+    from app.core.permissions import BUILTIN_ROLES
+    from app.services.seed import DEMO_HINTS
+
+    s = get_settings()
+    demo: list[dict] = []
+    if s.env != "prod" and s.demo_seed:
+        names = {u for u, _, _ in DEMO_HINTS}
+        exist = set(db.scalars(select(User.username).where(User.username.in_(names), User.enabled.is_(True))))
+        role_name = {r["code"]: r["name"] for r in BUILTIN_ROLES}
+        demo = [{"username": u, "password": p, "role": role_name.get(r, r)} for u, p, r in DEMO_HINTS if u in exist]
+    return ok({"version": __version__, "env": s.env if s.env != "prod" else None, "demo_accounts": demo})
+
+
 @router.post("/login", response_model=ApiResponse[LoginOut], summary="账号密码登录")
 def login(body: LoginIn, db: Session = Depends(get_db), audit: Auditor = Depends(get_anon_auditor)):
     s, now, username = get_settings(), utcnow(), body.username.strip()

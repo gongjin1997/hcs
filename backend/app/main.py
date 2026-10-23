@@ -13,7 +13,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app import __version__, models  # noqa: F401  注册全部 ORM 模型
 from app.api.metrics import router as metrics_router
 from app.api.router import api_router
-from app.core.config import get_settings
+from app.core.config import ensure_prod_ready, get_settings
 from app.core.db import Base, SessionLocal, engine
 from app.core.events import broadcaster, redis_forwarder
 from app.core.logging import RequestIdMiddleware, setup_logging
@@ -32,6 +32,7 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        ensure_prod_ready(settings)
         if settings.env != "prod":
             Base.metadata.create_all(engine)     # 开发便捷；生产环境使用 alembic upgrade head
         if settings.demo_seed and settings.env == "prod":

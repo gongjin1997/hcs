@@ -25,9 +25,9 @@
         <el-button type="primary" class="submit" :loading="loading" @click="submit">登录</el-button>
       </el-form>
 
-      <div v-if="showDemo" class="demo">
+      <div v-if="demo.length" class="demo">
         <span class="k">演示账号（点击填入）</span>
-        <span v-for="a in DEMO" :key="a.u" class="acc" @click="fillDemo(a)"><b>{{ a.u }} / {{ a.p }}</b><em>{{ a.role }}</em></span>
+        <span v-for="a in demo" :key="a.username" class="acc" @click="fillDemo(a)"><b>{{ a.username }} / {{ a.password }}</b><em>{{ a.role }}</em></span>
       </div>
       <div class="foot">运维组内部使用 · 账号由管理员开通</div>
     </div>
@@ -41,13 +41,14 @@ import type { FormInstance, FormRules } from 'element-plus'
 import { reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useUserStore } from '@/stores/user'
+import { loginOptions, type LoginOptions } from '@/api'
 
 const LAST_USER = 'hi_last_user'
-const showDemo = import.meta.env.DEV || ['localhost', '127.0.0.1'].includes(location.hostname)
 const form = reactive({ username: localStorage.getItem(LAST_USER) || '', password: '', remember: true })
-// 演示环境点击即可填入（生产构建且非 localhost 时不显示）
-const DEMO = [{ u: 'admin', p: 'admin123', role: '平台管理员' }, { u: 'oncall', p: 'oncall123', role: '值班运维' }]
-const fillDemo = (a: { u: string; p: string }) => Object.assign(form, { username: a.u, password: a.p })
+// 演示账号由后端下发：只在非 prod 且开启演示数据时返回，生产环境登录页不出现任何账号提示
+const demo = ref<LoginOptions['demo_accounts']>([])
+loginOptions().then((o) => { demo.value = o.demo_accounts || [] }).catch(() => {})
+const fillDemo = (a: { username: string; password: string }) => Object.assign(form, { username: a.username, password: a.password })
 const rules: FormRules = { username: [{ required: true, message: '请输入账号' }], password: [{ required: true, message: '请输入密码' }] }
 const formRef = ref<FormInstance>()
 const loading = ref(false)

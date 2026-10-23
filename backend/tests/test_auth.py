@@ -88,3 +88,17 @@ def test_user_tenant_scope(client, admin, tenant_ids):
     assert client.patch(f"/api/v1/system/users/{uid}", headers=admin, json={"tenant_ids": [999]}).status_code == 400
     r = client.patch(f"/api/v1/system/users/{uid}", headers=admin, json={"all_tenants": True})
     assert r.status_code == 200 and r.json()["data"]["tenant_ids"] is None
+
+
+def test_login_options_demo_only_outside_prod(client, monkeypatch):
+    """登录页演示账号只在非 prod + 演示数据时下发；生产环境不返回任何账号提示。"""
+    from app.core.config import get_settings
+
+    r = client.get("/api/v1/auth/login-options").json()["data"]
+    assert r["version"]
+    s = get_settings()
+    if s.demo_seed and s.env != "prod":
+        assert all({"username", "password", "role"} <= set(a) for a in r["demo_accounts"])
+    monkeypatch.setattr(s, "env", "prod")
+    r = client.get("/api/v1/auth/login-options").json()["data"]
+    assert r["demo_accounts"] == [] and r["env"] is None

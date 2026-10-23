@@ -2,6 +2,7 @@
 python -m app.workers.run_once ecs_status                    # 巡检任务（全部启用租户）
 python -m app.workers.run_once cce_pod_events --tenant tenant-a
 python -m app.workers.run_once ledger_sync                   # 台账同步
+python -m app.workers.run_once data_cleanup                  # 数据清理（按“系统设置 → 数据保留”删除过期数据）
 python -m app.workers.run_once report DAILY [--tenant tenant-a]   # 生成上一周期报表（DAILY / WEEKLY / MONTHLY / LEDGER）
 python -m app.workers.run_once check [--tenant tenant-a]     # 租户连通性 / 能力探测（CES、Prometheus、CCE API）
 """
@@ -17,14 +18,15 @@ from app.ledger.sync import LEDGER_TASK
 from app.models import HcsAccount
 from app.reports.builder import KINDS
 from app.reports.service import generate
-from app.services.pipeline import run_all
+from app.services.cleanup import CLEANUP_TASK
+from app.services.pipeline import run_all, run_cleanup_task
 from app.services.tenant_check import check_tenant
 
 
 def main() -> None:
     setup_logging()
     p = argparse.ArgumentParser(prog="python -m app.workers.run_once")
-    p.add_argument("task", help=f"{'|'.join([*TASKS, LEDGER_TASK])}|report|check")
+    p.add_argument("task", help=f"{'|'.join([*TASKS, LEDGER_TASK, CLEANUP_TASK])}|report|check")
     p.add_argument("kind", nargs="?", help=f"报表类型：{'|'.join(KINDS)}")
     p.add_argument("--tenant", help="租户代码（默认全部启用租户）")
     a = p.parse_args()
@@ -48,6 +50,10 @@ def main() -> None:
                 print(f"[{t.code}] ok={res['ok']} metrics_source={res['metrics_source']}")
                 for c in res["checks"]:
                     print(f"  {'✔' if c['ok'] else '✘'} {c['name']}: {c.get('detail') or c.get('message') or ''}")
+            return
+        if a.task == CLEANUP_TASK:
+            run = run_cleanup_task(db, trigger="MANUAL")
+            print(f"{run.task_code}: {run.status} {run.stats or {}} {run.error_summary or ''}")
             return
         if a.task not in TASKS and a.task != LEDGER_TASK:
             p.error(f"未知任务：{a.task}")

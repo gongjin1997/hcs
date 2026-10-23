@@ -11,6 +11,7 @@ import time
 
 from sqlalchemy import func, select
 
+from app.core.config import ensure_prod_ready
 from app.core.db import SessionLocal
 from app.core.logging import setup_logging
 from app.models import Notification
@@ -46,6 +47,7 @@ def heartbeat(db) -> None:
 
 def main(interval: float = 5.0, minute: float = 60.0, beat_every: float = 30.0) -> None:
     setup_logging()
+    ensure_prod_ready()
     signal.signal(signal.SIGTERM, _graceful)
     log.info("notifier started")
     last_minute = last_beat = 0.0

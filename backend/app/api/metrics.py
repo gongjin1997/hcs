@@ -1,7 +1,8 @@
 """Prometheus 指标：GET /metrics（文本格式）。
 
-- 配置 INSPECTOR_METRICS_TOKEN 时需带 Authorization: Bearer <token>；未配置时不校验 ——
-  docker-compose 部署中 /metrics 只在内部网络暴露（Nginx 不转发），由同网络的 Prometheus 抓取
+- 配置 INSPECTOR_METRICS_TOKEN 时需带 Authorization: Bearer <token>；未配置时不校验（生产 gen-env.sh 会生成令牌）
+- docker compose 部署：nginx 的 /metrics 默认拒绝；
+  在 deploy/nginx/snippets/metrics-allow.conf 放行 Prometheus 服务器 IP 后经控制台地址抓取
 - 指标覆盖：活动告警、通知积压 / 失败、任务最近执行状态与连续失败次数、后台进程心跳、台账资源数、静默数、HTTP 请求
 """
 import hmac

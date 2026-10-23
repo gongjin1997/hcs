@@ -1,0 +1,34 @@
+# 演示 / 联调覆盖：Mock HCS 8.5.1 + Mailpit 收件箱 + 演示数据（账号见 backend/app/services/seed.py）。不要用于生产！
+# 启用：.env 中 COMPOSE_FILE=docker-compose.yml:docker-compose.demo.yml，或仓库根目录 make up
+x-demo-env: &demo-env
+  INSPECTOR_ENV: dev
+  INSPECTOR_DEMO_SEED: "true"
+  INSPECTOR_HCS_MOCK_URL: http://mock-hcs:9000
+  INSPECTOR_BASE_URL: http://localhost:${WEB_PORT:-8080}
+  INSPECTOR_SMTP_HOST: mailpit
+  INSPECTOR_SMTP_PORT: "1025"
+  INSPECTOR_SMTP_USER: ""
+  INSPECTOR_SMTP_PASSWORD: ""
+  INSPECTOR_SMTP_STARTTLS: "false"
+
+services:
+  mock-hcs:
+    image: ${IMAGE_PREFIX:-hcs-inspector}-backend:${HCS_INSPECTOR_VERSION:-0.4.0}
+    command: ["uvicorn", "mock_hcs.app:app", "--host", "0.0.0.0", "--port", "9000"]
+    healthcheck: {disable: true}
+    restart: unless-stopped
+  mailpit:
+    image: ${MAILPIT_IMAGE:-axllent/mailpit:latest}
+    ports: ["${MAILPIT_PORT:-8025}:8025"]
+    restart: unless-stopped
+  migrate:          # 演示库只做迁移，演示数据由 API 首次启动写入（bootstrap 建了 admin 会让演示数据跳过）
+    command: ["alembic", "upgrade", "head"]
+    environment: *demo-env
+  api:
+    environment: *demo-env
+    depends_on: {mock-hcs: {condition: service_started}}
+  scheduler:
+    environment: *demo-env
+  notifier:
+    environment: *demo-env
+    depends_on: {mailpit: {condition: service_started}}

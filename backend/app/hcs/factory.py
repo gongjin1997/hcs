@@ -24,7 +24,9 @@ def mock_endpoints(base: str) -> dict[str, str]:
 
 
 def _http(s: Settings) -> httpx.Client:
-    return httpx.Client(verify=s.hcs_verify, timeout=httpx.Timeout(10.0, connect=5.0))
+    # 局点 API 网关多为内部 CA 签发：配置 INSPECTOR_HCS_CA_FILE（PEM，挂载到容器 /app/certs）后按该 CA 校验
+    verify: bool | str = s.hcs_ca_file if (s.hcs_verify and s.hcs_ca_file) else s.hcs_verify
+    return httpx.Client(verify=verify, timeout=httpx.Timeout(10.0, connect=5.0))
 
 
 def _mock(s: Settings, mock_url: str | None) -> str | None:

@@ -1,8 +1,10 @@
-# GitLab CI 参考流水线（CodeArts / Jenkins 可按相同阶段迁移）
-stages: [check, build, deploy]
+# GitLab CI 参考流水线（CodeArts / Jenkins 可按相同阶段迁移）：check → build → package
+# 部署方式为单机 docker compose（deploy/）：main 分支推送镜像到私有仓库；打 tag（v0.4.0）时额外产出离线安装包，
+# 局点在目标机解压后 make install / make upgrade V=<版本>（见 docs/部署运维手册.md）
+stages: [check, build, package]
 
 variables:
-  REGISTRY: registry.example.com/hcs-inspector
+  IMAGE_PREFIX: registry.example.com/ops/hcs-inspector   # = deploy/.env 的 IMAGE_PREFIX；镜像为 <前缀>-backend / <前缀>-web
   PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
 
 backend-check:
@@ -10,21 +12,35 @@ backend-check:
   image: python:3.12-slim
   cache: {key: pip, paths: [.cache/pip]}
   script:
-    - cd backend && pip install -e ".[dev]"
+    - cd backend && pip install -c constraints.txt -e ".[dev]"
     - ruff check .
     - mypy app mock_hcs
     - pytest -q
     - INSPECTOR_DATABASE_URL=sqlite:///./ci.db alembic upgrade head && INSPECTOR_DATABASE_URL=sqlite:///./ci.db alembic check
     - INSPECTOR_DATABASE_URL=sqlite:///./ci.db INSPECTOR_DEMO_SEED=false python -m app.workers.bootstrap   # 初始化脚本冒烟
+    - INSPECTOR_DATABASE_URL=sqlite:///./ci.db python -m app.tools.status || test $? -eq 1              # 自检工具冒烟（无进程心跳时退出码 1）
 
 frontend-check:
   stage: check
-  image: node:20-alpine
+  image: node:22-alpine
   cache: {key: npm, paths: [frontend/node_modules]}
   script:
     - cd frontend && npm ci
     - npm run typecheck
     - npm run build
+
+deploy-check:              # compose 文件组合、部署脚本语法
+  stage: check
+  image: docker:27
+  script:
+    - apk add --no-cache bash make
+    - cd deploy && sed 's/__GEN_[A-Z0-9_]*__/ci/' .env.example > .env
+    - docker compose config -q
+    - COMPOSE_FILE=docker-compose.yml:docker-compose.https.yml docker compose config -q
+    - COMPOSE_FILE=docker-compose.yml:docker-compose.demo.yml docker compose config -q
+    - docker compose -f docker-compose.yml -f docker-compose.build.yml config -q
+    - for f in scripts/*.sh; do bash -n "$f"; done
+    - make -n install upgrade backup status >/dev/null
 
 build-images:
   stage: build
@@ -32,27 +48,20 @@ build-images:
   services: [docker:27-dind]
   rules: [{if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_TAG'}]
   script:
-    - docker build -t $REGISTRY/backend:$CI_COMMIT_SHORT_SHA backend
-    - docker build -t $REGISTRY/web:$CI_COMMIT_SHORT_SHA frontend
-    - docker push $REGISTRY/backend:$CI_COMMIT_SHORT_SHA
-    - docker push $REGISTRY/web:$CI_COMMIT_SHORT_SHA
+    - TAG="${CI_COMMIT_TAG#v}"; TAG="${TAG:-$CI_COMMIT_SHORT_SHA}"
+    - docker build --build-arg PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.org/simple}" -t "$IMAGE_PREFIX-backend:$TAG" backend
+    - docker build --build-arg NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmjs.org}" -t "$IMAGE_PREFIX-web:$TAG" frontend
+    - docker push "$IMAGE_PREFIX-backend:$TAG"
+    - docker push "$IMAGE_PREFIX-web:$TAG"
 
-deploy-staging:
-  stage: deploy
-  image: bitnami/kubectl:latest
-  rules: [{if: '$CI_COMMIT_BRANCH == "main"'}]
-  environment: staging
-  script:
-    - kubectl -n hcs-inspector-staging set image deploy/inspector-api api=$REGISTRY/backend:$CI_COMMIT_SHORT_SHA
-    - kubectl -n hcs-inspector-staging set image deploy/inspector-scheduler scheduler=$REGISTRY/backend:$CI_COMMIT_SHORT_SHA
-    - kubectl -n hcs-inspector-staging set image deploy/inspector-notifier notifier=$REGISTRY/backend:$CI_COMMIT_SHORT_SHA
-    - kubectl -n hcs-inspector-staging set image deploy/inspector-web web=$REGISTRY/web:$CI_COMMIT_SHORT_SHA
-
-deploy-prod:
-  stage: deploy
-  image: bitnami/kubectl:latest
+offline-bundle:            # 离线安装包（镜像 tar + 部署目录 + 文档），作为制品下载
+  stage: package
+  image: docker:27
+  services: [docker:27-dind]
   rules: [{if: '$CI_COMMIT_TAG'}]
-  when: manual          # 生产发布需人工确认
-  environment: production
   script:
-    - echo "使用 Helm 发布：helm upgrade --install inspector ./deploy/helm --set image.tag=$CI_COMMIT_TAG"
+    - apk add --no-cache bash make coreutils
+    - cd deploy && bash scripts/offline-bundle.sh
+  artifacts:
+    paths: [deploy/dist/*.tar.gz]
+    expire_in: 90 days

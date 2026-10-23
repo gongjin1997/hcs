@@ -6,14 +6,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     """全部配置项均可通过环境变量覆盖，前缀 INSPECTOR_，例如 INSPECTOR_DATABASE_URL。"""
 
-    model_config = SettingsConfigDict(env_file=".env", env_prefix="INSPECTOR_", extra="ignore")
+    # env_parse_none_str=""：部署 .env 里留空的可选项（如 INSPECTOR_SMTP_CA_FILE=）按“未配置”处理
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="INSPECTOR_", extra="ignore", env_parse_none_str="")
 
     app_name: str = "HCS 巡检平台"
     env: str = "dev"                                  # dev / test / prod
     env_tag: str = "PROD"                             # 邮件主题中的环境标识
     database_url: str = "sqlite:///./dev.db"          # 生产：postgresql+psycopg://user:pwd@host:5432/inspector
     redis_url: str | None = None                      # 生产必配：分布式锁、事件推送
-    jwt_secret: str = "change-me-in-prod-use-32+-random-bytes"   # 生产必须通过 Secret 覆盖（≥32 字节随机串）
+    jwt_secret: str = "change-me-in-prod-use-32+-random-bytes"   # 生产由 deploy/.env 覆盖（gen-env.sh 生成 ≥32 字节）
     jwt_expire_minutes: int = 12 * 60                 # 登录有效期（默认 12 小时）
     jwt_remember_days: int = 7                        # 勾选“7 天内免登录”时的有效期
     login_max_failures: int = 5                       # 连续输错 N 次临时锁定
@@ -48,7 +49,8 @@ class Settings(BaseSettings):
     hcs_project_id: str = ""
     hcs_region: str = "region-01"
     hcs_external_domain: str = "example.com"
-    hcs_verify: bool = True
+    hcs_verify: bool = True                           # 校验 HCS 接口证书（内网自签证书请配 hcs_ca_file，不建议关闭校验）
+    hcs_ca_file: str | None = None                    # 内部 CA 证书（PEM）路径，例如 /app/certs/hcs-ca.pem
     hcs_endpoints: dict[str, str] = {
         "dataarts": "dayu-dlf.{region}.{domain}",
         "mrs": "mrs.{region}.{domain}",
@@ -87,3 +89,29 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+_DEFAULT_SECRETS = {"change-me-in-prod-use-32+-random-bytes", "change-me-too", "please-change-me-to-32-plus-random-bytes",
+                    "please-change-me-too"}
+
+
+def prod_problems(s: Settings) -> list[str]:
+    """生产环境（env=prod）启动自检：返回不满足项。API / 调度 / 通知 / 初始化进程启动时调用，有问题直接退出。"""
+    if s.env != "prod":
+        return []
+    out = []
+    if s.jwt_secret in _DEFAULT_SECRETS or len(s.jwt_secret) < 32:
+        out.append("INSPECTOR_JWT_SECRET 仍是默认值或短于 32 字符（openssl rand -hex 32）")
+    if s.mail_link_secret in _DEFAULT_SECRETS or len(s.mail_link_secret) < 16:
+        out.append("INSPECTOR_MAIL_LINK_SECRET 仍是默认值或短于 16 字符")
+    if not s.master_key:
+        out.append("未配置 INSPECTOR_MASTER_KEY（租户凭据加密主密钥，openssl rand -base64 32，务必备份）")
+    if s.database_url.startswith("sqlite"):
+        out.append("生产环境请使用 PostgreSQL（INSPECTOR_DATABASE_URL=postgresql+psycopg://...）")
+    return out
+
+
+def ensure_prod_ready(s: Settings | None = None) -> None:
+    problems = prod_problems(s or get_settings())
+    if problems:
+        raise SystemExit("生产配置自检未通过（修改部署目录 .env 后重新启动）：\n  - " + "\n  - ".join(problems))

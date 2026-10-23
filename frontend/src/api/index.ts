@@ -12,6 +12,8 @@ import { del, download, get, patch, post, put } from './request'
 export const login = (username: string, password: string, remember = false) =>
   post<{ access_token: string; expires_in: number; user: UserInfo }>('/auth/login', { username, password, remember }, { silent: true })
 export const fetchMe = () => get<UserInfo>('/auth/me')
+export interface LoginOptions { version: string; env: string | null; demo_accounts: { username: string; password: string; role: string }[] }
+export const loginOptions = () => get<LoginOptions>('/auth/login-options', undefined, { silent: true })
 export const changePassword = (old_password: string, new_password: string) =>
   post<null>('/auth/password', { old_password, new_password })
 
