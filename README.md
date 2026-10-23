@@ -21,6 +21,8 @@
 | [docs/部署运维手册.md](docs/部署运维手册.md) | 环境要求、`.env` 说明、安装 / HTTPS / 白名单 / 证书、监控对接、升级回滚、备份恢复、日常巡检与排障 |
 | [docs/联调手册.md](docs/联调手册.md) | 局域网对接真实 HCS：账号权限、租户录入、`make probe` 接口探测、字段映射修正、分批放开采集、验收 |
 | [docs/后期开发方案.md](docs/后期开发方案.md) | v0.5 → v1.0 路线图、待办清单（优先级 / 工作量）、风险 |
+| [docs/接续开发任务书.md](docs/接续开发任务书.md) | 代码体检结论、优化清单 C01–C22、按顺序执行的任务卡 T01–T21（步骤 + 验收标准），供 Claude Code / 新成员接续开发 |
+| [CLAUDE.md](CLAUDE.md) | Claude Code 项目说明（约束、命令、完成定义；`backend/`、`frontend/` 下另有速查）；`.claude/` 为权限配置与自定义命令 |
 | [docs/接口清单.md](docs/接口清单.md) | 97 个接口的方法 / 路径 / 所需权限点（`make apidoc` 自动生成） |
 | [deploy/README.md](deploy/README.md) | 部署目录速查 |
 | [CHANGELOG.md](CHANGELOG.md) | 版本记录 |
@@ -69,6 +71,8 @@ hcs-inspector/
 ├── frontend/           # Vue 3 + TypeScript + Vite + Element Plus（按需引入）+ Pinia + ECharts
 ├── deploy/             # 生产部署目录：compose（生产 / https / demo / build）、nginx、scripts、Makefile、.env.example
 ├── docs/               # 架构 / 开发 / 部署运维 / 联调 / 后期开发方案 / 接口清单
+├── .claude/            # Claude Code：settings.json（权限 / 机密保护）+ commands/（/task、/check、/new-api、/probe-review、/release）
+├── CLAUDE.md           # Claude Code 项目说明（backend/、frontend/ 下另有 CLAUDE.md 速查）
 ├── .gitlab-ci.yml      # CI：check → build（镜像）→ package（离线包）
 └── Makefile
 ```

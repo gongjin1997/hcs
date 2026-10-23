@@ -2,6 +2,15 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循语义化版本。
 
+## [Unreleased]
+
+### 文档
+
+- 新增 `docs/接续开发任务书.md`：v0.4.0 代码体检结论（覆盖率 90%、复杂度、类型检查、前端产物等）、优化清单 C01–C22
+  （P0：多租户资源身份、测试只跑 SQLite）、按顺序执行的任务卡 T01–T21（步骤 + 验收标准）、需要真实环境 / 人工参与的事项。
+- 新增 Claude Code 接续开发配置：`CLAUDE.md`（根目录 / backend / frontend）、`.claude/settings.json`（命令权限与机密文件保护）、
+  `.claude/commands/`（`/task`、`/check`、`/new-api`、`/probe-review`、`/release`）。
+
 ## [0.4.0] - 2026-10-23
 
 v0.4 的目标是“**可交付试运行**”：补齐运维日常需要的配置能力（静默、采集开关、任务编辑、系统设置、通知维护、台账字典与导入），
