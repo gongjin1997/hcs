@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import tempfile
 
 # 必须在导入 app 之前设置：测试使用独立的临时 SQLite 库
@@ -14,12 +15,47 @@ from sqlalchemy import create_engine  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from app.core.db import Base  # noqa: E402
+from app.core.db import Base, engine  # noqa: E402
 from app.main import app  # noqa: E402
 
 
 @pytest.fixture(scope="session")
-def client():
+def demo_template() -> dict:
+    """会话内只写一次演示数据（bootstrap → seed_demo）到模板库；会话库与 test_bootstrap 共用，省掉一次约 4 秒的写入。"""
+    from sqlalchemy import func, select
+
+    from app.models import User
+    from app.services.bootstrap import bootstrap
+    from app.services.seed import seed_demo
+
+    path = f"{_TMP}/demo-template.db"
+    tpl = create_engine(f"sqlite:///{path}")
+    Base.metadata.create_all(tpl)
+    with sessionmaker(bind=tpl, expire_on_commit=False, autoflush=False)() as db:
+        bootstrap(db)
+        users_after_bootstrap = db.scalar(select(func.count()).select_from(User))
+        seeded = seed_demo(db)
+    tpl.dispose()
+    return {"path": path, "users_after_bootstrap": users_after_bootstrap, "seeded": seeded}
+
+
+@pytest.fixture()
+def demo_db(demo_template):
+    """模板库的独立内存副本（含演示数据），用例可随意读写。"""
+    eng = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    with eng.connect() as conn, sqlite3.connect(demo_template["path"]) as src:
+        src.backup(conn.connection.driver_connection)
+    session = sessionmaker(bind=eng, expire_on_commit=False, autoflush=False)()
+    yield session
+    session.close()
+    eng.dispose()
+
+
+@pytest.fixture(scope="session")
+def client(demo_template):
+    # 把模板库整库复制进应用库，启动时 seed_demo 发现已有用户直接跳过
+    with engine.connect() as conn, sqlite3.connect(demo_template["path"]) as src:
+        src.backup(conn.connection.driver_connection)
     with TestClient(app) as c:
         yield c
 
@@ -43,6 +79,7 @@ def mem_db():
     session = sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)()
     yield session
     session.close()
+    engine.dispose()
 
 
 def demo_login(client: TestClient, username: str, tenant_id: int | None = None) -> dict:

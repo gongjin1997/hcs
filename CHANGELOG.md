@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### 工程
+
+- T01 测试与工具链基线：引入 pytest-cov（`make cov`，覆盖率门槛 88%，演示数据不计入），CI 输出覆盖率并上传 junit / cobertura 报告；
+  Python 版本声明统一为 3.12（pyproject / ruff / mypy，`make init` 检查解释器版本）；`mem_db` 夹具释放引擎，测试无 ResourceWarning；
+  演示数据每个测试会话只写一次（模板库复制），后端全量测试 20.2 秒 → 16.1 秒；锁文件在干净 venv 中重新生成（去掉未使用的 aiosmtpd / atpublic / attrs）。
+
 ### 文档
 
 - 新增 `docs/接续开发任务书.md`：v0.4.0 代码体检结论（覆盖率 90%、复杂度、类型检查、前端产物等）、优化清单 C01–C22

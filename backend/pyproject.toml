@@ -2,7 +2,7 @@
 name = "hcs-inspector"
 version = "0.4.0"
 description = "HCS 云服务巡检平台 - 后端"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
   "fastapi>=0.115",
   "uvicorn[standard]>=0.30",
@@ -24,7 +24,7 @@ dependencies = [
 
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.1"]
-dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10"]
+dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.6", "mypy>=1.10"]
 
 [build-system]
 requires = ["setuptools>=69"]
@@ -44,13 +44,24 @@ filterwarnings = [
     "ignore:You should not use the 'timeout' argument with the TestClient",
 ]
 
+[tool.coverage.run]
+source = ["app"]
+omit = ["app/services/seed*.py"]        # 演示数据只服务开发 / 演示环境，不计入覆盖率
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 88
+
 [tool.ruff]
 line-length = 128
-target-version = "py311"
+target-version = "py312"
 extend-exclude = ["migrations/versions"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
+# py312 新增的 PEP 695 类型参数写法改写建议（UP040 / UP046 / UP047）：涉及 Pydantic 泛型模型，属不安全改写，另开提交处理
+ignore = ["UP040", "UP046", "UP047"]
 
 [tool.ruff.lint.per-file-ignores]
 "mock_hcs/inventory*.py" = ["E501"]     # 演示资源清单按表格排版，一行一个资源
@@ -59,6 +70,6 @@ select = ["E", "F", "I", "B", "UP"]
 extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Header", "fastapi.File", "fastapi.Form", "app.core.deps.require_perm"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 ignore_missing_imports = true
 check_untyped_defs = true

@@ -40,17 +40,17 @@ def test_bootstrap_idempotent_and_creates_admin_once(mem_db):
     assert _count(mem_db, InspectionTask) == len(BUILTIN_TASKS)
 
 
-def test_demo_seed_after_bootstrap_without_admin(mem_db):
-    bootstrap(mem_db)
-    assert _count(mem_db, User) == 0
-    assert seed_demo(mem_db) is True
-    assert _count(mem_db, User) == 7 and seed_demo(mem_db) is False
-    assert _count(mem_db, HcsAccount) == 2
-    assert _count(mem_db, AlarmRule) == len({r.id for r in mem_db.scalars(select(AlarmRule))})
-    assert _count(mem_db, Resource) > 220 and _count(mem_db, ResourceChange) >= 40
-    assert _count(mem_db, Report) == 22 and _count(mem_db, PodEvent) > 50 and _count(mem_db, AuditLog) > 100
+def test_demo_seed_after_bootstrap_without_admin(demo_template, demo_db):
+    # 模板库由 conftest.demo_template 按“bootstrap（不建 admin）→ seed_demo”写入，会话内只写一次
+    assert demo_template["users_after_bootstrap"] == 0
+    assert demo_template["seeded"] is True
+    assert _count(demo_db, User) == 7 and seed_demo(demo_db) is False
+    assert _count(demo_db, HcsAccount) == 2
+    assert _count(demo_db, AlarmRule) == len({r.id for r in demo_db.scalars(select(AlarmRule))})
+    assert _count(demo_db, Resource) > 220 and _count(demo_db, ResourceChange) >= 40
+    assert _count(demo_db, Report) == 22 and _count(demo_db, PodEvent) > 50 and _count(demo_db, AuditLog) > 100
     # 每条资源 / 告警都归属租户，负责人只留给“新纳管待认领”的少数资源
-    assert mem_db.scalar(select(func.count()).select_from(Resource).where(Resource.tenant_id.is_(None))) == 0
-    no_owner = mem_db.scalars(select(Resource.name).where(Resource.owner.is_(None),
-                                                          Resource.resource_type == "ecs_server")).all()
+    assert demo_db.scalar(select(func.count()).select_from(Resource).where(Resource.tenant_id.is_(None))) == 0
+    no_owner = demo_db.scalars(select(Resource.name).where(Resource.owner.is_(None),
+                                                           Resource.resource_type == "ecs_server")).all()
     assert sorted(no_owner) == ["ecs-etl-03", "ecs-portal-03"]

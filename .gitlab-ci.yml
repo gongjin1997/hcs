@@ -15,10 +15,16 @@ backend-check:
     - cd backend && pip install -c constraints.txt -e ".[dev]"
     - ruff check .
     - mypy app mock_hcs
-    - pytest -q
+    - pytest --cov=app --cov-report=term --cov-report=xml --junitxml=report.xml   # pyproject addopts 已带 -q
     - INSPECTOR_DATABASE_URL=sqlite:///./ci.db alembic upgrade head && INSPECTOR_DATABASE_URL=sqlite:///./ci.db alembic check
     - INSPECTOR_DATABASE_URL=sqlite:///./ci.db INSPECTOR_DEMO_SEED=false python -m app.workers.bootstrap   # 初始化脚本冒烟
     - INSPECTOR_DATABASE_URL=sqlite:///./ci.db python -m app.tools.status || test $? -eq 1              # 自检工具冒烟（无进程心跳时退出码 1）
+  coverage: '/^TOTAL.*\s(\d+(?:\.\d+)?)%/'
+  artifacts:
+    when: always
+    reports:
+      junit: backend/report.xml
+      coverage_report: {coverage_format: cobertura, path: backend/coverage.xml}
 
 frontend-check:
   stage: check

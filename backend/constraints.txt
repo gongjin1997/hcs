@@ -1,17 +1,15 @@
 # 依赖版本锁定（pip 约束文件）：CI / 镜像构建 / make init 均使用 pip install -c constraints.txt，保证与测试通过的版本一致
 # 升级依赖：在 venv 中 pip install -U <包> → make check 通过 → make lock 重新生成本文件
-aiosmtpd==1.4.6
 alembic==1.20.0
 annotated-doc==0.0.5
 annotated-types==0.8.0
 anyio==4.15.1
 APScheduler==3.11.3
 ast_serialize==0.13.1
-atpublic==9.0.0
-attrs==26.1.0
 certifi==2026.10.19
 cffi==2.1.1
 click==8.5.0
+coverage==7.17.0
 cryptography==50.0.2
 et_xmlfile==2.0.0
 fastapi==0.156.4
@@ -41,6 +39,7 @@ pydantic_core==2.50.1
 Pygments==2.21.0
 PyJWT==2.15.1
 pytest==9.1.1
+pytest-cov==7.1.0
 python-dotenv==1.2.4
 python-multipart==0.0.32
 PyYAML==6.0.3

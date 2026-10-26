@@ -6,12 +6,13 @@ BIN     := $(VENV)/bin
 WEB_PORT ?= 8080
 COMPOSE  := WEB_PORT=$(WEB_PORT) docker compose --project-directory deploy -f deploy/docker-compose.yml -f deploy/docker-compose.demo.yml -f deploy/docker-compose.build.yml
 
-.PHONY: help init dev-api dev-mock dev-web scheduler notifier run-once ledger-sync report migrate bootstrap status probe revision apidoc lock lint test check build up down logs
+.PHONY: help init dev-api dev-mock dev-web scheduler notifier run-once ledger-sync report migrate bootstrap status probe revision apidoc lock lint test cov check build up down logs
 
 help:            ## 显示帮助
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
-init:            ## 初始化后端虚拟环境与前端依赖
+init:            ## 初始化后端虚拟环境与前端依赖（需要 Python 3.12+，可用 make init PY=python3.12 指定）
+	@$(PY) -c 'import sys; sys.exit(sys.version_info < (3, 12))' || { echo "需要 Python 3.12+，当前 $(PY) 为 $$($(PY) --version 2>&1)；可用 make init PY=python3.12"; exit 1; }
 	$(PY) -m venv $(VENV) && $(BIN)/pip install -U pip && $(BIN)/pip install -c backend/constraints.txt -e "backend[dev,postgres]"
 	cp -n backend/.env.example backend/.env || true
 	cd frontend && npm ci
@@ -67,6 +68,9 @@ lint:            ## 代码检查：ruff + mypy + vue-tsc
 
 test:            ## 后端单元 / 接口测试
 	cd backend && .venv/bin/pytest
+
+cov:             ## 后端测试 + 覆盖率（终端报告 + backend/htmlcov/；门槛见 pyproject 的 fail_under）
+	cd backend && .venv/bin/pytest --cov=app --cov-report=term --cov-report=html
 
 check: lint test ## 提交前检查（CI 同款）
 	cd frontend && npm run build
