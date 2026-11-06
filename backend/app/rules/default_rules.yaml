@@ -166,6 +166,18 @@
   expr: {when: "status == 'SHUTDOWN' and expected_running", severity: P2, title: "实例非预期停止（SHUTDOWN）"}
   recover: {when: "status == 'ACTIVE' or not expected_running"}
   runbook: 核对是否为计划停机；非计划停止时联系数据库管理员检查实例任务和业务连接。
+- id: R-GS-011
+  name: GaussDB 实例变更或维护状态超时
+  resource_type: gaussdb_instance
+  check_item: instance_status
+  kind: state
+  expr: {when: "status in ('BUILD', 'MODIFYING', 'EXPANDING', 'REBOOTING', 'UPGRADING', 'RESTORING', 'SWITCHOVER', 'MIGRATING', 'REBALANCING', 'UPGRADE TO BE OBSERVED', 'MODIFYING DATABASE PORT', 'REPAIRING') and status_duration_min > 60",
+         severity: P3, title: "实例 {status} 已持续 {status_duration_min} 分钟"}
+  recover: {when: "status == 'ACTIVE'"}
+  runbook: |
+    1. 在 GaussDB 控制台的任务中心 / 操作记录里查看扩容、变更规格、重启、升级、恢复、迁移或修复任务的进度；
+    2. UPGRADE TO BE OBSERVED 表示升级后等待人工确认，观察业务正常后在控制台确认升级；
+    3. 超过 2 小时仍无进展时联系 HCS 平台运维排查底层任务，期间不要重复提交变更。
 - id: R-GS-006
   name: GaussDB 磁盘使用率过高
   resource_type: gaussdb_instance
@@ -180,8 +192,10 @@
   for_count: 2
   recover: {below: 70}
   runbook: 清理过期分区与归档日志、排查大表膨胀（VACUUM）；预计 7 天内写满时提交扩容申请。
+# 停用：GaussDB 没有实时 CPU 接口（原生接口只有磁盘用量与巡检记录），本规则每轮都缺采；规则页不允许重新启用
 - id: R-GS-007
   name: GaussDB CPU 使用率过高
+  enabled: false
   resource_type: gaussdb_instance
   check_item: cpu
   kind: threshold
@@ -196,8 +210,10 @@
     1. 在 GaussDB 控制台查看 Top SQL 与会话，定位高耗 CPU 的语句；
     2. 对慢 SQL 做执行计划分析（缺索引、统计信息过期），必要时终止异常会话；
     3. 持续高于阈值时评估规格扩容或读写分离。
+# 停用：GaussDB 没有实时内存接口，同上
 - id: R-GS-008
   name: GaussDB 内存使用率过高
+  enabled: false
   resource_type: gaussdb_instance
   check_item: memory
   kind: threshold
@@ -278,8 +294,10 @@
     1. 使用 slowlog 和 info commandstats 定位高耗 CPU 的命令（如 KEYS、大 Key 的 HGETALL、Lua 脚本）；
     2. 排查热 Key 与大 Key，通知业务改造访问方式；
     3. 持续高于阈值时评估扩容为集群版或读写分离。
+# 停用：DCS v2 实例列表 / 统计接口没有实例级连接数与上限（API §4.1.2、§4.2.6）；节点会话数不能当作实例连接数
 - id: R-DCS-007
   name: DCS 连接数使用率过高
+  enabled: false
   resource_type: dcs_instance
   check_item: connections
   kind: threshold

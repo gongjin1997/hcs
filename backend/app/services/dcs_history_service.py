@@ -69,7 +69,9 @@ def instance_out(row: Resource, tenants: dict[int, HcsAccount], projects: dict[i
     if project and project.account_id != row.tenant_id:
         project = None
     metrics = native_current(row)
-    return DcsInstanceOut(id=row.id, resource_id=row.resource_id, name=row.name,
+    cpu = finite_number((row.metrics or {}).get("cpu_usage")) if metrics.get("freshness") == "FRESH" else None
+    return DcsInstanceOut(id=row.id, resource_id=row.resource_id, name=row.name, cpu_usage=cpu,
+                          scope_excluded=bool(row.scope_excluded),
                           tenant_id=row.tenant_id, tenant_name=tenant.name if tenant else "未分配租户",
                           project_ref=row.project_ref,
                           project_name=(project.project_name or project.project_id) if project else None,

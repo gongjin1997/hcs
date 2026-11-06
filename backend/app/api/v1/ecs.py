@@ -24,10 +24,11 @@ def history_query(start_at: datetime = Query(), end_at: datetime = Query(), inte
 @router.get("/instances", summary="ECS 实例及真实采样时效", response_model=ApiResponse[EcsInstancesOut], dependencies=[VIEW])
 def instances(tenant_id: int | None = Query(None, ge=1), project_ref: int | None = Query(None, ge=1),
               keyword: str | None = Query(None, max_length=200), monitored: bool | None = None,
-              critical: bool | None = None, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=100),
+              critical: bool | None = None, scope_excluded: bool | None = Query(None, description="true 只看采集范围之外"),
+              page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=100),
               db: Session = Depends(get_db), scope: Scope = Depends(get_scope)):
     return ok(list_instances(db, scope, tenant_id=tenant_id, project_ref=project_ref, keyword=keyword,
-              monitored=monitored, critical=critical, page=page, page_size=page_size))
+              monitored=monitored, critical=critical, scope_excluded=scope_excluded, page=page, page_size=page_size))
 
 
 @router.get("/instances/{resource_ref}/history", summary="ECS 单机 CPU、内存和磁盘趋势",

@@ -1,8 +1,9 @@
 import logging
+from datetime import datetime
 
 from app.hcs import HcsError
 from app.hcs.pager import page_all
-from app.metrics.dcs_samples import finite_number, metric_values
+from app.metrics.dcs_samples import finite_number, metric_values, parse_observed_at
 from app.models.base import utcnow
 
 from .base import Observation, RunContext, log_collection_failure
@@ -11,6 +12,54 @@ log = logging.getLogger(__name__)
 NATIVE_STATES = {"CREATING", "CREATEFAILED", "RUNNING", "ERROR", "RESTARTING", "EXTENDING", "RESTORING"}
 # 旧部署仍可返回这些告警状态；保留识别，不把未定义的新状态判作健康。
 COMPATIBLE_STATES = {"FROZEN", "CLOSED", "UPGRADING"}
+CPU_MIN_GAP_SEC = 20          # 两次累计值间隔太短，秒级抖动会放大误差
+CPU_MAX_GAP_SEC = 1800        # 间隔过长（采集中断、任务停过）不能代表当前负载
+
+
+def master_count(instance: dict) -> int | None:
+    """折算 CPU 用的主节点（分片）数。单机 / 主备 / 读写分离只有一个主节点；
+    Cluster / Proxy 集群取实例列表的 sharding_count（DCS API §4.1.2）。拿不到就不折算。"""
+    mode, shards = instance.get("cache_mode"), instance.get("sharding_count")
+    if mode in ("single", "ha", "ha_rw_split"):
+        return 1
+    return shards if mode in ("cluster", "proxy") and type(shards) is int and shards > 0 else None
+
+
+def cpu_rate(previous: object, seconds: float | None, at: datetime | None, masters: int | None) -> float | None:
+    """由两次累计 CPU 秒数折算每个主节点的 CPU 占用（%）：Δ秒 ÷ Δ时间 ÷ 主节点数 × 100。
+
+    used_cpu 是进程累计的用户态 + 内核态 CPU 秒数（DCS API §4.2.6），本身不是百分比；两次采样的差值除以间隔才是
+    “每秒用了多少个核”。Redis 命令在单线程执行，所以近似反映主线程的饱和程度。计数器回退（实例重启）、
+    间隔过短或过长、拿不到主节点数时不输出，不补零、不沿用旧值。"""
+    if not isinstance(previous, dict) or seconds is None or at is None or not masters:
+        return None
+    before_seconds, before_at = previous.get("seconds"), parse_observed_at(previous.get("at"))
+    if isinstance(before_seconds, bool) or not isinstance(before_seconds, (int, float)) or before_at is None:
+        return None
+    gap = (at - before_at).total_seconds()
+    delta = seconds - before_seconds
+    if not CPU_MIN_GAP_SEC <= gap <= CPU_MAX_GAP_SEC or delta < 0:
+        return None
+    return round(delta / gap / masters * 100, 1)
+
+
+def previous_cpu_counters(ctx: RunContext, ids: list[str]) -> dict[str, dict]:
+    """上一次保存在资源记录里的累计 CPU 秒数与采样时刻。"""
+    if ctx.db is None or not ids:
+        return {}
+    from sqlalchemy import select
+
+    from app.models import Resource
+
+    found: dict[str, dict] = {}
+    for start in range(0, len(ids), 500):
+        for resource_id, attrs in ctx.db.execute(select(Resource.resource_id, Resource.attrs).where(
+                Resource.resource_type == "dcs_instance", Resource.tenant_id == ctx.tenant_id,
+                Resource.project_ref == ctx.project_ref, Resource.resource_id.in_(ids[start:start + 500]))):
+            counter = (attrs or {}).get("dcs_cpu_counter") if isinstance(attrs, dict) else None
+            if isinstance(counter, dict):
+                found[resource_id] = counter
+    return found
 
 
 class DcsCollector:
@@ -60,6 +109,7 @@ class DcsCollector:
         if isinstance(stale_after, bool) or not isinstance(stale_after, int) or stale_after < 60:
             stale_after = 900
         ctx.stats.update(metrics_source="DCS", native_statistics=len(statistics), statistics_api_version="v2")
+        counters = previous_cpu_counters(ctx, [i["instance_id"] for i in insts]) if statistics else {}
         obs: list[Observation] = []
         for i in insts:
             iid, name, status = i["instance_id"], i["name"], i.get("status")
@@ -87,6 +137,10 @@ class DcsCollector:
                 usage = finite_number(used / total * 100)
                 metrics["memory_usage"] = round(usage, 1) if usage is not None else None
             at = statistic_at if native is not None else list_times.get(iid)
+            seconds = metrics["used_cpu_seconds"]
+            cpu = cpu_rate(counters.get(iid), seconds, at, master_count(i)) if native is not None else None
+            if native is not None and seconds is not None and at is not None:
+                attrs["dcs_cpu_counter"] = {"seconds": seconds, "at": at.isoformat()}   # 下一轮折算 CPU 的基线
             message = warning if native is None else None
             if native is None and status == "RUNNING" and not message:
                 message = "统计接口未返回此实例，仅保留本次实例列表中的内存字段"
@@ -96,9 +150,12 @@ class DcsCollector:
                 "stale_after_sec": stale_after, "warning": message,
             })
             obs.append(Observation("dcs_instance", iid, name, "instance_status", {"status": status if known_status else None},
-                status_raw=status, attrs=attrs, metrics={**metrics, "cpu_usage": None, "connected_clients": None},
+                status_raw=status, attrs=attrs, metrics={**metrics, "cpu_usage": cpu, "connected_clients": None},
                 metric_observed_at=at))
             # 无值也送入规则引擎：中断连续命中，但不恢复已有告警。
             memory = {key: metrics[key] for key in ("memory_usage", "used_memory_mb", "max_memory_mb")}
             obs.append(Observation("dcs_instance", iid, name, "memory", memory, metrics=memory, metric_observed_at=at))
+            if cpu is not None:     # 能折算才有 cpu 观测；折算不了（首次采样、实例重启、间隔过长）按缺采处理，不补零
+                obs.append(Observation("dcs_instance", iid, name, "cpu", {"cpu_usage": cpu},
+                                       metrics={"cpu_usage": cpu}, metric_observed_at=at))
         return obs

@@ -272,7 +272,8 @@ def instance_out(resource: Resource, tenant: HcsAccount | None, project: HcsProj
     return EcsInstanceOut(id=resource.id, tenant_id=resource.tenant_id, tenant_name=tenant.name if tenant else "未分配租户",
         project_ref=resource.project_ref, project_name=(project.project_name or project.project_id) if project else None,
         resource_id=resource.resource_id, name=resource.name, ip=resource.ip, status_raw=resource.status_raw,
-        health=current_health(resource, now), critical=resource.critical, monitored=resource.monitored, included=selected,
+        health=current_health(resource, now), critical=resource.critical, monitored=resource.monitored,
+        scope_excluded=bool(resource.scope_excluded), included=selected,
         metrics_enabled=sampling, inspection_enabled=inspection, metrics_source=source,
         metrics_interval_sec=(policy.get("metrics") or {}).get("interval_sec", 300),
         inspection_interval_sec=(policy.get("inspection") or {}).get("interval_sec", 120), stale_after_sec=max_age,
@@ -305,7 +306,7 @@ def snapshots(db: Session, rows: Sequence[Resource]) -> dict[int, EcsInstanceOut
 
 def list_instances(db: Session, scope: Scope, *, tenant_id: int | None = None, project_ref: int | None = None,
                    keyword: str | None = None, monitored: bool | None = None, critical: bool | None = None,
-                   page: int = 1, page_size: int = 50) -> EcsInstancesOut:
+                   scope_excluded: bool | None = None, page: int = 1, page_size: int = 50) -> EcsInstancesOut:
     query = _resources(scope).where(Resource.lifecycle == "ACTIVE")
     if tenant_id is not None:
         scope.ensure(tenant_id, "租户")
@@ -316,7 +317,8 @@ def list_instances(db: Session, scope: Scope, *, tenant_id: int | None = None, p
         pattern = "%" + keyword.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
         query = query.where(or_(Resource.name.ilike(pattern, escape="\\"), Resource.resource_id.ilike(pattern, escape="\\"),
                                Resource.ip.ilike(pattern, escape="\\")))
-    for column, value in ((Resource.monitored, monitored), (Resource.critical, critical)):
+    for column, value in ((Resource.monitored, monitored), (Resource.critical, critical),
+                          (Resource.scope_excluded, scope_excluded)):
         if value is not None:
             query = query.where(column.is_(value))
     total = db.scalar(select(func.count()).select_from(query.subquery())) or 0

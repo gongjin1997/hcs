@@ -18,6 +18,7 @@ class GaussInstance(BaseModel):
     region: str | None = None
     status_raw: str | None = None
     health: str
+    scope_excluded: bool = False            # 被“采集范围”规则排除：不再采集
     vcpus: int | None = None
     memory_size: float | None = None
     memory_unit: str | None = None

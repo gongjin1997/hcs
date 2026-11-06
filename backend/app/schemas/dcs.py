@@ -22,6 +22,8 @@ class DcsInstanceOut(BaseModel):
     max_memory_mb: float | None = None
     snapshot_at: datetime | None = None
     used_cpu_seconds: float | None = None
+    cpu_usage: float | None = None          # 由两次累计 CPU 秒折算的每主节点占用（%）；折算不了时为空
+    scope_excluded: bool = False            # 被“采集范围”规则排除：不再采集，页面数据可能已过期
     input_kbps: float | None = None
     output_kbps: float | None = None
     keys: int | None = None

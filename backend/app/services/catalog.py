@@ -142,10 +142,13 @@ TASK_SPECS: tuple[TaskSpec, ...] = (
     TaskSpec("mrs_job_status", "MRS 作业执行", "mrs", 300, ("mrs_job",), ("job_status",),
              note="经 DataArts 作业实例详情读取 MRS 类节点（MRSSpark / MapReduce / MRSFlinkJob / MRSHetuEngine）的执行状态；"
                   "依赖 DataArts 工作空间配置，不调用 MRS 作业接口"),
+    # GaussDB 没有实时 CPU / 内存接口（原生接口只有磁盘用量与巡检记录），所以不负责 cpu / memory 检查项：
+    # 否则这两类规则每轮都“缺采”，实例永远是“部分覆盖”，无法判为健康
     TaskSpec("gaussdb_status", "GaussDB 实例状态与容量", "gaussdb", 120, ("gaussdb_instance",),
-             ("instance_status", "cpu", "memory", "disk"),
+             ("instance_status", "disk"),
              note="使用 GaussDB 原生接口只读采集，不使用 AOM 映射；磁盘、慢 SQL、会话等见 GaussDB 面板"),
-    TaskSpec("dcs_status", "DCS 实例状态与内存", "dcs", 60, ("dcs_instance",), ("instance_status", "memory")),
+    TaskSpec("dcs_status", "DCS 实例状态与内存", "dcs", 60, ("dcs_instance",), ("instance_status", "memory", "cpu"),
+             note="CPU 由两次 instances/statistic 的累计 CPU 秒数折算（Δ秒 ÷ Δ时间 ÷ 主节点数），首次采样与实例重启后不输出"),
     TaskSpec("ecs_status", "ECS 状态与告警巡检", "ecs", 120, ("ecs_server",),
              ("instance_status", "cpu", "memory", "disk", "reboot"),
              note="ECS 状态与告警判定；使用独立指标采样点，不重复查询指标源。各租户频率在 ECS 采集策略配置"),

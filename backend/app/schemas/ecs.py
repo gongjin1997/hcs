@@ -39,6 +39,7 @@ class EcsInstanceOut(BaseModel):
     health: str
     critical: bool
     monitored: bool
+    scope_excluded: bool = False       # 被“采集范围”规则排除（与“纳入巡检”人工开关独立）
     included: bool
     metrics_enabled: bool
     inspection_enabled: bool
