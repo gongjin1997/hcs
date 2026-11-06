@@ -92,6 +92,9 @@ class EcsStatusCollector:
         if policy is not None and policy["selection"]["mode"] != "all":
             allowed = {resource.resource_id for resource in selected or []}
             servers = [server for server in servers if server["id"] in allowed]
+        scope = ctx.scope(RESOURCE_TYPE)     # 采集范围：按 ID / 名称先裁剪；环境、业务系统等台账字段由流水线判定
+        if not scope.open:
+            servers = [s for s in servers if scope.keep({"id": s["id"], "name": s.get("name") or ""})]
         ids = [s["id"] for s in servers]
         metrics, source = self._metrics(ctx, ids, {ip: s["id"] for s in servers for ip in _fixed_ips(s)})
         now = utcnow()

@@ -45,6 +45,7 @@ from app.schemas.collection_policy import CollectionPolicy
 from . import (
     alarm_service,
     cce_settings,
+    collect_scope,
     collect_switch,
     collection_policy,
     inspection_evidence,
@@ -187,6 +188,23 @@ def _interrupt_task(db: Session, target: Target, task_code: str, now: datetime) 
     db.flush()
 
 
+def _sync_scope(db: Session, ctx: RunContext, target: Target, task_code: str) -> None:
+    """采集前读取采集范围，并按最新规则重算“范围外”标记（新同步的资源、改过台账字段的资源）。
+
+    标记同步是辅助步骤，不能阻断采集：失败时回滚、记一条局部错误（任务记为部分成功），
+    采集器和流水线仍会按规则实时过滤，只是已有记录的标记要等下一轮才更新。
+    """
+    ctx.scopes = collect_scope.load(db)
+    types = [t for t in collect_switch.TASK_TYPES.get(task_code, []) if t in RESOURCE_TYPES]
+    try:
+        collect_scope.sync_flags(db, target.tenant_id, types, project_ref=target.project_ref, scopes=ctx.scopes)
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        _log_failure("scope_sync_failed", exc)
+        ctx.errors.append("采集范围标记同步失败，本轮仅按规则实时过滤")
+
+
 def _dcs_memory_values(metrics: dict) -> dict[str, float | None] | None:
     """只接收本次 metrics 的有限数值；可选 MB 缺失保持 NULL，不使用旧快照或补零。"""
     values: dict[str, float | None] = {}
@@ -254,6 +272,11 @@ def process_observations(db: Session, service: str, observations: list[Observati
                 Resource.resource_id.in_(ids[start:start + 500])).order_by(Resource.resource_id, Resource.resource_type,
                 Resource.id).with_for_update().execution_options(populate_existing=True)):
             known[(res.resource_type, res.resource_id)] = res
+    # 采集范围的最终判定：范围外的对象不评估、不告警；已有记录的就地标记并关闭活动告警。
+    in_scope = collect_scope.filter_groups(db, ctx.tenant_id, groups, known, ctx.scopes or collect_scope.load(db))
+    if len(in_scope) != len(groups):
+        ctx.stats["out_of_scope"] = len(groups) - len(in_scope)
+        observations = [o for o in observations if (o.resource_type, o.resource_id) in in_scope]
     phase = ctx.params.get("_collection_phase")
     ecs_target = "ecs_server" in types | inspection_evidence.task_types(ctx)
     policy = collection_policy.effective(db, ctx.tenant_id) if ecs_target else CollectionPolicy.model_validate({})
@@ -478,6 +501,7 @@ def _run_task(db: Session, task_code: str, *, client: HcsClient | None, target: 
                          tenant_id=target.tenant_id, tenant_name=target.short_name, project_ref=target.project_ref,
                          region=target.region, db=db, tenant=target.tenant)
         ctx.params.update(_task_code=task_code)
+        _sync_scope(db, ctx, target, task_code)
         ctx.params["_inspection_stale_after_sec"] = inspection_evidence.inspection_ttl(db, ctx, task, policy, utcnow())
         # 任何资源任务都不传递旧 AOM 映射；不依赖各采集器自行判断。
         ctx.params.pop("aom", None)
@@ -500,7 +524,8 @@ def _run_task(db: Session, task_code: str, *, client: HcsClient | None, target: 
                             process_observations(db, collector.service, observations, ctx, now=utcnow()))
         run.resource_total = (int(ctx.stats.get("cce_health", {}).get("clusters", 0))
                               if task_code == cce_settings.TASK_CODE else
-                              len({(o.resource_type, o.resource_id) for o in observations}))
+                              len({(o.resource_type, o.resource_id) for o in observations})
+                              - int(ctx.stats.get("out_of_scope", 0)))
         run.abnormal_total = abnormal
         run.status = "PARTIAL" if ctx.errors else "SUCCESS"
         run.error_summary = "\n".join(ctx.errors[:20]) or None

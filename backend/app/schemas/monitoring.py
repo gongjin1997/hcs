@@ -34,7 +34,8 @@ class MonitoringCoverageRow(BaseModel):
     tenant_name: str
     resource_type: MonitoringResourceType
     resource_name: str
-    resources: int = Field(ge=0)
+    resources: int = Field(ge=0, description="活动资源数，不含被采集范围排除的资源")
+    out_of_scope_resources: int = Field(0, ge=0, description="被“采集范围”规则排除的活动资源数（有意不巡检）")
     eligible_resources: int = Field(ge=0, description="当前启用租户、项目、巡检及选择范围中的活动资源")
     inspected_resources: int = Field(ge=0, description="当前可巡检且 inspection_state=FRESH 的资源数")
     unknown_resources: int = Field(ge=0, description="无有效完整巡检且无已知异常的资源数；不计为健康")

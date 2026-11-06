@@ -51,11 +51,15 @@ class CceHealthCollector:
             log_collection_failure(log, ctx, exc, cloud_service="cce", phase="clusters")
             return []
         seen = set()
+        scope = ctx.scope("cce_cluster")
         counts = {"clusters": len(listed), "nodes": 0, "nodepools": 0, "source_failures": 0}
         for cluster in listed:
             info = cluster_info(cluster)
             cid = info["cluster_id"]
-            seen.add(cid)
+            seen.add(cid)          # 范围外的集群仍然存在，不能被标记为缺失
+            if not scope.keep({"cluster": (cid, info["name"])}):
+                counts["clusters"] -= 1
+                continue           # 采集范围：范围外的集群不查询节点、节点池与原生指标，旧快照原样保留
             row = existing.get(cid)
             if row is None:
                 row = CceClusterSnapshot(key=snapshot_key(ctx.tenant_id, ctx.project_ref, cid),

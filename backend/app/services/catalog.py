@@ -90,6 +90,28 @@ RESOURCE_TYPES: dict[str, dict] = {
 LEDGER_TYPES = [k for k, v in RESOURCE_TYPES.items() if v["ledger"]]
 INSPECT_ONLY_TYPES = [k for k, v in RESOURCE_TYPES.items() if not v["ledger"]]
 
+# ---- 采集范围：采集开关之下再细分，只巡检（或屏蔽）一部分对象 ----
+# 每类资源可用于“包含 / 排除”规则的匹配维度。匹配引擎见 app.collectors.scope，存取与同步见 app.services.collect_scope。
+# - id / name：资源 ID / 名称；cluster 同时匹配集群名称与集群 ID
+# - env / business / owner / critical 来自台账管理字段（页面维护），只有台账类资源提供；
+#   采集器在调用云接口前拿不到这些字段，由巡检流水线按台账记录做最终判定
+SCOPE_DIM_LABELS: dict[str, str] = {
+    "name": "名称", "id": "资源 ID", "cluster": "集群", "namespace": "命名空间", "workload": "工作负载",
+    "workspace": "工作空间", "job": "作业", "node": "节点",
+    "env": "环境", "business": "业务系统", "owner": "负责人", "critical": "核心资源",
+}
+LEDGER_SCOPE_DIMS = ("env", "business", "owner", "critical")
+_SCOPE_SPECIFIC: dict[str, tuple[str, ...]] = {
+    "dgc_realtime_job": ("workspace", "job"),
+    "dgc_batch_job": ("workspace", "job"),
+    "mrs_job": ("workspace", "job", "node"),
+    "cce_workload": ("cluster", "namespace", "workload"),
+    "cce_cluster": ("cluster",),
+}
+SCOPE_DIMENSIONS: dict[str, tuple[str, ...]] = {
+    code: _SCOPE_SPECIFIC.get(code, ("name", "id")) + (LEDGER_SCOPE_DIMS if meta["ledger"] else ())
+    for code, meta in RESOURCE_TYPES.items()}
+
 
 @dataclass(frozen=True)
 class TaskSpec:

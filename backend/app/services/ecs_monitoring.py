@@ -83,7 +83,7 @@ def policy_dict(db: Session, tenant_id: int | None) -> dict:
 
 
 def included(resource: Resource, policy: dict) -> bool:
-    if resource.lifecycle != "ACTIVE" or not resource.monitored:
+    if resource.lifecycle != "ACTIVE" or not resource.monitored or resource.scope_excluded:
         return False
     selection = policy.get("selection") or {}
     mode = selection.get("mode", "all")
@@ -124,7 +124,8 @@ def save_readings(db: Session, resources: Sequence[Resource], readings: Mapping[
     conflicts = set()
     cutoff = collected_at - timedelta(days=RETENTION_DAYS)
     for resource in resources:
-        if resource.resource_type != "ecs_server" or resource.lifecycle != "ACTIVE" or not resource.monitored:
+        if (resource.resource_type != "ecs_server" or resource.lifecycle != "ACTIVE" or not resource.monitored
+                or resource.scope_excluded):
             continue
         for point in readings.get(resource.resource_id, []):
             if point.metric == "boot_time":

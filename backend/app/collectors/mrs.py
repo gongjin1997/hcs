@@ -18,6 +18,7 @@ from app.hcs.pager import page_all
 
 from .base import Observation, RunContext, log_collection_failure
 from .dataarts import BATCH_STATES, dataarts_error, millis, paged_list, text_or_none
+from .scope import subject_of
 
 log = logging.getLogger(__name__)
 CLUSTER_STATES = frozenset(("starting", "running", "terminated", "failed", "abnormal", "terminating",
@@ -58,7 +59,10 @@ class MrsClusterCollector:
 
     def collect(self, ctx: RunContext) -> list[Observation]:
         observations = []
+        scope = ctx.scope("mrs_cluster")
         for cluster in _clusters(ctx):
+            if not scope.keep({"id": cluster["clusterId"], "name": cluster["clusterName"]}):
+                continue                        # 采集范围：范围外的集群不评估
             state = cluster.get("clusterState")
             known = state in CLUSTER_STATES
             if not known:
@@ -126,7 +130,10 @@ class MrsJobCollector:
         stats: dict[str, Any] = {
             "source": "dataarts_instance_detail", "instances": 0, "details_queried": 0, "details_reused": 0,
             "details_skipped": 0, "jobs_without_mrs_nodes": 0, "mrs_nodes": 0}
+        scope = ctx.scope("mrs_job")
         for ws in dict.fromkeys(ctx.workspaces or [""]):
+            if not scope.keep({"workspace": ws}):      # 采集范围：整个工作空间在范围外，不请求实例列表
+                continue
             headers = {"workspace": ws} if ws else None
 
             def fetch_instances(p: dict, h: dict | None = headers) -> dict:
@@ -148,6 +155,8 @@ class MrsJobCollector:
                 return (millis(i.get("planTime")) or 0, millis(i.get("submitTime")) or 0,
                         millis(i.get("instanceId")) or 0)
             for i in insts:
+                if not scope.keep({"workspace": ws, "job": i["jobName"]}):    # 范围外的作业不查询实例详情
+                    continue
                 if i["jobName"] not in latest or order(i) > order(latest[i["jobName"]]):
                     latest[i["jobName"]] = i
             stats["instances"] += len(latest)
@@ -198,6 +207,8 @@ class MrsJobCollector:
                     if inst["status"] in TERMINAL_INSTANCE_STATES:
                         seen_keys[f"{ws}/{inst['jobName']}"] = millis(inst["instanceId"])
                 obs.extend(self._observation(ws, inst, n, now_ms, ctx) for n in found)
+        if not scope.open:     # 节点级规则：详情与复用的快照里都可能含范围外的节点（"无 MRS 节点"的判断不受影响）
+            obs = [o for o in obs if scope.keep(subject_of(o.resource_type, o.resource_id, o.name, o.attrs))]
         stats["mrs_nodes"] = len(obs)
         ctx.stats.update(mrs_jobs=stats)
         if not ctx.errors:  # 有局部失败时本轮清单不完整，保留旧记录，避免丢掉未扫描作业的结论

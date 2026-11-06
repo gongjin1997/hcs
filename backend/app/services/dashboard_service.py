@@ -116,6 +116,7 @@ def summary(db: Session, now: datetime | None = None, tenant_ids: list[int] | No
     tz = ZoneInfo(get_settings().timezone)
     inspected = [k for k, v in RESOURCE_TYPES.items() if v.get("group")]     # 健康分只统计纳入巡检的资源类型
     resources = db.scalars(_in(select(Resource).where(Resource.lifecycle == "ACTIVE", Resource.monitored.is_(True),
+                                                      Resource.scope_excluded.is_(False),
                                                       Resource.resource_type.in_(inspected)), Resource.tenant_id,
                                tenant_ids)).all()
     snapshots = ecs_snapshots(db, resources)

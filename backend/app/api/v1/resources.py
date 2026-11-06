@@ -19,7 +19,7 @@ from app.models.base import utcnow
 from app.schemas.alarm import AlarmOut
 from app.schemas.ecs import EcsInstanceOut
 from app.schemas.resource import ChangeOut, ClassificationConfig, ResourceOut, ResourcePatch
-from app.services import collect_switch, platform_watch, resource_classification, settings_service
+from app.services import collect_scope, collect_switch, platform_watch, resource_classification, settings_service
 from app.services.capacity_summary import capacity_totals
 from app.services.catalog import CATEGORIES, ENV_TYPES, LEDGER_TYPES, RESOURCE_TYPES, category_types, ledger_categories
 from app.services.ecs_monitoring import snapshots as ecs_snapshots
@@ -90,6 +90,8 @@ def resource_types(resource_type: str | None = None, category: str | None = None
                              .group_by(Resource.resource_type)).all())
     abnormal = dict(db.execute(scope.apply(select(Resource.resource_type, func.count()).where(
         active, Resource.health.notin_(("OK", "UNKNOWN"))), Resource.tenant_id).group_by(Resource.resource_type)).all())
+    out_of_scope = dict(db.execute(scope.apply(select(Resource.resource_type, func.count()).where(
+        active, Resource.scope_excluded.is_(True)), Resource.tenant_id).group_by(Resource.resource_type)).all())
     sw = collect_switch.load(db)
     tenants = [t for t in tenant_map(db).values() if scope.allows(t.id)]
 
@@ -99,7 +101,8 @@ def resource_types(resource_type: str | None = None, category: str | None = None
 
     types = [{"code": k, "name": v["name"], "category": v["category"], "service": v["service"],
               "ledger": v["ledger"], "inspected": "group" in v, "columns": v["columns"],
-              "total": counts.get(k, 0), "abnormal": abnormal.get(k, 0), "collect": collect(k)}
+              "total": counts.get(k, 0), "abnormal": abnormal.get(k, 0), "out_of_scope": out_of_scope.get(k, 0),
+              "collect": collect(k)}
              for k, v in RESOURCE_TYPES.items()]
     cats = [{**c, "total": sum(t["total"] for t in types if t["category"] == c["code"]),
              "abnormal": sum(t["abnormal"] for t in types if t["category"] == c["code"])} for c in CATEGORIES]
@@ -118,6 +121,7 @@ def resource_types(resource_type: str | None = None, category: str | None = None
 def list_resources(resource_type: str | None = None, category: str | None = None,
                    health: list[str] | None = Query(None), keyword: str | None = None, owner: str | None = None,
                    business: str | None = None, env_type: str | None = None, critical: bool | None = None,
+                   scope_excluded: bool | None = Query(None, description="true 只看采集范围之外的资源，false 只看范围内"),
                    classification: str | None = Query(None, min_length=1, max_length=64),
                    unassigned: bool = False, lifecycle: str = Query("ACTIVE", pattern="^(ACTIVE|DELETED|ALL)$"),
                    status: list[str] | None = Query(None), page: int = Query(1, ge=1),
@@ -137,6 +141,8 @@ def list_resources(resource_type: str | None = None, category: str | None = None
         q = q.where(Resource.lifecycle == lifecycle)
     if critical is not None:
         q = q.where(Resource.critical.is_(critical))
+    if scope_excluded is not None:
+        q = q.where(Resource.scope_excluded.is_(scope_excluded))
     if owner:
         q = q.where(Resource.owner == owner)
     if business:
@@ -154,7 +160,8 @@ def list_resources(resource_type: str | None = None, category: str | None = None
         now = utcnow()
         candidates = []
         for row in db.scalars(q.options(load_only(Resource.id, Resource.health, Resource.attrs, Resource.monitored,
-                Resource.lifecycle, Resource.critical, Resource.name)).execution_options(yield_per=500)):
+                Resource.scope_excluded, Resource.lifecycle, Resource.critical, Resource.name)
+                ).execution_options(yield_per=500)):
             state = current_health(row, now)
             if state in health:
                 candidates.append((HEALTH_ORDER.get(state, 9), not row.critical, row.name, row.id))
@@ -440,6 +447,8 @@ def patch_resource(rid: int, body: ResourcePatch, db: Session = Depends(get_db),
     for k, v in data.items():
         setattr(r, k, (v.strip() or None) if isinstance(v, str) else v)
     record_manual_change(db, r, before, cu.display_name)
+    if {"owner", "owner_user_id", "business", "env_type", "critical"} & data.keys():
+        collect_scope.refresh_resource(db, r, operator=cu.display_name)    # 采集范围可能按这些台账字段匹配
     detail = {k: [before[k], getattr(r, k)] for k in data if before[k] != getattr(r, k)}
     if expected is not None and "running" in expected:
         old_run = (r.expected_state or {}).get("running", True)

@@ -112,7 +112,10 @@ class DataArtsRealtimeCollector:
 
     def collect(self, ctx: RunContext) -> list[Observation]:
         obs: list[Observation] = []
+        scope = ctx.scope("dgc_realtime_job")
         for ws in dict.fromkeys(ctx.workspaces or [""]):
+            if not scope.keep({"workspace": ws}):      # 采集范围：整个工作空间在范围外，不请求作业列表
+                continue
             headers = {"workspace": ws} if ws else None
 
             def fetch_jobs(p: dict, h: dict | None = headers) -> dict:
@@ -129,6 +132,8 @@ class DataArtsRealtimeCollector:
                 ctx.errors.append(f"workspace={ws}: {e}")
                 log_collection_failure(log, ctx, e, cloud_service="dataarts", phase="job_list", workspace=ws)
                 continue
+            if not scope.open:                           # 范围外的作业不再逐个查询状态
+                jobs = [job for job in jobs if scope.keep({"workspace": ws, "job": job["name"]})]
             def fetch_status(job: dict, h: dict | None = headers) -> tuple[dict, dict | None, HcsError | None]:
                 name = job["name"]
                 try:
@@ -202,7 +207,10 @@ class DataArtsBatchCollector:
             raise HcsError(0, "LOCAL.INVALID_CONFIG", "p90_min_samples 须为正整数，默认 5 是本地样本策略")
         now_ms = int(time.time() * 1000)
         obs: list[Observation] = []
+        scope = ctx.scope("dgc_batch_job")
         for ws in dict.fromkeys(ctx.workspaces or [""]):
+            if not scope.keep({"workspace": ws}):      # 采集范围：整个工作空间在范围外，不请求实例列表
+                continue
             headers = {"workspace": ws} if ws else None
             params = {"minPlanTime": now_ms - 24 * 3600 * 1000, "maxPlanTime": now_ms}
 
@@ -222,6 +230,8 @@ class DataArtsBatchCollector:
                 ctx.errors.append(f"workspace={ws}: {e}")
                 log_collection_failure(log, ctx, e, cloud_service="dataarts", phase="batch_instances", workspace=ws)
                 continue
+            if not scope.open:                           # 范围外的作业不参与最新实例与 P90 基线计算
+                insts = [i for i in insts if scope.keep({"workspace": ws, "job": i["jobName"]})]
             samples = _successful_durations(insts)
             latest: dict[str, dict] = {}
             def order(i: dict) -> tuple[int, int, int]:

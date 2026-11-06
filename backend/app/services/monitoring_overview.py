@@ -93,13 +93,13 @@ def coverage(db: Session, scope: Scope, *, tenant_id: int | None = None,
     resources: dict[tuple[int, str], list[Resource]] = defaultdict(list)
     # 只取巡检元信息；不加载资源指标、普通属性或租户认证字段。
     for item in db.execute(select(Resource.id, Resource.tenant_id, Resource.project_ref, Resource.resource_type,
-            Resource.monitored, Resource.critical, Resource.health,
+            Resource.monitored, Resource.scope_excluded, Resource.critical, Resource.health,
             Resource.attrs["inspection_monitoring"].label("inspection_monitoring"))
             .where(Resource.tenant_id.in_(tids), Resource.resource_type.in_(types), Resource.lifecycle == "ACTIVE")):
         resources[(item.tenant_id, item.resource_type)].append(Resource(
             id=item.id, tenant_id=item.tenant_id, project_ref=item.project_ref, resource_type=item.resource_type,
-            monitored=item.monitored, critical=item.critical, health=item.health, lifecycle="ACTIVE",
-            attrs={"inspection_monitoring": item.inspection_monitoring}))
+            monitored=item.monitored, scope_excluded=item.scope_excluded, critical=item.critical, health=item.health,
+            lifecycle="ACTIVE", attrs={"inspection_monitoring": item.inspection_monitoring}))
     rows = []
     for tenant in tenants:
         tenant_projects = projects[tenant.id]
@@ -159,7 +159,9 @@ def coverage(db: Session, scope: Scope, *, tenant_id: int | None = None,
             inspection_enabled = bool(target_enabled and inspection_ready
                                       and (code != "ecs_server" or policy.inspection.enabled))
             metrics_enabled = bool(target_enabled and metrics_ready and (code != "ecs_server" or policy.metrics.enabled))
-            items = resources[(tenant.id, code)]
+            # 采集范围之外的资源是有意不巡检的：不计入覆盖率分母，也不算“未知”，单独给出数量
+            items = [r for r in resources[(tenant.id, code)] if not r.scope_excluded]
+            out_of_scope = len(resources[(tenant.id, code)]) - len(items)
             eligible = inspected = unknown = abnormal = partial = stale = eligible_stale = 0
             last_inspected = None
             for resource in items:
@@ -210,7 +212,8 @@ def coverage(db: Session, scope: Scope, *, tenant_id: int | None = None,
                 state = "covered"
             rows.append(MonitoringCoverageRow(
                 tenant_id=tenant.id, tenant_name=tenant.name, resource_type=code, resource_name=guide.name,
-                resources=len(items), eligible_resources=eligible, inspected_resources=inspected,
+                resources=len(items), out_of_scope_resources=out_of_scope, eligible_resources=eligible,
+                inspected_resources=inspected,
                 unknown_resources=unknown, abnormal_resources=abnormal, partial_resources=partial,
                 stale_resources=stale, last_inspected_at=last_inspected, projects=len(tenant_projects),
                 enabled_projects=enabled_projects, collection_enabled=master, ledger_enabled=ledger_enabled,

@@ -31,8 +31,17 @@ from app.models import AlarmEvent, InspectionRun, InspectionTask, Notification, 
 from app.models.alarm import ACTIVE_STATUSES
 from app.models.base import utcnow
 from app.schemas.alarm import AlarmOut
+from app.schemas.collect_scope import ScopeIn
 from app.schemas.system import TaskRunOut, TaskScopeOut
-from app.services import catalog, collect_switch, pipeline, platform_watch, settings_service, silence_service
+from app.services import (
+    catalog,
+    collect_scope,
+    collect_switch,
+    pipeline,
+    platform_watch,
+    settings_service,
+    silence_service,
+)
 from app.services.cleanup import CLEANUP_TASK
 from app.services.tenancy import tenant_map
 
@@ -331,6 +340,74 @@ def save_switches(body: SwitchesIn, db: Session = Depends(get_db), scope: Scope 
                   detail={"changes": [f"{_tenant_name(tm, c['tenant_id']) or '全局'} · {c['name']}："
                                       f"{label[c['old']] if c['old'] is not None or c['tenant_id'] else '开启'} → "
                                       f"{label[c['new']]}" for c in res["changed"]],
+                          "closed_alarms": res["closed_alarms"]})
+    else:
+        db.commit()
+    return ok(res)
+
+
+# ---------------- 采集范围 ----------------
+def _check_scope_target(db: Session, scope: Scope, tenant_id: int, resource_type: str) -> None:
+    """采集范围的授权口径与采集开关一致：全局（0）需要全部租户的数据权限；租户设置需要在数据范围内。"""
+    if resource_type not in collect_switch.SWITCH_TYPES:
+        raise BizError(ErrorCode.BAD_REQUEST, f"未知资源类型：{resource_type}")
+    if tenant_id == collect_scope.GLOBAL:
+        if not scope.full:
+            raise BizError(ErrorCode.FORBIDDEN, "修改全局采集范围需要全部租户的数据权限，请在租户下单独设置", 403)
+        return
+    if tenant_id not in tenant_map(db):
+        raise BizError(ErrorCode.BAD_REQUEST, f"租户不存在：{tenant_id}")
+    if not scope.allows(tenant_id) and not scope.full:
+        raise BizError(ErrorCode.FORBIDDEN, "无权修改其他租户的采集范围", 403)
+
+
+def _scope_text(rules: list[dict] | None, tenant_id: int) -> list[str]:
+    if rules is None:
+        return ["跟随全局"] if tenant_id else ["全部采集"]
+    return collect_scope.describe_rules(rules) or ["全部采集"]
+
+
+@router.get("/collect-scopes", summary="采集范围：每类资源的全局范围、各租户的设置与生效规则、资源数与范围外资源数")
+def get_scopes(db: Session = Depends(get_db), scope: Scope = Depends(get_scope),
+               _: object = Depends(require_perm("task:view", "collect:manage", any_of=True))):
+    return ok({**collect_scope.overview(db, scope.tenant_ids), "global_editable": scope.full})
+
+
+@router.get("/collect-scopes/{tenant_id}/{resource_type}/candidates",
+            summary="采集范围的候选值：该租户（0 = 全部租户）已知资源在某个维度上的取值与数量")
+def scope_candidates(tenant_id: int, resource_type: str, dim: str = Query(..., max_length=32),
+                     keyword: str | None = Query(None, max_length=100), limit: int = Query(50, ge=1, le=200),
+                     db: Session = Depends(get_db), scope: Scope = Depends(get_scope),
+                     _: CurrentUser = Depends(require_perm("collect:manage"))):
+    _check_scope_target(db, scope, tenant_id, resource_type)
+    return ok(collect_scope.candidates(db, tenant_id, resource_type, dim, keyword, limit,
+                                       visible_tenants=scope.tenant_ids))
+
+
+@router.post("/collect-scopes/{tenant_id}/{resource_type}/preview",
+             summary="保存前预估：这组规则会让多少资源落到范围外、其中新排除多少、将关闭多少活动告警")
+def scope_preview(tenant_id: int, resource_type: str, body: ScopeIn, db: Session = Depends(get_db),
+                  scope: Scope = Depends(get_scope), _: CurrentUser = Depends(require_perm("collect:manage"))):
+    _check_scope_target(db, scope, tenant_id, resource_type)
+    rules = None if body.rules is None else [r.model_dump(exclude_none=True) for r in body.rules]
+    return ok(collect_scope.preview(db, tenant_id, resource_type, rules, visible_tenants=scope.tenant_ids))
+
+
+@router.put("/collect-scopes/{tenant_id}/{resource_type}",
+            summary="保存采集范围（范围外的资源不再采集 / 评估 / 告警，其活动告警自动关闭；台账仍完整记录）")
+def save_scope(tenant_id: int, resource_type: str, body: ScopeIn, db: Session = Depends(get_db),
+               scope: Scope = Depends(get_scope), audit: Auditor = Depends(get_auditor),
+               cu: CurrentUser = Depends(require_perm("collect:manage"))):
+    _check_scope_target(db, scope, tenant_id, resource_type)
+    rules = None if body.rules is None else [r.model_dump(exclude_none=True) for r in body.rules]
+    res = collect_scope.save(db, tenant_id, resource_type, rules, cu.display_name or cu.username)
+    if res["changed"]:
+        label = _tenant_name(tenant_map(db), tenant_id) or "全局"
+        audit.log("collect.scope", target_type="collect_scope", target_id=f"{tenant_id}:{resource_type}",
+                  target_name=f"{label} · {catalog.type_name(resource_type)}",
+                  tenant_id=tenant_id or scope.single,
+                  detail={"before": _scope_text(res["before"], tenant_id), "after": _scope_text(res["after"], tenant_id),
+                          "excluded": res["excluded"], "restored": res["restored"],
                           "closed_alarms": res["closed_alarms"]})
     else:
         db.commit()

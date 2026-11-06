@@ -92,6 +92,8 @@ class PodEventCollector:
                     or not isinstance(status, dict) or not isinstance(status.get("phase"), str) or not status["phase"]:
                 ctx.errors.append("CCE 集群标识或状态缺失，未按可用集群采集")
                 continue
+            if not run.scope.keep({"cluster": (meta["uid"], meta.get("name") or meta["uid"])}):
+                continue                        # 采集范围：整个集群在范围外，不请求 Pod 与事件
             if status["phase"] != "Available":
                 ctx.errors.append(f"集群 {meta.get('name', meta['uid'])}: 状态 {status['phase']}，容器事件未采集")
                 continue
@@ -114,7 +116,10 @@ class _Run:
         # 保留天数以“系统设置 → 数据保留”为准（未设置时取环境变量 INSPECTOR_POD_EVENT_RETENTION_DAYS）
         self.retention = timedelta(days=settings_service.get_retention(ctx.db).pod_event_days) if ctx.db is not None \
             else timedelta(days=s.pod_event_retention_days)
+        # 任务参数 exclude_namespaces 是系统命名空间的默认屏蔽；“采集范围”规则（集群 / 命名空间 / 工作负载）在此之上叠加
         self.exclude = set(ctx.params.get("exclude_namespaces", ["kube-public", "kube-node-lease"]))
+        self.scope = ctx.scope(RESOURCE_TYPE)
+        self.out_pods: set[tuple[str, str, str]] = set()   # 本轮因工作负载在范围外而跳过的 Pod（集群 ID, 命名空间, 名称）
         task = self.db_.get(InspectionTask, TASK_CODE)
         self.sample_gap = timedelta(seconds=max(1, task.interval_sec if task else 60)) + TOLERANCE
         self.probes = list(self.db_.scalars(select(PodProbe).where(
@@ -133,6 +138,18 @@ class _Run:
 
     def _scope(self, model) -> tuple:
         return (model.tenant_id == self.ctx.tenant_id, model.project_ref == self.ctx.project_ref)
+
+    def _out(self, cluster: tuple[str, str], namespace: str, workload: str | None = None) -> bool:
+        """确定在采集范围之外：系统命名空间，或命中范围规则。拿不准（例如还不知道工作负载）时不排除。
+        集群级对象（Node 事件等）没有命名空间，命名空间规则对它们不适用。"""
+        if namespace and namespace in self.exclude:
+            return True
+        subject: dict = {"cluster": cluster}
+        if namespace:
+            subject["namespace"] = namespace
+        if workload is not None:
+            subject["workload"] = workload
+        return not self.scope.keep(subject)
 
     def _event_key(self, cid: str, dedup: str) -> str:
         return pod_event_key(self.ctx.tenant_id, self.ctx.project_ref, cid, dedup)
@@ -189,7 +206,16 @@ class _Run:
     def cluster(self, cid: str, cname: str) -> list[Observation]:
         db, now = self.db_, self.now
         kube = KubeApi(self.ctx.client, cid)
-        pods = [p for p in kube.pods() if (p.get("metadata") or {}).get("namespace") not in self.exclude]
+        cl = (cid, cname)
+        pods = []
+        for p in kube.pods():
+            ns = (p.get("metadata") or {}).get("namespace") or ""
+            if self._out(cl, ns):
+                continue
+            if not self.scope.open and self._out(cl, ns, workload_identity(p)[1]):
+                self.out_pods.add((cid, ns, (p.get("metadata") or {}).get("name") or ""))
+                continue
+            pods.append(p)
         # Only a complete Pod snapshot may drive status changes or deletion. Events
         # are supplemental: a failed/incomplete Event list must not discard that snapshot.
         events = None
@@ -199,9 +225,10 @@ class _Run:
             self.unavailable_events.add(cid)
             self.ctx.errors.append(f"集群 {cname}: K8s Event 查询失败（HTTP {exc.status}）")
             log_collection_failure(log, self.ctx, exc, cloud_service="cce_k8s", phase="event_fetch")
-        cl = (cid, cname)
         states = {f"{s.cluster_id}/{s.namespace}/{s.pod}": s for s in db.scalars(select(PodState).where(
             *self._scope(PodState), PodState.cluster_id == cid, PodState.namespace.not_in(self.exclude)))}
+        if not self.scope.open:     # 范围外的 Pod 记录原样保留（既不更新也不标记删除），重新纳入范围后继续比对
+            states = {key: s for key, s in states.items() if not self._out(cl, s.namespace, s.workload or None)}
         self.ongoing.update({e.dedup_key: e for e in db.scalars(select(PodEvent).where(
             *self._scope(PodEvent), PodEvent.cluster_id == cid, PodEvent.ongoing.is_(True)))})
         known_restarts = set(db.scalars(select(PodEvent.dedup_key).where(
@@ -373,6 +400,17 @@ class _Run:
                           else previous.namespace, "", ""))
             self.unknown_events[old_scope].add(previous.event_type)
 
+    def _event_out(self, cl: tuple[str, str], ns: str, involved: dict) -> bool:
+        """K8s Event 是否属于范围外的命名空间 / Pod / 工作负载；Node 等集群级对象不受命名空间规则影响。"""
+        if self._out(cl, ns):
+            return True
+        kind, name = involved.get("kind"), involved.get("name")
+        if not ns or not isinstance(name, str) or not name:
+            return False
+        if kind == "Pod":
+            return (cl[0], ns, name) in self.out_pods
+        return self._out(cl, ns, name)
+
     def _k8s_events(self, cl: tuple[str, str], events: list[dict], states: dict[str, PodState]) -> None:
         db, now, cid = self.db_, self.now, cl[0]
         pod_uids: dict[tuple[str, str], PodState | None] = {}
@@ -386,9 +424,10 @@ class _Run:
         wanted = []
         for e in events:
             et = classify(e.get("reason") or "", e.get("type") or "Normal", e.get("message") or "", self.bp)
-            ns = next((v for v in ((e.get("involvedObject") or {}).get("namespace"),
-                                  (e.get("metadata") or {}).get("namespace")) if isinstance(v, str) and v), "")
-            if et and ns not in self.exclude and (e.get("metadata") or {}).get("uid"):
+            io = e.get("involvedObject") or {}
+            ns = next((v for v in (io.get("namespace"), (e.get("metadata") or {}).get("namespace"))
+                       if isinstance(v, str) and v), "")
+            if et and (e.get("metadata") or {}).get("uid") and not self._event_out(cl, ns, io):
                 wanted.append((e, et, ns))
         keys = [self._event_key(cid, f"k8s:{e['metadata']['uid']}") for e, _, _ in wanted]
         existing: dict[str, PodEvent] = {}
@@ -671,8 +710,11 @@ class _Run:
                                                          Resource.project_ref == self.ctx.project_ref,
                                                          Resource.resource_id.startswith(f"{cid}/", autoescape=True),
                                                          Resource.lifecycle == "ACTIVE")):
-            if r.resource_id not in current and r.resource_id.split("/")[1] not in self.exclude:
-                r.lifecycle, r.deleted_at = "DELETED", now
+            parts = r.resource_id.split("/")           # 集群ID/命名空间/类型/名称
+            if (r.resource_id in current or r.scope_excluded or parts[1] in self.exclude
+                    or self._out(cl, parts[1], parts[3] if len(parts) == 4 else None)):
+                continue                                # 范围外的工作负载不再采集，不等于已删除
+            r.lifecycle, r.deleted_at = "DELETED", now
         return out
 
     def finish(self) -> None:

@@ -23,7 +23,7 @@ from app.hcs.client import metrics_delta
 from app.models import AlarmEvent, InspectionRun, Resource, ResourceChange
 from app.models.alarm import ACTIVE_STATUSES
 from app.models.base import utcnow
-from app.services import collect_switch, collection_policy, platform_watch, settings_service
+from app.services import collect_scope, collect_switch, collection_policy, platform_watch, settings_service
 from app.services.catalog import LEDGER_TASK_CODE, RESOURCE_TYPES, type_name
 from app.services.tenancy import Target, legacy_target, resolve_targets
 
@@ -383,6 +383,16 @@ def sync_ledger(db: Session, *, client: HcsClient | None = None, target: Target 
             errors.append(f"{type_name(rtype)}: {detail}")
             continue
     db.commit()
+    try:        # 新同步进来的资源按“采集范围”规则标记；台账仍完整记录，只是范围外的不再巡检
+        collect_scope.sync_flags(db, target.tenant_id, list(stats), project_ref=target.project_ref)
+        db.commit()
+    except Exception as e:  # noqa: BLE001  辅助步骤失败不能影响台账同步结果
+        db.rollback()
+        errors.append("采集范围标记同步失败，将在下次巡检前重试")
+        log.error("ledger_scope_sync_failed", extra={"event": "ledger_scope_sync_failed", "run_id": run.id,
+                  "tenant_id": target.tenant_id, "project_ref": target.project_ref,
+                  "exception_type": type(e).__name__},
+                  exc_info=(RuntimeError, RuntimeError(type(e).__name__), e.__traceback__))
     changed = sum(v["created"] + v["updated"] + v["deleted"] for v in stats.values())
     run.resource_total = sum(v["total"] for v in stats.values())
     run.stats = {**stats, "skipped": skipped} if skipped else stats

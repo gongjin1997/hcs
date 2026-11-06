@@ -33,6 +33,9 @@ class GaussDBCollector:
     def collect(self, ctx: RunContext) -> list[Observation]:
         insts = list(page_all(lambda p: ctx.client.get("gaussdb", gaussdb_instances_path(), params=p),
                               "instances", total_key="total_count"))
+        scope = ctx.scope("gaussdb_instance")      # 采集范围：范围外的实例不再逐个查询磁盘用量
+        if not scope.open:
+            insts = [i for i in insts if scope.keep({"id": i["id"], "name": i["name"]})]
         obs: list[Observation] = []
         native_volume = 0
         for i in insts:

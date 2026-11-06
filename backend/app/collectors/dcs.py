@@ -31,6 +31,9 @@ class DcsCollector:
             return body
 
         insts = list(page_all(page, "instances", limit=1000, total_key="instance_num"))
+        scope = ctx.scope("dcs_instance")          # 采集范围：范围外的实例不参与统计与评估；全部排除时不再请求统计接口
+        if not scope.open:
+            insts = [i for i in insts if scope.keep({"id": i["instance_id"], "name": i["name"]})]
         statistics: dict[str, dict] = {}
         statistic_at = None
         warning = None

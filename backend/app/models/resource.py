@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, String, Text, text
+from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, String, Text, false, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base, JsonType, UtcDateTime
@@ -58,6 +58,10 @@ class Resource(Base):
     remark: Mapped[str | None] = mapped_column(Text)
     monitored: Mapped[bool] = mapped_column(Boolean, default=True)
     critical: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 被“采集范围”规则排除（系统设置 → 采集开关 → 采集范围）。由巡检任务开始前与保存规则时统一计算，
+    # 不是人工开关：与“纳入巡检”(monitored) 互相独立，实际是否巡检 = monitored 且 not scope_excluded。
+    # 只设 server_default、不设 Python 默认值：迁移测试会用当前模型向旧版本的表插入记录，Python 默认值会把本列带进旧表。
+    scope_excluded: Mapped[bool] = mapped_column(Boolean, server_default=false())
     # ---- 生命周期 ----
     lifecycle: Mapped[str] = mapped_column(String(16), default="ACTIVE")   # ACTIVE / DELETED（云上已释放）
     first_seen: Mapped[datetime] = mapped_column(UtcDateTime(), default=utcnow)

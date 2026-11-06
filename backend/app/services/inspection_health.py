@@ -9,7 +9,7 @@ ALARM_HEALTH = {"CRITICAL", "MAJOR", "WARNING", "INFO"}
 
 
 def inspection_state(resource: Resource, now: datetime | None = None) -> str:
-    if not resource.monitored or resource.lifecycle != "ACTIVE":
+    if not resource.monitored or resource.scope_excluded or resource.lifecycle != "ACTIVE":
         return "DISABLED"
     raw = (resource.attrs or {}).get("inspection_monitoring")
     if not isinstance(raw, dict):

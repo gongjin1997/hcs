@@ -195,7 +195,8 @@ def interrupt_missing(db: Session, ctx: Context, rules: dict[tuple[str, str], li
             Resource.id.in_(owned_refs))))
     current_ids = {(observation.resource_type, observation.resource_id) for observation, _, _ in checks}
     owned_refs = {(item.data.get(META) or {}).get("resource_ref") for item in items}
-    resources = [resource for resource in resources if (
+    # 采集范围之外的资源本来就不会被采集，不能因为“本轮没返回”而被记为缺采
+    resources = [resource for resource in resources if not resource.scope_excluded and (
         resource.resource_type != "ecs_server" or collection_policy.resource_included(resource, policy)) and (
         resource.id in owned_refs or (resource.resource_type, resource.resource_id) in current_ids
         or ((resource.attrs or {}).get("inspection_monitoring") or {}).get("task_code") in (None, task_code(ctx)))]

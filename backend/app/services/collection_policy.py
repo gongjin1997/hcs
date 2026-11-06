@@ -132,7 +132,7 @@ def _cron_trigger(spec: str) -> CronTrigger | None:
 
 def resource_included(resource: Resource, policy: CollectionPolicy | dict) -> bool:
     policy = CollectionPolicy.model_validate(policy)
-    if not resource.monitored or resource.lifecycle != "ACTIVE":
+    if not resource.monitored or resource.scope_excluded or resource.lifecycle != "ACTIVE":
         return False
     selection = policy.selection
     return (selection.mode == "all" or selection.mode == "critical" and resource.critical
@@ -146,7 +146,7 @@ def select_resources(db: Session, tenant_id: int | None, project_ref: int | None
         return []
     q = select(Resource).where(Resource.tenant_id == tenant_id, Resource.project_ref == project_ref,
                                Resource.resource_type == rtype, Resource.lifecycle == "ACTIVE",
-                               Resource.monitored.is_(True))
+                               Resource.monitored.is_(True), Resource.scope_excluded.is_(False))
     if policy.selection.mode == "critical":
         q = q.where(Resource.critical.is_(True))
     elif policy.selection.mode == "selected":
@@ -211,7 +211,7 @@ def _close_excluded_alarms(db: Session, tenant_id: int, rtype: str, before: Coll
         .where(AlarmEvent.tenant_id == tenant_id, AlarmEvent.resource_type == rtype,
                AlarmEvent.status.in_(ACTIVE_STATUSES))
         .options(load_only(Resource.id, Resource.tenant_id, Resource.resource_type,
-                           Resource.monitored, Resource.lifecycle, Resource.critical))
+                           Resource.monitored, Resource.scope_excluded, Resource.lifecycle, Resource.critical))
         .with_for_update(of=AlarmEvent).execution_options(populate_existing=True))
     if not inspection_off and not selection_changed:
         snapshot_check = getattr(AlarmEvent, "check_item", None)

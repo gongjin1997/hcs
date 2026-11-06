@@ -149,7 +149,8 @@ def _snapshot_query(scope: Scope, panel: JobPanel, dialect: str):
         func.coalesce(alarms.c.active_alarms, 0).label("active_alarms"),
     ).outerjoin(alarms, and_(alarms.c.resource_ref == Resource.id,
                             alarms.c.tenant_id.is_not_distinct_from(Resource.tenant_id))), Resource.tenant_id)
-    q = q.where(Resource.resource_type.in_(PANEL_TYPES[panel]))
+    # 采集范围之外的作业不巡检、不展示（它们的状态不会再更新，留在报表里只会是过期数据）
+    q = q.where(Resource.resource_type.in_(PANEL_TYPES[panel]), Resource.scope_excluded.is_(False))
     if panel == "flink":
         q = q.where(or_(*(func.lower(_attr_text(key)) == "flink" for key in ("engine", "job_type", "type")),
                         func.lower(_attr_text("node_type")) == "mrsflinkjob"))

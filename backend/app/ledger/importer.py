@@ -18,6 +18,7 @@ from app.core.response import BizError, ErrorCode
 from app.core.xlsx import new_workbook, to_bytes, write_table
 from app.models import HcsAccount, Resource, User
 from app.models.base import utcnow
+from app.services import collect_scope
 from app.services.catalog import ENV_TYPES, LEDGER_TYPES, RESOURCE_TYPES, type_name
 from app.services.identity import resolve_owner
 from app.services.settings_service import LedgerDict
@@ -239,6 +240,7 @@ def _show(key: str, v):
 
 def apply(db: Session, todo: list, operator: str) -> int:
     now = utcnow()
+    scopes = collect_scope.load(db)
     for r, new in todo:
         changes = []
         for k, v in new.items():
@@ -254,5 +256,7 @@ def apply(db: Session, todo: list, operator: str) -> int:
         if "owner" in new or "owner_user_id" in new:
             propagate_owner(db, r)
         _change(db, r, "UPDATED", now, changes, source="IMPORT", operator=operator)
+        if {"owner", "owner_user_id", "business", "env_type", "critical"} & new.keys():
+            collect_scope.refresh_resource(db, r, operator=operator, scopes=scopes)   # 采集范围可能按这些字段匹配
     db.flush()
     return len(todo)

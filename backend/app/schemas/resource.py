@@ -37,6 +37,7 @@ class ResourceOut(ORMModel):
     env_type: str | None = None
     remark: str | None = None
     monitored: bool
+    scope_excluded: bool = False          # 被“采集范围”规则排除：不采集、不评估、不告警
     critical: bool
     lifecycle: str
     first_seen: datetime

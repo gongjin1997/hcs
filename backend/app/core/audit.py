@@ -61,7 +61,8 @@ ACTIONS: dict[str, str] = {
     "notify.group.delete": "删除联系组", "notify.contact.create": "新增联系人", "notify.contact.update": "修改联系人",
     "notify.contact.delete": "删除联系人", "notify.test_mail": "发送测试邮件",
     "notify.test_smtp": "测试 SMTP 连接", "notify.test_imap": "测试 IMAP 连接",
-    "collect.update": "修改采集开关", "setting.update": "修改系统设置", "report.schedule": "修改报表设置",
+    "collect.update": "修改采集开关", "collect.scope": "修改采集范围",
+    "setting.update": "修改系统设置", "report.schedule": "修改报表设置",
     "ledger.classification": "维护资源分类映射",
     "ledger.dict": "维护台账字典", "ledger.import": "Excel 导入台账字段",
 }

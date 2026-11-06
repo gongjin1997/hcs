@@ -6,6 +6,8 @@ from typing import Any, Protocol
 
 from app.hcs import HcsClient, HcsError
 
+from .scope import OPEN, ScopeFilter
+
 _SAFE_CODE = re.compile(r"[A-Za-z0-9_.-]{1,64}\Z")
 _SAFE_REQUEST_ID = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
 
@@ -47,6 +49,12 @@ class RunContext:
     db: Any = None                                    # 需要读写本地状态的采集器（容器事件、ECS 状态）使用
     tenant: Any = None                                # HcsAccount：监控指标来源、能力探测结果（CES 是否可用）
     stats: dict = field(default_factory=dict)         # 写入运行记录 stats（例如新增容器事件数、指标来源）
+    scopes: Any = None                                # 采集范围（services.collect_scope.Scopes）；None = 不裁剪
+
+    def scope(self, resource_type: str) -> ScopeFilter:
+        """本租户该资源类型的采集范围。采集器在调用云接口之前用它丢弃确定在范围外的对象，
+        只用已知的维度提问（其余维度不给），拿不准时保留，最终判定在巡检流水线。"""
+        return self.scopes.get(self.tenant_id, resource_type) if self.scopes is not None else OPEN
 
 
 def log_collection_failure(logger: logging.Logger, ctx: RunContext, exc: Exception, *,
