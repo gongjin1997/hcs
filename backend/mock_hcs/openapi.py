@@ -107,7 +107,8 @@ def gaussdb_instances(ds: ModuleType) -> list[dict]:
         roles = ("master", "slave", "slave") if typ == "Ha" else ("master",)
         out.append({"id": gaussdb_id(ds, n), "name": n, "status": st, "type": typ,
                     "datastore": {"type": "GaussDB", "version": "3.208"}, "volume": {"type": "ULTRAHIGH", "size": gb},
-                    "flavor_ref": "gaussdb.opengauss.ee.dn.m6.2xlarge.8", "private_ips": [ip],
+                    "flavor_ref": "gaussdb.opengauss.ee.dn.m6.2xlarge.8",
+                    "flavor_info": {"vcpu": "8", "mem": "64"}, "private_ips": [ip],
                     "availability_zone": f"{ds.AZ1},{ds.AZ2}" if typ == "Ha" else ds.AZ2, "created": ds.iso(c),
                     "nodes": [{"name": f"{n}_dn{k}", "role": r, "status": "ACTIVE"} for k, r in enumerate(roles, 1)]})
     return out
@@ -150,7 +151,8 @@ def cce_nodes(ds: ModuleType, uid: str) -> list[dict]:
 
 def dws_clusters(ds: ModuleType) -> list[dict]:
     return [{"id": ds.rid("dws", n), "name": n, "status": "AVAILABLE", "version": ver, "node_type": nt,
-             "number_of_node": num, "availability_zone": ds.AZ1, "private_ip": [ip], "created": ds.iso(c)}
+             "number_of_node": num, "availability_zone": ds.AZ1, "port": 8000,
+             "endpoints": [{"connect_info": f"{ip}:8000"}], "created": ds.iso(c)}
             for n, ver, nt, num, ip, c in ds.DWS]
 
 

@@ -1,7 +1,7 @@
 <template>
   <el-dialog :model-value="visible" :title="route ? `编辑路由：${route.name}` : '新建通知路由'" width="760px" top="6vh" append-to-body destroy-on-close
              @close="emit('update:visible', false)">
-    <el-form ref="formRef" :model="f" :rules="rules" label-width="100px">
+    <el-form ref="formRef" :model="f" :rules="rules" label-width="100px" :disabled="saving" @submit.prevent>
       <el-form-item label="名称" prop="name"><el-input v-model="f.name" maxlength="64" show-word-limit placeholder="例如：租户B 告警 → 互联网运维组" /></el-form-item>
       <el-form-item label="优先级" prop="priority">
         <el-input-number v-model="f.priority" :min="0" :max="10000" :step="10" controls-position="right" style="width: 140px" />
@@ -111,7 +111,9 @@ watch(() => props.visible, (v) => {
 const addEsc = () => f.escalation.push({ after_min: f.escalation.length ? f.escalation[f.escalation.length - 1].after_min + 15 : 15, to: 'leader', severities: ['P1', 'P2'] })
 
 async function submit() {
-  await formRef.value?.validate()
+  if (saving.value) return
+  if (!(await formRef.value?.validate().catch(() => false))) return
+  if (saving.value) return
   const match: RouteIn['match'] = {}
   for (const k of ['tenant_ids', 'services', 'resource_types', 'severities'] as const) if (m[k].length) (match as Record<string, unknown>)[k] = [...m[k]]
   const body: RouteIn = { name: f.name.trim(), priority: f.priority, match, group_code: f.group_code, escalation: f.escalation, continue_match: f.continue_match, enabled: f.enabled }
@@ -119,10 +121,11 @@ async function submit() {
   try {
     if (props.route) await updateRoute(props.route.id, body)
     else await createRoute(body)
-    ElMessage.success('已保存，新告警立即按新路由投递')
+    ElMessage.success('路由已保存')
     emit('saved')
     emit('update:visible', false)
-  } finally { saving.value = false }
+  } catch { /* 请求层提示错误，保留表单供重试。 */ }
+  finally { saving.value = false }
 }
 </script>
 

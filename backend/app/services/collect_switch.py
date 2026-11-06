@@ -1,6 +1,6 @@
 """采集开关：按资源类型（可再按租户）启停台账同步和巡检。
 
-- 全局默认（tenant_id = 0）+ 租户单独设置（覆盖全局）；没有任何记录时全部开启
+- 全局默认（tenant_id = 0）+ 租户单独设置（覆盖全局）；旧库缺少记录时兼容开启，新生产库显式初始化为关闭
 - 关闭后：台账同步跳过该类型（已有台账保留，不会被标记为“已释放”）；对应的巡检任务对该租户不再执行；
   该类型在受影响租户下的活动告警自动关闭（留处理记录），避免留下永远不会恢复的告警
 - 典型场景：租户B 没有开通 DCS —— 在租户B 下关闭“DCS 缓存实例”，DCS 巡检和台账同步都不再调用 DCS 接口
@@ -21,7 +21,9 @@ GLOBAL = 0
 TASK_TYPES: dict[str, list[str]] = {
     "dgc_realtime_status": ["dgc_realtime_job"], "dgc_batch_instance": ["dgc_batch_job"],
     "mrs_cluster_status": ["mrs_cluster"], "mrs_job_status": ["mrs_job"], "gaussdb_status": ["gaussdb_instance"],
-    "dcs_status": ["dcs_instance"], "ecs_status": ["ecs_server"], "cce_pod_events": ["cce_workload"],
+    "dcs_status": ["dcs_instance"], "ecs_status": ["ecs_server"], "ecs_metrics": ["ecs_server"],
+    "ecs_quota": ["ecs_server"], "cce_pod_events": ["cce_workload"],
+    "cce_cluster_health": ["cce_cluster"],
 }
 TYPE_TASKS: dict[str, list[str]] = {}
 for _task, _types in TASK_TYPES.items():
@@ -51,7 +53,22 @@ class Switches:
 
 
 def load(db: Session) -> Switches:
-    return Switches({(r.tenant_id, r.resource_type): r.enabled for r in db.scalars(select(CollectSwitch))})
+    # 长生命周期 worker Session 不能复用开关修改前的 ORM identity-map 值。
+    rows = db.execute(select(CollectSwitch.tenant_id, CollectSwitch.resource_type, CollectSwitch.enabled))
+    return Switches({(tenant_id, resource_type): enabled for tenant_id, resource_type, enabled in rows})
+
+
+def initialize_disabled(db: Session, tenant_id: int, operator: str) -> None:
+    """新租户或新生产库逐类型关闭；重复执行不覆盖已经明确配置的开关。"""
+    existing = set(db.scalars(select(CollectSwitch.resource_type).where(CollectSwitch.tenant_id == tenant_id)))
+    for resource_type in SWITCH_TYPES:
+        if resource_type not in existing:
+            db.add(CollectSwitch(tenant_id=tenant_id, resource_type=resource_type, enabled=False, updated_by=operator))
+    db.flush()
+    if tenant_id > 0:
+        from app.services import collection_policy
+
+        collection_policy.initialize_disabled(db, tenant_id, operator)
 
 
 def _tenants(db: Session, tenant_ids: list[int] | None) -> list[HcsAccount]:

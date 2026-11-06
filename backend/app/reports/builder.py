@@ -3,7 +3,7 @@
 - 新增告警：首次发生时间落在统计周期内的告警；MTTA / MTTR 也只统计这批告警
 - 期末未恢复：周期结束时仍未恢复（含已认领、已抑制）
 - 巡检成功率：周期内巡检任务运行记录中 SUCCESS 的占比（PARTIAL 计为部分成功）
-- 台账：期末快照 + 周期内同步发现的新增 / 变更 / 释放
+- 台账：生成时快照 + 周期内同步发现的新增 / 变更 / 释放
 """
 from collections import Counter, defaultdict
 from collections.abc import Sequence
@@ -15,10 +15,25 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.models import AlarmEvent, AlarmRule, HcsAccount, InspectionRun, InspectionTask, PodEvent, Resource, ResourceChange
+from app.k8s.semantics import window_count
+from app.models import (
+    AlarmEvent,
+    AlarmEventLog,
+    AlarmRule,
+    HcsAccount,
+    InspectionRun,
+    InspectionTask,
+    PodEvent,
+    Resource,
+    ResourceChange,
+)
+from app.models.alarm import ACTIVE_STATUSES
 from app.models.base import utcnow
 from app.services import dashboard_service
+from app.services.capacity_summary import capacity_totals
 from app.services.catalog import LEDGER_TYPES, RESOURCE_TYPES, SERVICES, ledger_categories, type_name
+from app.services.ecs_monitoring import snapshots as ecs_snapshots
+from app.services.metric_visibility import current_metrics
 
 KINDS = {"DAILY": "日报", "WEEKLY": "周报", "MONTHLY": "月报", "LEDGER": "资源台账报表"}
 SEVS = ("P1", "P2", "P3", "P4")
@@ -87,6 +102,36 @@ def _alarm_stats(alarms: Sequence[AlarmEvent]) -> dict:
             "ack_rate": round(sum(1 for a in major if a.ack_at) * 100 / len(major), 1) if major else None}
 
 
+def _active_at_end(db: Session, alarms: Sequence[AlarmEvent], end: datetime) -> int:
+    statuses: dict[int, str] = {}
+    ids = [alarm.id for alarm in alarms]
+    for offset in range(0, len(ids), 500):
+        history = select(AlarmEventLog.alarm_id, AlarmEventLog.to_status,
+            func.row_number().over(partition_by=AlarmEventLog.alarm_id,
+                order_by=(AlarmEventLog.at.desc(), AlarmEventLog.id.desc())).label("rank")).where(
+                    AlarmEventLog.alarm_id.in_(ids[offset:offset + 500]), AlarmEventLog.at < end,
+                    AlarmEventLog.to_status.in_((*ACTIVE_STATUSES, "RESOLVED", "CLOSED"))).subquery()
+        statuses.update(db.execute(select(history.c.alarm_id, history.c.to_status).where(history.c.rank == 1)).all())
+    return sum(statuses[a.id] in ACTIVE_STATUSES if a.id in statuses else
+               a.resolved_at is None and a.status != "CLOSED" or a.resolved_at is not None and a.resolved_at >= end
+               for a in alarms)
+
+
+def _run_stats(runs: Sequence[InspectionRun], end: datetime) -> dict:
+    def status(run: InspectionRun) -> str:
+        return "RUNNING" if run.finished_at is not None and run.finished_at >= end else run.status
+
+    counts = Counter(status(run) for run in runs)
+    completed = counts["SUCCESS"] + counts["PARTIAL"] + counts["FAILED"] + counts["TIMEOUT"]
+    durations = [(run.finished_at - run.started_at).total_seconds() for run in runs
+                 if status(run) in ("SUCCESS", "PARTIAL", "FAILED", "TIMEOUT") and run.finished_at is not None
+                 and run.finished_at >= run.started_at]
+    return {"runs": len(runs), "completed": completed, "success": counts["SUCCESS"], "partial": counts["PARTIAL"],
+            "failed": counts["FAILED"] + counts["TIMEOUT"], "skipped": counts["SKIPPED"], "running": counts["RUNNING"],
+            "success_rate": round(counts["SUCCESS"] * 100 / completed, 1) if completed else None,
+            "avg_sec": round(sum(durations) / len(durations), 1) if durations else None}
+
+
 def _buckets(kind: str, start: datetime, end: datetime) -> tuple[list[str], list[datetime]]:
     tz = _tz()
     if kind == "DAILY":
@@ -109,7 +154,7 @@ def _ledger(db: Session, start: datetime, end: datetime, tenant_ids: list[int] |
         ch_q = ch_q.where(ResourceChange.detected_at >= end - timedelta(days=30))
     changes = db.scalars(ch_q.order_by(ResourceChange.detected_at.desc())).all()
     cnt = Counter(r.resource_type for r in rows)
-    ecs = [r for r in rows if r.resource_type == "ecs_server"]
+    capacity = capacity_totals(rows)
     return {
         "total": len(rows),
         "by_category": [{"code": c["code"], "name": c["name"],
@@ -117,8 +162,8 @@ def _ledger(db: Session, start: datetime, end: datetime, tenant_ids: list[int] |
                         for c in ledger_categories()],
         "by_type": [{"code": t, "name": type_name(t), "count": cnt.get(t, 0),
                      "unassigned": sum(1 for r in rows if r.resource_type == t and not r.owner)} for t in LEDGER_TYPES],
-        "vcpus": sum(r.vcpus or 0 for r in ecs), "memory_gb": round(sum(r.memory_gb or 0 for r in ecs), 1),
-        "storage_gb": round(sum(r.storage_gb or 0 for r in rows if r.resource_type == "evs_volume"), 1),
+        "vcpus": capacity["vcpus"], "memory_gb": capacity["memory_gb"],
+        "storage_gb": capacity["storage_gb"], "capacity_coverage": capacity["coverage"],
         "unassigned": sum(1 for r in rows if not r.owner),
         "idle": sum(1 for r in rows if (r.resource_type, r.status_raw) in
                     (("evs_volume", "available"), ("eip", "DOWN"), ("ecs_server", "SHUTOFF"))),
@@ -133,15 +178,17 @@ def _ledger(db: Session, start: datetime, end: datetime, tenant_ids: list[int] |
 def _capacity(db: Session, tenant_ids: list[int] | None = None) -> list[dict]:
     rows = db.scalars(_in(select(Resource).where(Resource.lifecycle == "ACTIVE", Resource.resource_type.in_(
         ("dcs_instance", "gaussdb_instance", "kafka_instance", "ecs_server"))), Resource.tenant_id, tenant_ids)).all()
+    snapshots = ecs_snapshots(db, rows)
     out = []
     for r in rows:
+        metrics = current_metrics(r, snapshots.get(r.id))
         v, metric = None, ""
         if r.resource_type == "dcs_instance":
-            v, metric = r.metrics.get("memory_usage"), "内存使用率"
+            v, metric = metrics.get("memory_usage"), "内存使用率"
         elif r.resource_type == "gaussdb_instance":
-            v, metric = r.metrics.get("disk_usage"), "磁盘使用率"
+            v, metric = metrics.get("disk_usage"), "磁盘使用率"
         elif r.resource_type == "ecs_server":
-            v, metric = r.metrics.get("disk_util"), f"磁盘使用率（{r.metrics.get('disk_mount', '-')}）"
+            v, metric = metrics.get("disk_util"), f"磁盘使用率（{metrics.get('disk_mount', '-')}）"
         else:
             v, metric = (r.attrs or {}).get("storage_usage"), "存储使用率"
         if v is not None:
@@ -167,9 +214,15 @@ def _conclusion(kind: str, ov: dict, cmp: dict, key_alarms: list[dict], ledger: 
             eff.append(f"P1/P2 认领率 {ov['ack_rate']:g}%")
         if eff:
             lines.append("处置效率：" + "，".join(eff) + "。")
-        bad = [t for t in tasks if t["failed"]]
-        lines.append(f"巡检共执行 {ov['inspection_runs']} 次，成功率 {ov['run_success_rate']:g}%"
-                     + (f"；失败较多的任务：{'、'.join(t['name'] for t in bad[:3])}。" if bad else "，无失败任务。"))
+        bad = sorted((t for t in tasks if t["failed"]), key=lambda t: -t["failed"])
+        top_bad = "、".join(f"{t['name']}（{t['failed']} 次）" for t in bad[:3])
+        if not ov["inspection_runs"]:
+            lines.append("本期没有巡检运行记录，请确认调度进程是否正常。")
+        elif ov["run_success_rate"] is None:
+            lines.append(f"本期暂无已完成巡检，执行中 {ov.get('running_runs', 0)} 次、跳过 {ov.get('skipped_runs', 0)} 次。")
+        else:
+            lines.append(f"巡检已完成 {ov.get('completed_runs', ov['inspection_runs'])} 次，成功率 {ov['run_success_rate']:g}%"
+                         + (f"；失败次数最多的任务：{top_bad}。" if bad else "，无失败任务。"))
         if key_alarms:
             names = list(dict.fromkeys(a["resource_name"] for a in key_alarms if a["severity"] == "P1"))[:3]
             if names:
@@ -190,20 +243,24 @@ def _runtime_lines(ecs: dict, pods: dict) -> list[str]:
         if ecs["shutoff"]:
             bad.append(f"关机 {ecs['shutoff']} 台")
         top = "、".join(f"{x['name']}（{x['count']} 次）" for x in ecs["top_reboot"][:3])
-        lines.append(f"ECS 共 {ecs['total']} 台，期末运行中 {ecs['active']} 台" + (f"、{'、'.join(bad)}" if bad else "")
+        lines.append(f"ECS 共 {ecs['total']} 台，生成时运行中 {ecs['active']} 台" + (f"、{'、'.join(bad)}" if bad else "")
                      + f"；本期状态变更 {ecs['status_changes']} 次、重启 {ecs['reboots']} 次"
                      + (f"，重启较多：{top}。" if top else "。"))
     if pods.get("events"):
-        top = "、".join(f"{x['workload'].split('/')[-1]}（{x['count']} 次）" for x in pods["top_restart"][:3])
-        lines.append(f"容器事件 {pods['events']} 条：容器重启 {pods['restarts']} 次（OOM {pods['oom']} 次）、"
+        top = "、".join(f"{x['workload'].split('/')[-1]}（{x['count']} 次）"
+                       for x in pods["top_restart"][:3] if x["count"] is not None)
+        restarts = str(pods["restarts"]) if pods["restarts"] is not None else "未知"
+        oom = str(pods["oom"]) if pods["oom"] is not None else "未知"
+        evicted = str(pods["evicted"]) if pods["evicted"] is not None else "未知"
+        lines.append(f"容器事件 {pods['events']} 条：容器重启 {restarts} 次（OOM {oom} 次）、"
                      f"CrashLoopBackOff {pods['crashloop']} 次、背压 {pods['backpressure']} 次"
-                     f"（累计 {pods['backpressure_min']} 分钟）、驱逐 {pods['evicted']} 次"
+                     f"（已观测 {pods['backpressure_min']} 分钟）、驱逐 {evicted} 次"
                      + (f"；重启最多：{top}。" if top else "。"))
     return lines
 
 
 def _ecs_section(db: Session, start: datetime, end: datetime, tenant_ids: list[int] | None) -> dict:
-    """ECS：期末状态分布 + 本期状态变更 / 重启次数。"""
+    """ECS：生成时状态分布 + 本期状态变更 / 重启次数。"""
     ecs = db.scalars(_in(select(Resource).where(Resource.lifecycle == "ACTIVE", Resource.resource_type == "ecs_server"),
                          Resource.tenant_id, tenant_ids)).all()
     ch = db.scalars(_in(select(ResourceChange).where(
@@ -223,18 +280,32 @@ def _pod_section(db: Session, start: datetime, end: datetime, tenant_ids: list[i
     rows = db.scalars(_in(select(PodEvent).where(PodEvent.first_time < end, PodEvent.last_time >= start),
                           PodEvent.tenant_id, tenant_ids)).all()
     by = Counter(e.event_type for e in rows)
-    restarts = Counter(f"{e.cluster_name}/{e.namespace}/{e.workload}" for e in rows
-                       if e.event_type in ("RESTART", "OOM_KILLED"))
+    def count(events: list[PodEvent], *, restarts: bool = False) -> int | None:
+        counts = [window_count(event, start, until=end, restarts=restarts) for event in events]
+        return None if any(value is None for value in counts) else sum(value for value in counts if value is not None)
+
+    restarted = [event for event in rows if event.event_type in ("RESTART", "OOM_KILLED")]
+    workloads: dict[tuple, list[PodEvent]] = defaultdict(list)
+    for event in restarted:
+        workloads[(event.tenant_id, event.project_ref, event.cluster_id, event.namespace,
+                   event.workload_kind, event.workload)].append(event)
+    top = []
+    for (tenant, project, cluster, namespace, kind, name), events in workloads.items():
+        total = count(events, restarts=True)
+        if total != 0:
+            top.append({"tenant_id": tenant, "project_ref": project, "cluster_id": cluster, "workload_kind": kind,
+                        "workload": f"{events[0].cluster_name}/{namespace}/{name}", "count": total})
+    top.sort(key=lambda item: (item["count"] is None, -(item["count"] or 0), item["workload"]))
     bp_min = 0.0
     for e in rows:
         if e.event_type == "BACKPRESSURE":
-            s0, e0 = max(e.first_time, start), min(e.end_time or e.last_time if not e.ongoing else end, end)
+            s0, e0 = max(e.first_time, start), min(e.end_time or e.last_time, end)
             bp_min += max(0.0, (e0 - s0).total_seconds() / 60)
-    return {"events": len(rows), "restarts": by.get("RESTART", 0) + by.get("OOM_KILLED", 0),
-            "oom": by.get("OOM_KILLED", 0), "crashloop": by.get("CRASH_LOOP", 0),
+    return {"events": len(rows), "restarts": count(restarted, restarts=True),
+            "oom": count([event for event in rows if event.event_type == "OOM_KILLED"]),
+            "crashloop": by.get("CRASH_LOOP", 0),
             "backpressure": by.get("BACKPRESSURE", 0), "backpressure_min": round(bp_min),
-            "evicted": by.get("EVICTED", 0),
-            "top_restart": [{"workload": k, "count": n} for k, n in restarts.most_common(8)]}
+            "evicted": count([event for event in rows if event.event_type == "EVICTED"]), "top_restart": top[:8]}
 
 
 def _by_tenant(db: Session, alarms: Sequence[AlarmEvent], tenant_ids: list[int] | None) -> list[dict]:
@@ -266,17 +337,18 @@ def build_report(db: Session, kind: str, start: datetime, end: datetime,
 
     alarms = db.scalars(_in(select(AlarmEvent).where(AlarmEvent.first_seen >= start, AlarmEvent.first_seen < end),
                             AlarmEvent.tenant_id, tids)).all()
-    prev_start = start - (end - start)
+    prev_start = (period_of("MONTHLY", start.astimezone(tz).date().replace(day=1) - timedelta(days=1))[0]
+                  if kind == "MONTHLY" else start - (end - start))
     prev = db.scalars(_in(select(AlarmEvent).where(AlarmEvent.first_seen >= prev_start, AlarmEvent.first_seen < start),
                           AlarmEvent.tenant_id, tids)).all()
     open_at_end = db.scalars(_in(select(AlarmEvent).where(AlarmEvent.first_seen < end), AlarmEvent.tenant_id,
                                  tids)).all()
-    active_at_end = sum(1 for a in open_at_end if a.status != "CLOSED" and (a.resolved_at is None or a.resolved_at >= end))
+    active_at_end = _active_at_end(db, open_at_end, end)
     runs = db.scalars(_in(select(InspectionRun).where(InspectionRun.started_at >= start, InspectionRun.started_at < end),
                           InspectionRun.tenant_id, tids)).all()
     cur, old = _alarm_stats(alarms), _alarm_stats(prev)
     # 平台上线前没有上期数据：不做环比，避免出现“较上期减少 100%”之类的误导结论
-    first_run = db.scalar(select(func.min(InspectionRun.started_at)))
+    first_run = db.scalar(_in(select(func.min(InspectionRun.started_at)), InspectionRun.tenant_id, tids))
     has_prev = first_run is not None and first_run <= prev_start + timedelta(hours=1)
 
     labels, points = _buckets(kind, start, end)
@@ -290,9 +362,9 @@ def build_report(db: Session, kind: str, start: datetime, end: datetime,
     by_service: dict[str, Counter] = defaultdict(Counter)
     for a in alarms:
         by_service[a.service][a.severity] += 1
-    res_cnt: dict[tuple[str, str], list[AlarmEvent]] = defaultdict(list)
+    res_cnt: dict[tuple[int | None, int | None, str, str], list[AlarmEvent]] = defaultdict(list)
     for a in alarms:
-        res_cnt[(a.resource_name, a.resource_type)].append(a)
+        res_cnt[(a.tenant_id, a.resource_ref, a.resource_name, a.resource_type)].append(a)
     rule_names = dict(db.execute(select(AlarmRule.id, AlarmRule.name)).all())
     rule_cnt = Counter(a.rule_id for a in alarms)
     task_names = dict(db.execute(select(InspectionTask.code, InspectionTask.name)).all())
@@ -301,22 +373,17 @@ def build_report(db: Session, kind: str, start: datetime, end: datetime,
         task_runs[r.task_code].append(r)
     tasks = []
     for code, rs in sorted(task_runs.items()):
-        ok_n = sum(1 for r in rs if r.status == "SUCCESS")
-        durs = [(r.finished_at - r.started_at).total_seconds() for r in rs if r.finished_at]
-        tasks.append({"code": code, "name": task_names.get(code, code), "runs": len(rs), "success": ok_n,
-                      "partial": sum(1 for r in rs if r.status == "PARTIAL"),
-                      "failed": sum(1 for r in rs if r.status in ("FAILED", "TIMEOUT")),
-                      "success_rate": round(ok_n * 100 / len(rs), 1),
-                      "avg_sec": round(sum(durs) / len(durs), 1) if durs else None})
+        tasks.append({"code": code, "name": task_names.get(code, code), **_run_stats(rs, end)})
     key = sorted([a for a in alarms if a.severity in ("P1", "P2")], key=lambda a: (a.severity, a.first_seen))[:20]
     key_alarms = [{"severity": a.severity, "title": a.title, "resource_name": a.resource_name,
                    "type_name": type_name(a.resource_type), "first_seen": a.first_seen.isoformat(),
-                   "duration_min": round(((a.resolved_at or min(end, utcnow())) - a.first_seen).total_seconds() / 60, 1),
+                   "duration_min": round((min(a.resolved_at or utcnow(), end) - a.first_seen).total_seconds() / 60, 1),
                    "status": a.status, "ack_by": a.ack_by} for a in key]
     total_runs = len(runs)
+    run_stats = _run_stats(runs, end)
     overview = {**cur, "active_at_end": active_at_end, "inspection_runs": total_runs,
-                "run_success_rate": round(sum(1 for r in runs if r.status == "SUCCESS") * 100 / total_runs, 1)
-                if total_runs else 100.0,
+                "run_success_rate": run_stats["success_rate"], "completed_runs": run_stats["completed"],
+                "skipped_runs": run_stats["skipped"], "running_runs": run_stats["running"],
                 "health_score_now": dashboard_service.summary(db, tenant_ids=tids)["health_score"]}
     compare = {k: _pct(cur[k], old[k]) if has_prev else None for k in ("new_alarms", "p1", "p2", "mtta_min", "mttr_min")}
     base.update({
@@ -325,8 +392,9 @@ def build_report(db: Session, kind: str, start: datetime, end: datetime,
         "by_service": [{"service": s, "name": SERVICES.get(s, s), "count": sum(c.values()),
                         **{x.lower(): c.get(x, 0) for x in SEVS}}
                        for s, c in sorted(by_service.items(), key=lambda kv: -sum(kv[1].values()))],
-        "top_resources": [{"name": n, "type_name": type_name(t), "count": len(v), "max_severity": min(a.severity for a in v)}
-                          for (n, t), v in sorted(res_cnt.items(), key=lambda kv: -len(kv[1]))[:10]],
+        "top_resources": [{"name": n, "tenant_id": tid, "resource_ref": rid, "type_name": type_name(t),
+                           "count": len(v), "max_severity": min(a.severity for a in v)}
+                          for (tid, rid, n, t), v in sorted(res_cnt.items(), key=lambda kv: -len(kv[1]))[:10]],
         "top_rules": [{"rule_id": rid, "name": rule_names.get(rid, rid), "count": n} for rid, n in rule_cnt.most_common(10)],
         "key_alarms": key_alarms, "tasks": tasks, "capacity": _capacity(db, tids),
         "ecs": _ecs_section(db, start, end, tids), "pods": _pod_section(db, start, end, tids),

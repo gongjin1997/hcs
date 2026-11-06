@@ -7,7 +7,10 @@ from app.core.db import get_db
 from app.core.deps import CurrentUser, Scope, get_scope, require_perm
 from app.core.response import ApiResponse, BizError, ErrorCode, Page, ok
 from app.core.security import verify_mail_action
+from app.core.xlsx import filename_stamp, xlsx_response
 from app.models import AlarmEvent
+from app.models.base import utcnow
+from app.reports.alarm_excel import alarm_workbook
 from app.schemas.alarm import AlarmDetailOut, AlarmOut, AlarmStats
 from app.schemas.common import NoteIn
 from app.services import alarm_service
@@ -45,6 +48,18 @@ def list_alarms(status_group: str = "active", severity: list[str] | None = Query
                                               keyword=keyword, page=page, page_size=page_size,
                                               tenant_ids=scope.tenant_ids)
     return ok(Page(items=[AlarmOut.model_validate(a) for a in items], total=total, page=page, page_size=page_size))
+
+
+@router.get("/export", summary="导出告警 Excel（当前筛选全量）")
+def export_alarms(status_group: str = "active", severity: list[str] | None = Query(None), service: str | None = None,
+                  resource_type: str | None = None, resource_ref: int | None = None, keyword: str | None = None,
+                  db: Session = Depends(get_db), scope: Scope = Depends(get_scope),
+                  _: CurrentUser = Depends(require_perm("alarm:view"))):
+    items, _total = alarm_service.query_alarms(
+        db, status_group=status_group, severities=severity, service=service, resource_type=resource_type,
+        resource_ref=resource_ref, keyword=keyword, page_size=None, tenant_ids=scope.tenant_ids,
+    )
+    return xlsx_response(alarm_workbook(db, items), f"告警列表_{filename_stamp(utcnow())}.xlsx")
 
 
 @router.get("/stats", response_model=ApiResponse[AlarmStats], summary="活动告警统计")
@@ -101,10 +116,17 @@ def _verify(token: str) -> dict:
     return info
 
 
+def _mail_alarm(db: Session, info: dict) -> AlarmEvent:
+    alarm = alarm_service.get_alarm(db, info["alarm_id"])
+    if info.get("reopen_count", 0) != alarm.reopen_count:
+        raise BizError(ErrorCode.CONFLICT, "告警已重新触发，请使用本次通知中的链接", 409)
+    return alarm
+
+
 @mail_router.get("/{token}", summary="解析邮件操作链接")
 def mail_action_info(token: str, db: Session = Depends(get_db)):
     info = _verify(token)
-    alarm = alarm_service.get_alarm(db, info["alarm_id"])
+    alarm = _mail_alarm(db, info)
     return ok({**info, "alarm": AlarmOut.model_validate(alarm)})
 
 
@@ -113,8 +135,19 @@ def mail_action_do(token: str, db: Session = Depends(get_db), audit: Auditor = D
     info = _verify(token)
     if info["action"] != "ack":
         raise BizError(ErrorCode.BAD_REQUEST, "该操作需登录控制台完成", 400)
+    alarm = _mail_alarm(db, info)
+    if alarm.status == "ACKED":
+        return ok(AlarmOut.model_validate(alarm))
     operator = info["recipient"] or "邮件用户"
-    alarm = alarm_service.ack(db, info["alarm_id"], operator, "通过邮件链接认领")
+    try:
+        alarm = alarm_service.ack(db, info["alarm_id"], operator, "通过邮件链接认领",
+                                  expected_reopen_count=info.get("reopen_count", 0))
+    except BizError as exc:
+        if exc.code == ErrorCode.CONFLICT:
+            alarm = _mail_alarm(db, info)
+            if alarm.status == "ACKED":
+                return ok(AlarmOut.model_validate(alarm))
+        raise
     audit.log("alarm.mail_ack", target_type="alarm", target_id=alarm.id,
               target_name=f"{alarm.resource_name} · {alarm.title}", tenant_id=alarm.tenant_id, operator=operator,
               username=None, detail={"rule_id": alarm.rule_id, "via": "邮件链接"})

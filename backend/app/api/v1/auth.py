@@ -1,7 +1,7 @@
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.core.audit import Auditor, get_anon_auditor, get_auditor
@@ -10,7 +10,7 @@ from app.core.db import get_db
 from app.core.deps import CurrentUser, get_current_user, to_current
 from app.core.response import ApiResponse, BizError, ErrorCode, ok
 from app.core.security import create_token, hash_password, verify_password
-from app.models import HcsAccount, User
+from app.models import HcsAccount, RevokedToken, User
 from app.models.base import utcnow
 from app.schemas.auth import LoginIn, LoginOut, PasswordIn, TenantBrief, UserOut
 from app.services.tenancy import tenant_brief
@@ -55,9 +55,9 @@ def login(body: LoginIn, db: Session = Depends(get_db), audit: Auditor = Depends
         audit.log("auth.login_failed", username=username, operator=user.display_name, user_id=user.id,
                   result="FAILED", detail={"reason": "账号临时锁定"})
         raise BizError(ErrorCode.UNAUTHORIZED, f"密码错误次数过多，请 {minutes} 分钟后再试", 401)
-    if user is None or not user.enabled or not verify_password(body.password, user.password_hash):
+    if user is None or not user.enabled or not user.login_enabled or not verify_password(body.password, user.password_hash):
         reason = "用户不存在" if user is None else ("账号已停用" if not user.enabled else "密码错误")
-        if user is not None and user.enabled:
+        if user is not None and user.enabled and user.login_enabled:
             user.failed_attempts += 1
             if user.failed_attempts >= s.login_max_failures:
                 user.failed_attempts, user.locked_until = 0, now + timedelta(minutes=s.login_lock_minutes)
@@ -69,7 +69,7 @@ def login(body: LoginIn, db: Session = Depends(get_db), audit: Auditor = Depends
     audit.log("auth.login", username=user.username, operator=user.display_name, user_id=user.id,
               detail={"remember": body.remember})
     expires = s.jwt_remember_days * 86400 if body.remember else s.jwt_expire_minutes * 60
-    return ok(LoginOut(access_token=create_token(user.username, user.id, body.remember), expires_in=expires,
+    return ok(LoginOut(access_token=create_token(user.username, user.id, body.remember, user.token_version), expires_in=expires,
                        user=user_out(db, user)))
 
 
@@ -89,8 +89,20 @@ def change_password(body: PasswordIn, cu: CurrentUser = Depends(get_current_user
                   detail={"reason": "原密码不正确"})
         raise BizError(ErrorCode.BAD_REQUEST, "原密码不正确")
     user.password_hash = hash_password(body.new_password)
+    user.token_version += 1
     audit.log("auth.password", target_type="user", target_id=cu.id, target_name=cu.username)
     return ok(message="密码已修改")
+
+
+@router.post("/logout", summary="退出当前登录会话（撤销令牌）")
+def logout(cu: CurrentUser = Depends(get_current_user), db: Session = Depends(get_db),
+           audit: Auditor = Depends(get_auditor)):
+    db.execute(delete(RevokedToken).where(RevokedToken.expires_at <= utcnow()))
+    if cu.token_id and db.get(RevokedToken, cu.token_id) is None:
+        db.add(RevokedToken(jti=cu.token_id, user_id=cu.id,
+                            expires_at=datetime.fromtimestamp(cu.token_expires, UTC)))
+    audit.log("auth.logout", target_type="user", target_id=cu.id, target_name=cu.username)
+    return ok(message="已退出登录")
 
 
 def display_name(db: Session, cu: CurrentUser) -> str:

@@ -28,9 +28,15 @@ defineEmits<{ click: [] }>()
     flex: none; width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center;
     color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, #fff);
   }
+  .body { min-width: 0; }
   .title { color: var(--hi-text-2); font-size: 13px; }
   .value { margin-top: 2px; font-size: 26px; font-weight: 700; line-height: 1.2; color: var(--hi-text-1);
     small { font-size: 13px; font-weight: 500; color: var(--hi-text-3); margin-left: 4px; } }
   .sub { margin-top: 6px; font-size: 12px; color: var(--hi-text-3); }
+}
+@media (max-width: 767px) {
+  .stat-card { padding: 14px 12px; gap: 10px; }
+  .stat-card .icon { width: 32px; height: 32px; }
+  .stat-card .sub { overflow-wrap: anywhere; line-height: 1.5; }
 }
 </style>

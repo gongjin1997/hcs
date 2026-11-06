@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictInt
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -22,9 +22,9 @@ from app.models import HcsAccount, Report
 from app.models.base import utcnow
 from app.reports.builder import KINDS
 from app.reports.excel import report_workbook
-from app.reports.service import default_recipients, generate, send_report
+from app.reports.service import default_recipient_user_ids, default_recipients, generate, send_report
 from app.schemas.report import ReportBrief, ReportIn, ReportOut, SendIn
-from app.services import settings_service
+from app.services import recipients, settings_service
 from app.services.tenancy import tenant_map
 
 router = APIRouter(prefix="/reports", tags=["报表中心"])
@@ -71,7 +71,7 @@ def list_reports(kind: str | None = None, tenant_id: str | None = Query(None, de
 @router.post("", response_model=ApiResponse[ReportOut], summary="生成报表（同类型、同周期、同租户再次生成会覆盖）")
 def create_report(body: ReportIn, db: Session = Depends(get_db), scope: Scope = Depends(get_scope),
                   audit: Auditor = Depends(get_auditor), cu: CurrentUser = Depends(require_perm("report:manage"))):
-    if body.date and body.date > utcnow().date():
+    if body.date and body.date > utcnow().astimezone(ZoneInfo(get_settings().timezone)).date():
         raise BizError(ErrorCode.BAD_REQUEST, "不能生成未来周期的报表")
     tenant_id = body.tenant_id
     if tenant_id is None and not scope.full:
@@ -99,10 +99,13 @@ def _schedule(db: Session, scope: Scope, cu: CurrentUser) -> dict:
         enabled = bool(cron) and cfg.enabled.get(kind, True)
         nxt = CronTrigger.from_crontab(cron, timezone=tz).get_next_fire_time(None, now) if enabled and cron else None
         jobs.append({"kind": kind, "name": KINDS[kind], "cron": cron, "enabled": enabled, "next_run": nxt})
-    tenants = [{"id": t.id, "name": t.short_name or t.name, "mail_to": t.report_mail_to or [], "enabled": t.enabled}
+    tenants = [{"id": t.id, "name": t.short_name or t.name,
+                "mail_to": recipients.emails_for_users(db, t.report_user_ids or [], tenant_id=t.id),
+                "recipient_user_ids": t.report_user_ids or [], "enabled": t.enabled}
                for t in tenant_map(db).values() if scope.allows(t.id)]
     return {"kinds": KINDS, "jobs": jobs, "cron": cfg.cron, "enabled": cfg.enabled,
             "mail_to": cfg.mail_to if scope.full else [],
+            "recipient_user_ids": cfg.recipient_user_ids if scope.full else [],
             "timezone": s.timezone, "tenants": tenants, "editable": cu.can("report:config") and scope.full,
             **settings_service.meta(db, "report"),
             "note": "每个周期生成 1 份全部租户合并报表（发给下面的收件人）+ 每个启用租户 1 份租户报表"
@@ -118,6 +121,7 @@ def schedule(db: Session = Depends(get_db), scope: Scope = Depends(get_scope),
 class ScheduleIn(BaseModel):
     cron: dict[str, str] | None = None
     enabled: dict[str, bool] | None = None
+    recipient_user_ids: list[StrictInt] | None = None
     mail_to: list[str] | None = None
 
 
@@ -139,7 +143,8 @@ def update_schedule(body: ScheduleIn, db: Session = Depends(get_db), scope: Scop
 def get_report(rid: int, db: Session = Depends(get_db), scope: Scope = Depends(get_scope)):
     rpt = _get(db, scope, rid)
     return ok(ReportOut.model_validate(rpt).model_copy(update={
-        "tenant_name": _name(tenant_map(db), rpt.tenant_id), "default_to": default_recipients(db, rpt)}))
+        "tenant_name": _name(tenant_map(db), rpt.tenant_id), "default_to": default_recipients(db, rpt),
+        "default_user_ids": default_recipient_user_ids(db, rpt)}))
 
 
 @router.get("/{rid}/export", summary="导出报表 Excel", dependencies=[VIEW])
@@ -153,7 +158,7 @@ def send(rid: int, body: SendIn, db: Session = Depends(get_db), scope: Scope = D
          audit: Auditor = Depends(get_auditor), _: CurrentUser = Depends(require_perm("report:manage"))):
     rpt = _get(db, scope, rid)
     try:
-        to = send_report(db, rpt, body.to)
+        to = send_report(db, rpt, body.to, recipient_user_ids=body.recipient_user_ids)
     except BizError as e:
         audit.log("report.send", target_type="report", target_id=rpt.id, target_name=rpt.title,
                   tenant_id=rpt.tenant_id, result="FAILED", detail={"to": body.to, "error": e.message})

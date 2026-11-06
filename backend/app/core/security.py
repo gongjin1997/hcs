@@ -27,12 +27,13 @@ def verify_password(password: str, encoded: str) -> bool:
         return False
 
 
-def create_token(sub: str, uid: int, remember: bool = False) -> str:
+def create_token(sub: str, uid: int, remember: bool = False, version: int = 0) -> str:
     """登录令牌只携带身份（用户名 + ID），是否管理员、是否停用在每次请求时查库，改了立即生效。"""
     s = get_settings()
     now = int(time.time())
     ttl = s.jwt_remember_days * 86400 if remember else s.jwt_expire_minutes * 60
-    payload = {"sub": sub, "uid": uid, "iat": now, "exp": now + ttl}
+    payload = {"sub": sub, "uid": uid, "iat": now, "exp": now + ttl, "ver": version,
+               "jti": base64.urlsafe_b64encode(os.urandom(24)).decode()}
     return jwt.encode(payload, s.jwt_secret, algorithm=ALGO)
 
 
@@ -47,12 +48,14 @@ SSE_TTL = 60
 _used_tickets: dict[str, float] = {}
 
 
-def create_sse_ticket(sub: str, uid: int) -> str:
+def create_sse_ticket(sub: str, uid: int, version: int = 0, session_id: str | None = None,
+                      session_expires: int | None = None) -> str:
     """SSE 一次性票据：EventSource 不能设置请求头，用 60 秒有效、只能使用一次的票据代替把登录令牌放进 URL
     （登录令牌出现在 URL 中会被 Nginx 访问日志、浏览器历史记录下来）。"""
     now = int(time.time())
     payload = {"sub": sub, "uid": uid, "typ": "sse", "jti": base64.urlsafe_b64encode(os.urandom(12)).decode(),
-               "iat": now, "exp": now + SSE_TTL}
+               "iat": now, "exp": now + SSE_TTL, "ver": version, "sid": session_id,
+               "session_exp": session_expires or now + SSE_TTL}
     return jwt.encode(payload, get_settings().jwt_secret, algorithm=ALGO)
 
 
@@ -84,18 +87,29 @@ def _mail_sig(msg: str) -> str:
     return hmac.new(get_settings().mail_link_secret.encode(), msg.encode(), hashlib.sha256).hexdigest()
 
 
-def sign_mail_action(alarm_id: int, action: str, recipient: str, ttl: int = 86400) -> str:
-    """邮件快捷操作链接签名：alarm_id + action + 收件人 + 过期时间。"""
-    msg = "|".join([str(alarm_id), action, recipient, str(int(time.time()) + ttl)])
+def sign_mail_action(alarm_id: int, action: str, recipient: str, ttl: int = 86400, *, reopen_count: int = 0) -> str:
+    """签名绑定告警、收件人、有效期与重开代次；旧调用默认首次触发代次 0。"""
+    msg = "|".join([str(alarm_id), action, recipient, str(int(time.time()) + ttl), str(reopen_count)])
     return base64.urlsafe_b64encode(f"{msg}|{_mail_sig(msg)}".encode()).decode()
 
 
 def verify_mail_action(token: str) -> dict | None:
     try:
-        alarm_id, action, recipient, exp, sig = base64.urlsafe_b64decode(token.encode()).decode().split("|")
-    except (ValueError, UnicodeDecodeError):
+        parts = base64.urlsafe_b64decode(token.encode()).decode().split("|")
+        if len(parts) == 5:
+            alarm_id, action, recipient, exp, sig = parts
+            reopen_count = 0  # 旧链接未签代次，仅可用于从未重开的告警。
+        elif len(parts) == 6:
+            alarm_id, action, recipient, exp, generation, sig = parts
+            reopen_count = int(generation)
+        else:
+            return None
+        msg = "|".join(parts[:-1])
+        if not hmac.compare_digest(sig, _mail_sig(msg)) or int(exp) < time.time():
+            return None
+        resource = int(alarm_id)
+        if resource < 1 or reopen_count < 0:
+            return None
+        return {"alarm_id": resource, "action": action, "recipient": recipient, "reopen_count": reopen_count}
+    except (ValueError, TypeError, UnicodeError, OverflowError):
         return None
-    msg = "|".join([alarm_id, action, recipient, exp])
-    if not hmac.compare_digest(sig, _mail_sig(msg)) or int(exp) < time.time():
-        return None
-    return {"alarm_id": int(alarm_id), "action": action, "recipient": recipient}

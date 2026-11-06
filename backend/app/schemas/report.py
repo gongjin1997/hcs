@@ -2,7 +2,7 @@ from datetime import date as Date
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, StrictInt, field_validator
 
 from .common import ORMModel
 
@@ -28,6 +28,7 @@ class ReportBrief(ORMModel):
 class ReportOut(ReportBrief):
     data: dict
     default_to: list[str] = []
+    default_user_ids: list[int] = []
 
 
 class ReportIn(BaseModel):
@@ -37,7 +38,8 @@ class ReportIn(BaseModel):
 
 
 class SendIn(BaseModel):
-    to: list[str] | None = Field(None, description="收件人；为空时使用租户报表收件人 / REPORT_MAIL_TO")
+    recipient_user_ids: list[StrictInt] | None = None
+    to: list[str] | None = Field(None, description="兼容已登记用户的邮箱；新客户端传 recipient_user_ids")
 
     @field_validator("to")
     @classmethod

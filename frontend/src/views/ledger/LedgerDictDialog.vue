@@ -2,7 +2,7 @@
   <el-dialog :model-value="visible" title="台账字典" width="900px" top="5vh" append-to-body @close="emit('update:visible', false)">
     <div v-loading="loading" class="dict">
       <el-alert type="info" :closable="false" show-icon class="mb-12"
-                title="统一“业务系统 / 负责人”的取值，避免同一个系统写成多种名字导致统计和告警指派不准；删除字典项不会修改资源上已填写的值。" />
+                title="统一业务系统取值；删除字典项不会修改资源上已填写的值。负责人来自“系统管理 → 用户管理”，不再单独维护负责人字典。" />
       <div class="cols">
         <div v-for="col in COLS" :key="col.key" class="col">
           <div class="col-head">
@@ -37,8 +37,8 @@
       <div class="enforce">
         <el-switch v-model="enforce" :disabled="!editable" />
         <div>
-          <b>只能从字典选择</b>
-          <div class="text-3">开启后：资源详情编辑时只能从字典下拉选择；Excel 导入时字典外的取值整行报错。已有的字典外取值不受影响，建议先清理再开启。</div>
+          <b>业务系统只能从字典选择</b>
+          <div class="text-3">开启后：资源详情的业务系统只能从字典选择；Excel 导入时字典外的业务系统整行报错。已有的字典外取值不受影响。负责人始终从已启用且具有资源租户范围的人员中选择。</div>
         </div>
       </div>
       <div v-if="meta" class="text-3 meta">{{ meta }}</div>
@@ -60,17 +60,17 @@ import { useUserStore } from '@/stores/user'
 import type { DictItem } from '@/types'
 import { fmtTime } from '@/utils/format'
 
-type Key = 'business' | 'owners'
-const COLS: { key: Key; label: string }[] = [{ key: 'business', label: '业务系统' }, { key: 'owners', label: '负责人' }]
+type Key = 'business'
+const COLS: { key: Key; label: string }[] = [{ key: 'business', label: '业务系统' }]
 const props = defineProps<{ visible: boolean }>()
 const emit = defineEmits<{ 'update:visible': [v: boolean]; saved: [] }>()
 const user = useUserStore()
 const editable = computed(() => user.can('ledger:edit') && user.user?.tenant_ids == null)
 const loading = ref(false)
 const saving = ref(false)
-const lists = reactive<Record<Key, DictItem[]>>({ business: [], owners: [] })
-const outside = reactive<Record<Key, { name: string; used: number }[]>>({ business: [], owners: [] })
-const adding = reactive<Record<Key, string>>({ business: '', owners: '' })
+const lists = reactive<Record<Key, DictItem[]>>({ business: [] })
+const outside = reactive<Record<Key, { name: string; used: number }[]>>({ business: [] })
+const adding = reactive<Record<Key, string>>({ business: '' })
 const enforce = ref(false)
 const meta = ref('')
 
@@ -80,9 +80,7 @@ watch(() => props.visible, async (v) => {
   try {
     const d = await getLedgerDict()
     lists.business = d.business.map((x) => ({ ...x, remark: x.remark ?? '' }))
-    lists.owners = d.owners.map((x) => ({ ...x, remark: x.remark ?? '' }))
     outside.business = d.business_outside
-    outside.owners = d.owners_outside
     enforce.value = d.enforce
     meta.value = d.customized && d.updated_by ? `${d.updated_by} 于 ${fmtTime(d.updated_at, 'YYYY-MM-DD HH:mm')} 修改` : ''
   } finally { loading.value = false }
@@ -100,6 +98,7 @@ function add(k: Key) {
   adding[k] = ''
 }
 async function save() {
+  if (!editable.value || saving.value || loading.value) return
   const clean = (l: DictItem[]) => l.filter((x) => x.name.trim()).map((x) => ({ name: x.name.trim(), remark: x.remark?.trim() || null }))
   for (const c of COLS) {
     const names = clean(lists[c.key]).map((x) => x.name)
@@ -108,7 +107,7 @@ async function save() {
   }
   saving.value = true
   try {
-    await saveLedgerDict({ business: clean(lists.business), owners: clean(lists.owners), enforce: enforce.value })
+    await saveLedgerDict({ business: clean(lists.business), enforce: enforce.value })
     ElMessage.success('台账字典已保存')
     emit('saved')
     emit('update:visible', false)
@@ -117,7 +116,7 @@ async function save() {
 </script>
 
 <style scoped lang="scss">
-.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.cols { display: grid; grid-template-columns: 1fr; gap: 16px; }
 .col { padding: 12px; border: 1px solid var(--hi-border); border-radius: var(--hi-radius);
   .col-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
   .items { max-height: 340px; overflow: auto; display: flex; flex-direction: column; gap: 6px; padding-right: 4px; }

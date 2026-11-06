@@ -50,6 +50,9 @@ class NotificationOut(ORMModel):
     status: str
     sent_at: datetime | None = None
     error: str | None = None
+    retry: int = 0
+    next_retry_at: datetime | None = None
+    message_id: str | None = None
 
 
 class AlarmDetailOut(AlarmOut):

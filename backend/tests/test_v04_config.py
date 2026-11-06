@@ -25,7 +25,7 @@ from .conftest import MOCK_URL, demo_login, login
 # ---------------------------------------------------------------- 系统设置
 def test_settings_view_and_permissions(client, admin):
     data = client.get("/api/v1/system/settings", headers=admin).json()["data"]
-    assert set(data) == {"retention", "report", "platform_alarm", "ledger_dict"}
+    assert set(data) == {"retention", "report", "platform_alarm", "ledger_dict", "collect"}
     assert data["retention"]["value"]["audit_log_days"] == 180 and data["retention"]["customized"] is False
     assert data["report"]["value"]["mail_to"] == ["ops-report@example.com", "zhaolei@example.com"]
     assert data["report"]["updated_by"] == "赵磊" and data["ledger_dict"]["value"]["business"]
@@ -186,6 +186,9 @@ def _upload(client, h, content: bytes, **params):
 
 
 def test_ledger_import_dry_run_and_apply(client, admin):
+    owner = next(u for u in client.get("/api/v1/system/user-options", headers=admin).json()["data"]
+                 if u["display_name"] == "孙浩")
+    assert owner["id"] and owner["username"]
     wb = load_workbook(io.BytesIO(_template(client, admin, resource_type="dcs_instance")))
     ws = wb["台账管理字段"]
     header = [c.value for c in ws[1]]
@@ -193,6 +196,7 @@ def test_ledger_import_dry_run_and_apply(client, admin):
     rows = {ws.cell(r, col["名称"]).value: r for r in range(2, ws.max_row + 1)}
     r1, r2 = rows["redis-prod-01"], rows["redis-cache-02"]
     ws.cell(r1, col["负责人"]).value = "孙浩"
+    ws.cell(r1, col["负责人账号"]).value = owner["username"]
     ws.cell(r1, col["备注"]).value = "导入测试"
     ws.cell(r2, col["环境"]).value = "火星"                              # 错误行
     ws.cell(ws.max_row + 1, col["资源 ID"]).value = "not-exists"         # 不存在的资源
@@ -202,7 +206,7 @@ def test_ledger_import_dry_run_and_apply(client, admin):
     dry = _upload(client, admin, content).json()["data"]
     assert dry["dry_run"] is True and dry["changed"] == 1 and dry["error_count"] == 2
     assert dry["items"][0]["name"] == "redis-prod-01"
-    assert {c["label"] for c in dry["items"][0]["changes"]} == {"负责人", "备注"}
+    assert {c["label"] for c in dry["items"][0]["changes"]} == {"负责人", "负责人用户 ID", "备注"}
     assert any("环境只能填" in e["message"] for e in dry["errors"])
     strict = _upload(client, admin, content, dry_run="false")
     assert strict.status_code == 400 and strict.json()["data"]["error_count"] == 2      # 有错误行默认不导入
@@ -210,11 +214,13 @@ def test_ledger_import_dry_run_and_apply(client, admin):
     assert done["applied"] == 1
     page = client.get("/api/v1/resources", params={"keyword": "redis-prod-01"}, headers=admin).json()["data"]
     assert page["items"][0]["owner"] == "孙浩" and page["items"][0]["remark"] == "导入测试"
+    assert page["items"][0]["owner_user_id"] == owner["id"]
     with SessionLocal() as db:
         ch = db.scalar(select(ResourceChange).where(ResourceChange.name == "redis-prod-01",
                                                     ResourceChange.source == "IMPORT")
                        .order_by(ResourceChange.id.desc()))
-        assert ch.operator == "系统管理员" and {c["field"] for c in ch.changes} == {"owner", "remark"}
+        assert ch.operator == "系统管理员" and {c["field"] for c in ch.changes} == {"owner", "owner_user_id", "remark"}
+        assert next(c["new"] for c in ch.changes if c["field"] == "owner_user_id") == owner["id"]
     viewer = demo_login(client, "viewer")
     assert _upload(client, viewer, content).status_code == 403
 
@@ -222,27 +228,37 @@ def test_ledger_import_dry_run_and_apply(client, admin):
 def test_ledger_dict_enforce(client, admin):
     d = client.get("/api/v1/resources/dict", headers=admin).json()["data"]
     assert "孙浩" in [o["name"] for o in d["owners"]] and d["enforce"] is False
-    r = client.put("/api/v1/resources/dict", json={**d, "enforce": True}, headers=admin)
+    assert all(o["id"] and o["username"] for o in d["owners"])
+    bad_owners = client.put("/api/v1/resources/dict", json={"owners": [*d["owners"], {"name": "绕过用户管理"}]},
+                            headers=admin)
+    assert bad_owners.status_code == 400 and "用户管理" in bad_owners.json()["message"]
+    r = client.put("/api/v1/resources/dict", json={"business": d["business"], "enforce": True}, headers=admin)
     assert r.status_code == 200 and r.json()["data"]["enforce"] is True
     try:
         wb = load_workbook(io.BytesIO(_template(client, admin, resource_type="dcs_instance")))
         ws = wb["台账管理字段"]
         col = {c.value: i + 1 for i, c in enumerate(ws[1])}
-        ws.cell(2, col["负责人"]).value = "不在字典里的人"
+        ws.cell(2, col["负责人"]).value = "未登记人员"
+        ws.cell(2, col["负责人账号"]).value = "unregistered-owner"
         buf = io.BytesIO()
         wb.save(buf)
         dry = _upload(client, admin, buf.getvalue()).json()["data"]
-        assert dry["changed"] == 0 and "不在台账字典中" in dry["errors"][0]["message"]
+        assert dry["changed"] == 0 and dry["error_count"] == 1 and "用户管理" in dry["errors"][0]["message"]
         rid = client.get("/api/v1/resources", params={"keyword": "redis-prod-01"}, headers=admin).json()["data"]
         rid = rid["items"][0]["id"]
         bad = client.patch(f"/api/v1/resources/{rid}", json={"business": "不存在的系统"}, headers=admin)
         assert bad.status_code == 400 and "字典" in bad.json()["message"]
     finally:
-        client.put("/api/v1/resources/dict", json={**d, "enforce": False}, headers=admin)
+        restored = client.put("/api/v1/resources/dict", json={"business": d["business"], "enforce": d["enforce"]},
+                              headers=admin)
+        assert restored.status_code == 200
 
 
 # ---------------------------------------------------------------- 接口探测工具
 def test_probe_tool(tmp_path, monkeypatch, capsys):
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "hcs_ces_enabled", False)
     http = TestClient(mock_app, base_url=MOCK_URL)
     monkeypatch.setattr(probe, "client_for", lambda t, p, mock_url=None: factory.client_for(t, p, http=http,
                                                                                          mock_url=MOCK_URL))
@@ -254,11 +270,13 @@ def test_probe_tool(tmp_path, monkeypatch, capsys):
     assert res["ecs.servers"]["missing_required"] == [] and "ACTIVE" in res["ecs.servers"]["values"]["status"]
     sample = json.dumps(res["ecs.servers"]["sample"], ensure_ascii=False)
     assert "10.*.*." in sample and "secret" not in json.dumps(report).lower()
-    assert res["ces.ecs_usage"]["result"] == "OK" and res["k8s.events"]["result"] == "OK"
-    # 租户B：已关闭采集的类型跳过；没有 CES 记为 WARN（不算失败）
+    assert res["ces.ecs_usage"]["result"] == "SKIP" and res["k8s.events"]["result"] == "OK"
+    assert res["aom.metrics"]["result"] == "SKIP"
+    assert res["aom.metrics"]["evidence_scope"] == "disabled"
+    # 租户B：已关闭采集的类型跳过；未启用 CES 时不发起探测。
     assert probe.main(["--tenant", "tenant-b", "--out", str(out)]) == 0
     res = {r["code"]: r for r in json.loads(out.read_text(encoding="utf-8"))["results"]}
-    assert res["gaussdb.instances"]["result"] == "SKIP" and res["ces.metrics"]["result"] == "WARN"
+    assert res["gaussdb.instances"]["result"] == "SKIP" and res["ces.metrics"]["result"] == "SKIP"
     assert probe.main(["--tenant", "nope"]) == 2
     capsys.readouterr()
     assert probe.main(["--list"]) == 0 and "tenant-b" in capsys.readouterr().out

@@ -42,8 +42,8 @@
     <p style="margin:18px 0 6px;">
       <a href="{{ links.detail }}" style="{{ btn }}background:#1677ff;">查看详情</a>
       {% if not resolved %}
-      <a href="{{ links.ack }}" style="{{ btn }}background:#52c41a;">确认告警</a>
-      <a href="{{ links.silence }}" style="{{ btn }}background:#8c8c8c;">静默 2 小时</a>
+      <a href="{{ links.ack }}" style="{{ btn }}background:#52c41a;">认领告警</a>
+      <a href="{{ links.silence }}" style="{{ btn }}background:#8c8c8c;">静默（需登录）</a>
       {% endif %}
       <a href="{{ links.console }}" style="{{ btn }}background:#595959;">打开 HCS 控制台</a>
     </p>

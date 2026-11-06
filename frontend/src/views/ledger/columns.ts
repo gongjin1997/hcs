@@ -1,3 +1,4 @@
+import { effectiveMetricsSource } from '../../utils/dict'
 import type { Resource } from '@/types'
 
 /** 扩展属性中文名（详情抽屉“扩展属性”用；台账列表的类型专属列由后端 /resources/types 下发） */
@@ -24,13 +25,13 @@ export const METRIC_LABEL: Record<string, string> = {
   p90_minutes: 'P90 基线(分钟)', elapsed_min: '运行耗时(分钟)',
 }
 export const CHARGING: Record<string, string> = { '0': '按需', '1': '包周期' }
-const METRICS_SRC: Record<string, string> = { CES: '云监控 CES', PROMETHEUS: 'Prometheus', NONE: '不采集' }
+const METRICS_SRC: Record<string, string> = { CES: '云监控 CES', PROMETHEUS: 'Prometheus', NONE: '仅服务原生' }
 
 export function fmtValue(key: string, v: unknown): string {
   if (v === null || v === undefined || v === '') return '-'
   if (typeof v === 'boolean') return v ? '是' : '否'
   if (key === 'charging') return CHARGING[String(v)] ?? String(v)
-  if (key === 'metrics_source') return METRICS_SRC[String(v)] ?? String(v)
+  if (key === 'metrics_source') return METRICS_SRC[effectiveMetricsSource(String(v))] ?? String(v)
   if (Array.isArray(v)) return v.join(', ')
   return String(v)
 }

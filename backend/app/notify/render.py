@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.security import sign_mail_action
-from app.models import AlarmEvent, AlarmRule
+from app.models import AlarmEvent, AlarmRule, HcsAccount
 from app.models.base import utcnow
 from app.services.catalog import SERVICES, SEVERITY_COLOR, SEVERITY_LABEL, STATUS_LABEL, type_meta
 
@@ -58,28 +58,30 @@ def _duration(alarm: AlarmEvent, now: datetime | None = None) -> float:
     return (end - alarm.first_seen).total_seconds()
 
 
-def build_subject(alarm: AlarmEvent, kind: str, now: datetime | None = None) -> str:
-    """主题规范：【级别】【环境·租户】【服务】资源名 巡检项 当前值或状态（阈值），不超过 120 字符。"""
-    tenant = (alarm.detail or {}).get("tenant")
-    env_tag = get_settings().env_tag + (f"·{tenant}" if tenant else "")
+def build_subject(alarm: AlarmEvent, kind: str, now: datetime | None = None, *, tenant_name: str | None = None) -> str:
+    """主题规范：【级别】【租户】【服务】资源名 巡检项 当前值或状态（阈值），不超过 120 字符。"""
+    tenant = tenant_name or (alarm.detail or {}).get("tenant")
+    tenant_tag = f"【{tenant}】" if tenant else ""
     tag = type_meta(alarm.resource_type).get("tag", alarm.service)
     name = alarm.resource_name if not alarm.sub_object else f"{alarm.resource_name} / {alarm.sub_object}"
     if kind == "RESOLVED":
-        head, body = f"【已恢复】【{env_tag}】【{tag}】", f"{name} {alarm.title}，持续 {humanize(_duration(alarm, now))}"
+        head, body = f"【已恢复】{tenant_tag}【{tag}】", f"{name} {alarm.title}，持续 {humanize(_duration(alarm, now))}"
     else:
         prefix = {"UPGRADE": "【升级】", "REPEAT": "【重复】", "ESCALATE": "【未处理升级】"}.get(kind, "")
-        head = f"{prefix}【{alarm.severity}-{SEVERITY_LABEL[alarm.severity]}】【{env_tag}】【{tag}】"
+        head = f"{prefix}【{alarm.severity}-{SEVERITY_LABEL[alarm.severity]}】{tenant_tag}【{tag}】"
         body = f"{name} {alarm.title}"
     subject = head + body
     return subject if len(subject) <= MAX_SUBJECT else subject[: MAX_SUBJECT - 1] + "…"
 
 
 def mail_context(db: Session, alarm: AlarmEvent, kind: str, recipient: str = "", route_names: list[str] | None = None,
-                 now: datetime | None = None) -> dict:
+                 now: datetime | None = None, *, action_links: bool = True) -> dict:
     s = get_settings()
     rule = db.get(AlarmRule, alarm.rule_id)
     rt = type_meta(alarm.resource_type)
     detail = alarm.detail or {}
+    tenant = db.get(HcsAccount, alarm.tenant_id) if alarm.tenant_id is not None else None
+    tenant_name = (tenant.short_name or tenant.name) if tenant is not None else detail.get("tenant")
     resolved = kind == "RESOLVED"
     duration = _duration(alarm, now)
     name = alarm.resource_name + (f" / {alarm.sub_object}" if alarm.sub_object else "")
@@ -88,7 +90,12 @@ def mail_context(db: Session, alarm: AlarmEvent, kind: str, recipient: str = "",
     facts = detail.get("facts") or {}
     details_text = "\n".join(f"{k}: {v}" for k, v in facts.items() if k not in ("critical", "expected_running"))
     color = SEVERITY_COLOR["RESOLVED" if resolved else alarm.severity]
-    sign = lambda action: f"{s.base_url}/m/action/{sign_mail_action(alarm.id, action, recipient)}"  # noqa: E731
+    detail_url = f"{s.base_url}/alarms?id={alarm.id}"
+    def sign(action: str) -> str:
+        if not action_links:
+            return detail_url
+        token = sign_mail_action(alarm.id, action, recipient, reopen_count=alarm.reopen_count)
+        return f"{s.base_url}/m/action/{token}"
     return {
         "color": color,
         "badge": "【已恢复】" if resolved else f"【{alarm.severity}-{SEVERITY_LABEL[alarm.severity]}】",
@@ -100,11 +107,11 @@ def mail_context(db: Session, alarm: AlarmEvent, kind: str, recipient: str = "",
             "resource_name": name, "resource_id": detail.get("resource_id", "-"),
             "region": detail.get("region", s.hcs_region), "project": detail.get("project", "-"),
             "workspace": detail.get("workspace"), "check_item": alarm.check_item,
-            "tenant": detail.get("tenant") or "-",
+            "tenant": tenant_name or "-",
             "current_value": alarm.current_value or "-", "threshold_text": alarm.threshold_text or "-",
             "first_seen": alarm.first_seen, "last_seen": alarm.last_seen, "duration": duration,
             "count": alarm.count, "owner": alarm.owner, "details": details_text,
-            "runbook": (rule.runbook if rule else None) or "请参考运维手册对应章节处理。",
+            "runbook": (rule.runbook if rule else None) or "该规则暂未配置处置手册，可在规则管理中补充。",
         },
         "links": {"detail": f"{s.base_url}/alarms?id={alarm.id}", "ack": sign("ack"), "silence": sign("silence"),
                   "console": f"https://console.{s.hcs_region}.{s.hcs_external_domain}/",
@@ -115,7 +122,8 @@ def mail_context(db: Session, alarm: AlarmEvent, kind: str, recipient: str = "",
 
 
 def render_alarm_mail(db: Session, alarm: AlarmEvent, kind: str, recipient: str = "",
-                      route_names: list[str] | None = None) -> tuple[str, str, str]:
-    ctx = mail_context(db, alarm, kind, recipient, route_names)
-    return (build_subject(alarm, kind), env.get_template("alarm.html.j2").render(**ctx),
-            env.get_template("alarm.txt.j2").render(**ctx))
+                      route_names: list[str] | None = None, *, action_links: bool = True) -> tuple[str, str, str]:
+    ctx = mail_context(db, alarm, kind, recipient, route_names, action_links=action_links)
+    tenant_name = ctx["alarm"]["tenant"] if ctx["alarm"]["tenant"] != "-" else None
+    return (build_subject(alarm, kind, tenant_name=tenant_name),
+            env.get_template("alarm.html.j2").render(**ctx), env.get_template("alarm.txt.j2").render(**ctx))

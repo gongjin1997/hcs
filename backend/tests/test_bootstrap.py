@@ -44,7 +44,9 @@ def test_demo_seed_after_bootstrap_without_admin(demo_template, demo_db):
     # 模板库由 conftest.demo_template 按“bootstrap（不建 admin）→ seed_demo”写入，会话内只写一次
     assert demo_template["users_after_bootstrap"] == 0
     assert demo_template["seeded"] is True
-    assert _count(demo_db, User) == 7 and seed_demo(demo_db) is False
+    assert demo_db.scalar(select(func.count()).select_from(User).where(User.login_enabled.is_(True))) == 7
+    assert demo_db.scalar(select(func.count()).select_from(User).where(User.login_enabled.is_(False))) >= 3
+    assert _count(demo_db, User) >= 10 and seed_demo(demo_db) is False
     assert _count(demo_db, HcsAccount) == 2
     assert _count(demo_db, AlarmRule) == len({r.id for r in demo_db.scalars(select(AlarmRule))})
     assert _count(demo_db, Resource) > 220 and _count(demo_db, ResourceChange) >= 40

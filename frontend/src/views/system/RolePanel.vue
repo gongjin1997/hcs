@@ -41,7 +41,7 @@
     </el-table>
 
     <el-dialog v-model="dlg.visible" :title="dlg.role ? `编辑角色 · ${dlg.role.name}` : '新增角色'" width="720px" top="6vh">
-      <el-form ref="formRef" :model="dlg.form" :rules="rules" label-width="72px">
+      <el-form ref="formRef" :model="dlg.form" :rules="rules" label-width="72px" :disabled="dlg.saving" @submit.prevent>
         <el-row :gutter="16">
           <el-col :span="10"><el-form-item label="编码" prop="code"><el-input v-model="dlg.form.code" :disabled="!!dlg.role" class="mono-input" placeholder="如 dba_readonly" /></el-form-item></el-col>
           <el-col :span="14"><el-form-item label="名称" prop="name"><el-input v-model="dlg.form.name" placeholder="如 数据库值班" /></el-form-item></el-col>
@@ -83,6 +83,7 @@ import { useUserStore } from '@/stores/user'
 import type { PermissionGroup, Role } from '@/types'
 
 const userStore = useUserStore()
+const canManage = computed(() => !!userStore.user && userStore.user.tenant_ids == null && userStore.can('role:manage'))
 const loading = ref(false)
 const roles = ref<Role[]>([])
 const perms = ref<PermissionGroup[]>([])
@@ -115,6 +116,7 @@ const rules: FormRules = {
   name: [{ required: true, message: '请输入名称' }],
 }
 function open(r?: Role) {
+  if (!canManage.value) return
   dlg.role = r ?? null
   dlg.form = r ? { code: r.code, name: r.name, description: r.description, permissions: [...r.permissions] } : blank()
   dlg.visible = true
@@ -143,7 +145,9 @@ const warn = computed(() => {
   return uniq.length ? `已选操作权限但未勾选对应的查看权限：${uniq.map((m) => `${m}:view`).join('、')}（页面将不可见）` : ''
 })
 async function save() {
+  if (!canManage.value || dlg.saving) return
   if (!(await formRef.value?.validate().catch(() => false))) return
+  if (!canManage.value || dlg.saving) return
   dlg.saving = true
   try {
     const f = dlg.form
@@ -156,6 +160,7 @@ async function save() {
   } finally { dlg.saving = false }
 }
 async function remove(r: Role) {
+  if (!canManage.value) return
   await ElMessageBox.confirm(`删除角色「${r.name}」？`, '删除角色', { type: 'warning', confirmButtonText: '删除' })
   await deleteRole(r.id)
   ElMessage.success('已删除')

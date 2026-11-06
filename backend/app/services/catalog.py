@@ -34,7 +34,8 @@ RESOURCE_TYPES: dict[str, dict] = {
                                _c("metrics.mem_util", "内存(%)", 80), _c("metrics.disk_util", "磁盘(%)", 80)]},
     "cce_cluster": {"service": "cce", "name": "CCE 集群", "category": "compute", "tag": "CCE", "ledger": True,
                     "columns": [_c("attrs.version", "版本", 90), _c("attrs.node_count", "节点数", 80),
-                                _c("attrs.flavor", "集群规格", 130)]},
+                                _c("attrs.flavor", "集群规格", 130), _c("attrs.node_source", "节点清单", 100),
+                                _c("attrs.reason", "集群原因", 140), _c("attrs.endpoints", "访问地址", 260)]},
     "evs_volume": {"service": "evs", "name": "云硬盘 EVS", "category": "storage", "tag": "EVS", "ledger": True,
                    "columns": [_c("attrs.volume_type", "磁盘类型", 100), _c("attrs.attached_to", "挂载云服务器", 150),
                                _c("attrs.bootable", "系统盘", 80)]},
@@ -95,7 +96,8 @@ PLATFORM_TYPES: dict[str, dict] = {
 
 ENV_TYPES = {"PROD": "生产", "TEST": "测试", "DEV": "开发"}
 # GaussDB 部署形态（台账同步与巡检采集共用同一口径，避免两边写入的属性互相覆盖被误判为变更）
-GAUSSDB_DEPLOY = {"Ha": "主备", "Independent": "独立部署", "Distributed": "分布式"}
+GAUSSDB_DEPLOY = {"Ha": "集中式", "centralization_standard": "集中式", "Combined": "分布式（混合部署）",
+                 "Independent": "独立部署", "Distributed": "分布式"}
 
 # ECS 实例状态（HCS 8.5.1 ECS 接口 status 字段）
 ECS_STATUS = {"ACTIVE": "运行中", "SHUTOFF": "关机", "BUILD": "创建中", "REBOOT": "重启中", "HARD_REBOOT": "强制重启中",

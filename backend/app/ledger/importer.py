@@ -3,7 +3,8 @@
 流程：下载模板（按当前筛选导出在用资源，已带当前取值）→ 在 Excel 中修改 → 上传预览（dry_run，逐行校验并列出变更）→ 确认导入。
 - 按“资源 ID”匹配（同一 ID 出现在多个资源类型时再按“资源类型”区分），只能修改当前数据范围内的在用资源
 - 单元格留空 = 不修改；填写“-”= 清空；同步不会覆盖这些管理字段
-- 开启“台账字典 → 只能从字典选择”时，负责人 / 业务系统必须是字典中的取值
+- 负责人必须来自启用且具有资源租户范围的用户；负责人账号列优先，同名人员用账号区分
+- 开启“台账字典 → 只能从字典选择”时，业务系统必须是字典中的取值
 - 每个变更写一条台账变更记录（来源 = Excel 导入），整批写一条操作审计
 """
 import io
@@ -15,17 +16,19 @@ from sqlalchemy.orm import Session
 
 from app.core.response import BizError, ErrorCode
 from app.core.xlsx import new_workbook, to_bytes, write_table
-from app.models import HcsAccount, Resource
+from app.models import HcsAccount, Resource, User
 from app.models.base import utcnow
 from app.services.catalog import ENV_TYPES, LEDGER_TYPES, RESOURCE_TYPES, type_name
+from app.services.identity import resolve_owner
 from app.services.settings_service import LedgerDict
 
-from .sync import MANUAL_FIELDS, _change
+from .sync import MANUAL_FIELDS, _change, propagate_owner
 
-HEADERS = ["租户", "资源类型", "资源 ID", "名称", "负责人", "业务系统", "环境", "核心资源", "允许关机", "备注"]
-WIDTHS = [12, 16, 40, 28, 12, 18, 8, 10, 10, 36]
+HEADERS = ["租户", "资源类型", "资源 ID", "名称", "负责人", "业务系统", "环境", "核心资源", "允许关机", "备注", "台账 ID",
+           "负责人账号"]
+WIDTHS = [12, 16, 40, 28, 12, 18, 8, 10, 10, 36, 12, 20]
 EDITABLE = {"负责人": "owner", "业务系统": "business", "环境": "env_type", "核心资源": "critical", "允许关机": "allow_stop",
-            "备注": "remark"}
+            "备注": "remark", "负责人账号": "owner_user_id"}
 CLEAR = {"-", "－", "（清空）", "(清空)"}
 YES, NO = {"是", "y", "yes", "true", "1", "√", "核心"}, {"否", "n", "no", "false", "0", "×"}
 ENV_BY_TEXT = {**{v: k for k, v in ENV_TYPES.items()}, **{k: k for k in ENV_TYPES}}
@@ -52,21 +55,26 @@ def template(db: Session, types: list[str] | None, tenant_ids: list[int] | None)
     if tenant_ids is not None:
         q = q.where(Resource.tenant_id.in_(tenant_ids))
     tenants = {t.id: t.short_name or t.name for t in db.scalars(select(HcsAccount))}
+    usernames = dict(db.execute(select(User.id, User.username).where(
+        User.id.in_(q.with_only_columns(Resource.owner_user_id)))).all())
     rows = []
     for r in db.scalars(q.order_by(Resource.tenant_id, Resource.resource_type, Resource.name)):
         rows.append([tenants.get(r.tenant_id or 0, "-"), type_name(r.resource_type), r.resource_id, r.name, r.owner,
                      r.business, ENV_TYPES.get(r.env_type or "", r.env_type), "是" if r.critical else "否",
-                     "否" if (r.expected_state or {}).get("running", True) else "是", r.remark])
+                     "否" if (r.expected_state or {}).get("running", True) else "是", r.remark, r.id,
+                     usernames.get(r.owner_user_id) if r.owner_user_id is not None else None])
     wb = new_workbook()
     ws = wb.create_sheet("台账管理字段")
     write_table(ws, HEADERS, rows, WIDTHS)
     help_ws = wb.create_sheet("填写说明")
-    lines = [["说明"], ["1. 按“资源 ID”匹配资源；租户、资源类型、名称列仅供参考，修改无效"],
-             ["2. 可修改：负责人、业务系统、环境、核心资源、允许关机、备注"], ["3. 单元格留空 = 不修改；填写 - = 清空该字段"],
+    lines = [["说明"], ["1. 保留平台导出的台账 ID；同云资源 ID 跨项目重复时按它准确匹配，仍受当前租户权限限制"],
+             ["2. 可修改：负责人、业务系统、环境、核心资源、允许关机、备注、负责人账号"],
+             ["3. 单元格留空 = 不修改；填写 - = 清空该字段（任一负责人列填 - 会同时清空负责人及账号）"],
              [f"4. 环境取值：{' / '.join(ENV_TYPES.values())}（或 {' / '.join(ENV_TYPES)}）"],
              ["5. 核心资源、允许关机：是 / 否（允许关机 = 是 时，关机不再告警）"],
-             ["6. 开启台账字典“只能从字典选择”时，负责人和业务系统必须是字典中的取值"],
-             [f"7. 单次最多 {MAX_ROWS} 行；上传后先预览变更，确认后才会写入"]]
+             ["6. 负责人必须在用户管理登记并启用，且有资源租户权限；可填账号或唯一显示名，同名时填写负责人账号"],
+             ["7. 负责人账号优先于负责人显示名；开启台账字典“只能从字典选择”时，业务系统必须是字典中的取值"],
+             [f"8. 单次最多 {MAX_ROWS} 行；上传后先预览变更，确认后才会写入"]]
     for i, line in enumerate(lines, 1):
         help_ws.cell(row=i, column=1, value=line[0])
     help_ws.column_dimensions["A"].width = 90
@@ -87,6 +95,27 @@ def _bool(v: str, label: str) -> bool:
     if low in NO:
         return False
     raise ValueError(f"{label}只能填“是”或“否”：{v}")
+
+
+def _owner_changes(db: Session, resource: Resource, name: str | None, account: str | None) -> dict:
+    values: dict[str, str | int | None]
+    if name in CLEAR or account in CLEAR:
+        values = {"owner": None, "owner_user_id": None}
+    elif account is not None:
+        current = db.get(User, resource.owner_user_id) if resource.owner_user_id is not None else None
+        if current is not None and current.username == account and name in (None, resource.owner, account):
+            return {}
+        user = resolve_owner(db, tenant_id=resource.tenant_id, owner=account)
+        if user is None or user.username != account:
+            raise ValueError(f"负责人账号“{account}”不存在，请到用户管理确认账号")
+        values = {"owner": user.display_name, "owner_user_id": user.id}
+    elif name is None or name == resource.owner:
+        # 导出回传的未匹配历史值不应妨碍修改其他字段，也不会据此新建人员。
+        return {}
+    else:
+        user = resolve_owner(db, tenant_id=resource.tenant_id, owner=name)
+        values = {"owner": user.display_name if user else None, "owner_user_id": user.id if user else None}
+    return {key: value for key, value in values.items() if getattr(resource, key) != value}
 
 
 def parse(db: Session, content: bytes, tenant_ids: list[int] | None, dictionary: LedgerDict) -> tuple[ImportResult, list]:
@@ -110,8 +139,10 @@ def parse(db: Session, content: bytes, tenant_ids: list[int] | None, dictionary:
     by_id: dict[str, list[Resource]] = {}
     for r in db.scalars(q):
         by_id.setdefault(r.resource_id, []).append(r)
-    tenants = {t.id: t.short_name or t.name for t in db.scalars(select(HcsAccount))}
-    names = {k: {i.name for i in getattr(dictionary, k)} for k in ("business", "owners")}
+    tenant_rows = list(db.scalars(select(HcsAccount)))
+    tenants = {t.id: t.short_name or t.name for t in tenant_rows}
+    tenant_labels = {t.id: {t.name, t.short_name, t.code, str(t.id)} for t in tenant_rows}
+    business_names = {i.name for i in dictionary.business}
     res, todo, seen = ImportResult(), [], set()
     for n, row in enumerate(rows, 2):
         cells = list(row) + [None] * (len(header) - len(row))
@@ -125,10 +156,27 @@ def parse(db: Session, content: bytes, tenant_ids: list[int] | None, dictionary:
             res.errors.append({"row": n, "resource_id": None, "message": "资源 ID 为空"})
             continue
         cands = by_id.get(rid, [])
-        if len(cands) > 1 and "资源类型" in col:
-            cands = [r for r in cands if type_name(r.resource_type) == _text(cells[col["资源类型"]])] or cands
+        internal_id = _text(cells[col["台账 ID"]]) if "台账 ID" in col else None
+        if internal_id:
+            if not internal_id.isdecimal() or int(internal_id) <= 0:
+                res.errors.append({"row": n, "resource_id": rid, "message": "台账 ID 必须为平台导出的正整数"})
+                continue
+            cands = [r for r in cands if r.id == int(internal_id)]
+        tenant_text = _text(cells[col["租户"]]) if "租户" in col else None
+        if tenant_text == "-":
+            cands = [r for r in cands if r.tenant_id is None]
+        elif tenant_text:
+            cands = [r for r in cands if tenant_text in
+                     tenant_labels.get(r.tenant_id if r.tenant_id is not None else -1, set())]
+        type_text = _text(cells[col["资源类型"]]) if "资源类型" in col else None
+        if type_text:
+            cands = [r for r in cands if type_text in (type_name(r.resource_type), r.resource_type)]
         if not cands:
             res.errors.append({"row": n, "resource_id": rid, "message": "资源不存在、已释放或不在当前数据范围内"})
+            continue
+        if len(cands) > 1:
+            res.errors.append({"row": n, "resource_id": rid,
+                               "message": "资源 ID 在多个租户 / 项目下重复，请重新下载模板并保留台账 ID 列"})
             continue
         r = cands[0]
         if r.id in seen:
@@ -138,11 +186,15 @@ def parse(db: Session, content: bytes, tenant_ids: list[int] | None, dictionary:
         res.matched += 1
         new: dict = {}
         try:
+            new.update(_owner_changes(db, r, _text(cells[col["负责人"]]) if "负责人" in col else None,
+                                      _text(cells[col["负责人账号"]]) if "负责人账号" in col else None))
             for h in editable:
                 raw = _text(cells[col[h]])
                 if raw is None:
                     continue
                 key = EDITABLE[h]
+                if key in ("owner", "owner_user_id"):
+                    continue
                 txt = None if raw in CLEAR else raw
                 value: str | bool | None = txt
                 if key == "env_type" and txt is not None:
@@ -151,18 +203,17 @@ def parse(db: Session, content: bytes, tenant_ids: list[int] | None, dictionary:
                     value = ENV_BY_TEXT.get(txt) or ENV_BY_TEXT[txt.upper()]
                 elif key in ("critical", "allow_stop"):
                     value = False if txt is None else _bool(txt, h)
-                elif key in ("owner", "business") and txt is not None:
+                elif key == "business" and txt is not None:
                     if len(txt) > 64:
                         raise ValueError(f"{h}不能超过 64 个字符")
-                    pool = names["owners" if key == "owner" else "business"]
-                    if dictionary.enforce and txt not in pool:
+                    if dictionary.enforce and txt not in business_names:
                         raise ValueError(f"{h}“{txt}”不在台账字典中（已开启只能从字典选择）")
                 elif key == "remark" and txt is not None and len(txt) > 500:
                     raise ValueError("备注不能超过 500 个字符")
                 old = (not (r.expected_state or {}).get("running", True)) if key == "allow_stop" else getattr(r, key)
                 if old != value:
                     new[key] = value
-        except ValueError as e:
+        except (ValueError, BizError) as e:
             res.errors.append({"row": n, "resource_id": rid, "name": r.name, "message": str(e)})
             continue
         if not new:
@@ -200,6 +251,8 @@ def apply(db: Session, todo: list, operator: str) -> int:
             else:
                 changes.append({"field": k, "label": MANUAL_FIELDS[k], "old": getattr(r, k), "new": v})
                 setattr(r, k, v)
+        if "owner" in new or "owner_user_id" in new:
+            propagate_owner(db, r)
         _change(db, r, "UPDATED", now, changes, source="IMPORT", operator=operator)
     db.flush()
     return len(todo)

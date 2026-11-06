@@ -72,7 +72,7 @@
           <th style="{{ th }}">当前健康分</th></tr>
       {% for t in r.by_tenant %}
       <tr><td style="{{ td }}">{{ t.name }}</td><td style="{{ td }}">{{ t.new_alarms }}</td><td style="{{ td }}">{{ t.p1 }}</td>
-          <td style="{{ td }}">{{ t.p2 }}</td><td style="{{ td }}">{{ t.health_score }}</td></tr>
+          <td style="{{ td }}">{{ t.p2 }}</td><td style="{{ td }}">{{ t.health_score if t.health_score is not none else '-' }}</td></tr>
       {% endfor %}
     </table>
     {% endif %}
@@ -85,7 +85,7 @@
       <tr><td style="{{ td }}">{{ r.ecs.total }}</td><td style="{{ td }}">{{ r.ecs.active }}</td>
           <td style="{{ td }}">{{ r.ecs.shutoff }} / {{ r.ecs.error }}</td>
           <td style="{{ td }}">{{ r.ecs.status_changes }} / {{ r.ecs.reboots }}</td>
-          <td style="{{ td }}">{{ r.pods.restarts }}（{{ r.pods.oom }}）</td>
+          <td style="{{ td }}">{{ r.pods.restarts if r.pods.restarts is not none else '-' }}（{{ r.pods.oom if r.pods.oom is not none else '-' }}）</td>
           <td style="{{ td }}">{{ r.pods.backpressure }} 次 / {{ r.pods.backpressure_min }} 分钟</td></tr>
     </table>
     {% endif %}
@@ -108,7 +108,7 @@
     </p>
   </td></tr>
   <tr><td style="background:#fafafa;color:#999999;font-size:12px;padding:10px 20px;line-height:1.6;">
-    本邮件由 HCS 巡检平台按计划自动发送（{{ env_tag }}），完整明细见附件 Excel。请勿直接回复。
+    本邮件由 HCS 巡检平台按计划自动发送，完整明细见附件 Excel。请勿直接回复。
   </td></tr>
 </table>
 </td></tr>

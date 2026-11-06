@@ -1,17 +1,18 @@
 <template>
   <div class="notify-page">
-    <PageHeader title="通知管理" desc="告警按优先级匹配通知路由 → 投递到联系组；未认领按升级策略逐级上报。通知先写 Outbox 再异步发送，失败自动退避重试">
-      <el-button :icon="Refresh" @click="loadAll">刷新</el-button>
-    </PageHeader>
+    <PageHeader title="通知管理" :refresh="refresh" :refreshing="loading || refreshing || saving || smtpRef?.busy" />
 
-    <!-- 投递链路示意 -->
-    <div class="hi-card flow">
-      <div v-for="(s, i) in FLOW" :key="s.title" class="step">
-        <div class="no">{{ i + 1 }}</div>
-        <div><b>{{ s.title }}</b><span>{{ s.desc }}</span></div>
-        <el-icon v-if="i < FLOW.length - 1" class="arrow"><Right /></el-icon>
-      </div>
-    </div>
+    <el-collapse class="flow-help">
+      <el-collapse-item title="通知流程" name="flow">
+        <div class="flow">
+          <div v-for="(s, i) in FLOW" :key="s.title" class="step">
+            <div class="no">{{ i + 1 }}</div>
+            <div><b>{{ s.title }}</b><span>{{ s.desc }}</span></div>
+            <el-icon v-if="i < FLOW.length - 1" class="arrow"><Right /></el-icon>
+          </div>
+        </div>
+      </el-collapse-item>
+    </el-collapse>
 
     <div class="hi-card mt-16">
       <el-tabs v-model="tab" @tab-change="onTab">
@@ -64,7 +65,7 @@
               </template>
             </el-table-column>
           </el-table>
-          <p class="text-3 tip">“继续匹配”表示命中后继续向下匹配（如 P1 同时通知值班组与业务组）；未命中任何路由时使用兜底路由，保证告警不丢。</p>
+          <p class="text-3 tip">“继续匹配”可同时通知多个组。建议保留一条不设条件的兜底路由；未匹配到路由的告警不会发信。</p>
         </el-tab-pane>
 
         <el-tab-pane label="联系组" name="groups">
@@ -91,7 +92,7 @@
         </el-tab-pane>
 
         <el-tab-pane label="联系人" name="contacts">
-          <ContactPanel :contacts="contacts" :can-manage="canManage" @changed="loadAll" />
+          <ContactPanel :contacts="contacts" />
         </el-tab-pane>
 
         <el-tab-pane label="路由模拟" name="simulate">
@@ -122,15 +123,16 @@
             </div>
             <div class="p-main">
               <div class="mail-client">
-                <div class="mc-bar"><i /><i /><i /><span>收件箱 · HTML 邮件渲染（与 SMTP 实际发送内容一致）</span></div>
+                <div class="mc-bar"><i /><i /><i /><span>邮件预览</span></div>
                 <iframe v-if="pv.data" :srcdoc="pv.data.html" sandbox="" title="邮件预览" />
+                <el-empty v-else description="暂无邮件预览" :image-size="72" />
               </div>
             </div>
           </div>
         </el-tab-pane>
 
-        <el-tab-pane label="SMTP 与测试邮件" name="smtp" lazy>
-          <SmtpPanel :contacts="contacts" :can-manage="canManage" />
+        <el-tab-pane label="邮件服务与测试" name="smtp" lazy>
+          <SmtpPanel ref="smtpRef" :can-manage="canManage" />
         </el-tab-pane>
 
         <el-tab-pane label="发送记录" name="records">
@@ -163,9 +165,10 @@
 </template>
 
 <script setup lang="ts">
-import { Bottom, Plus, Refresh, Right, Select, Timer, Top } from '@element-plus/icons-vue'
+import { Bottom, Plus, Right, Select, Timer, Top } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, onScopeDispose, reactive, ref } from 'vue'
+import { useLatestRequest } from '@/composables/useLatestRequest'
 import { useRoute, useRouter } from 'vue-router'
 import {
   type ContactGroup, type NotifyRoute, deleteGroup, deleteRoute, listAlarms, listContacts, listGroups, listNotifications, listRoutes,
@@ -189,8 +192,8 @@ const FLOW = [
   { title: '告警事件', desc: '新告警 / 升级 / 重复 / 恢复' },
   { title: '路由匹配', desc: '按优先级匹配租户、级别与服务' },
   { title: '联系组', desc: '成员 + 组长，去重合并收件人' },
-  { title: '写入 Outbox', desc: '与告警同事务，保证不丢' },
-  { title: '异步投递', desc: 'SMTP 发送，失败退避重试 5 次' },
+  { title: '待发队列', desc: '保存待发送的通知' },
+  { title: '发送邮件', desc: '失败后重试，最多尝试 5 次' },
   { title: '未认领升级', desc: '超时未认领上报组长（可限定级别）' },
 ]
 
@@ -198,7 +201,12 @@ const route = useRoute()
 const router = useRouter()
 const app = useAppStore()
 const tab = ref(typeof route.query.tab === 'string' ? route.query.tab : 'routes')
-const loading = ref(false)
+const metadataRequest = useLatestRequest()
+const recordRequest = useLatestRequest()
+const loading = metadataRequest.loading
+const recordLoading = recordRequest.loading
+const refreshing = ref(false)
+const smtpRef = ref<{ reload: () => Promise<void>; busy: boolean } | null>(null)
 const routes = ref<NotifyRoute[]>([])
 const groups = ref<ContactGroup[]>([])
 const alarms = ref<Alarm[]>([])
@@ -213,12 +221,27 @@ const saving = ref(false)
 const orderDirty = ref(false)
 
 async function loadAll() {
-  loading.value = true
   try {
-    ;[routes.value, groups.value, contacts.value] = await Promise.all([listRoutes(), listGroups(), listContacts()])
-    orderDirty.value = false
-    await onTab(tab.value)
-  } finally { loading.value = false }
+    const applied = await metadataRequest.run(() => Promise.all([listRoutes(), listGroups(), listContacts()]), ([r, g, c]) => {
+      routes.value = r; groups.value = g; contacts.value = c; orderDirty.value = false
+    })
+    if (applied) await onTab(tab.value)
+  } catch { /* 请求层提示错误，保留上次配置。 */ }
+}
+
+async function refresh() {
+  if (loading.value || refreshing.value || saving.value || smtpRef.value?.busy) return
+  refreshing.value = true
+  try {
+    if (orderDirty.value) {
+      try {
+        await ElMessageBox.confirm('未保存的路由排序将丢失，是否刷新？', '刷新', {
+          type: 'warning', confirmButtonText: '刷新', cancelButtonText: '取消',
+        })
+      } catch { return }
+    }
+    await Promise.allSettled([loadAll(), tab.value === 'smtp' ? smtpRef.value?.reload() : undefined])
+  } finally { refreshing.value = false }
 }
 
 // ---- 路由维护 ----
@@ -268,15 +291,41 @@ async function removeGroup(g: ContactGroup) {
   ElMessage.success('已删除')
   await loadAll()
 }
-async function loadRecords() { records.value = await listNotifications(recordStatus.value || undefined) }
-async function loadPreview() { if (pv.alarmId) pv.data = await previewMail(pv.alarmId, pv.kind) }
+async function loadRecords() {
+  const status = recordStatus.value || undefined
+  records.value = []
+  return recordRequest.run(() => listNotifications(status), rows => { records.value = rows }).catch(() => false)
+}
+let previewRequest = 0
+async function loadPreview() {
+  const request = ++previewRequest
+  const id = pv.alarmId
+  const kind = pv.kind
+  pv.data = null
+  if (!id) return
+  try {
+    const data = await previewMail(id, kind)
+    if (request === previewRequest && pv.alarmId === id && pv.kind === kind) pv.data = data
+  } catch { /* 请求层提示错误，不显示上一次的邮件。 */ }
+}
+let previewListRequest = 0
+onScopeDispose(() => { previewRequest++; previewListRequest++ })
 async function onTab(name: string | number) {
+  if (name !== 'records') recordRequest.invalidate()
+  if (name !== 'preview') { previewRequest++; previewListRequest++; pv.data = null }
   router.replace({ query: { tab: String(name) } })
   if (name === 'records') await loadRecords()
-  if (name === 'preview' && !alarms.value.length) {
-    alarms.value = (await listAlarms({ status_group: 'active', page: 1, page_size: 100 })).items
-    pv.alarmId = alarms.value.find((a) => a.resource_name === 'redis-prod-01')?.id ?? alarms.value[0]?.id ?? null
-    await loadPreview()
+  if (name === 'preview') {
+    const request = ++previewListRequest
+    ++previewRequest
+    pv.data = null
+    try {
+      const data = await listAlarms({ status_group: 'active', page: 1, page_size: 100 })
+      if (request !== previewListRequest) return
+      alarms.value = data.items
+      if (!alarms.value.some(a => a.id === pv.alarmId)) pv.alarmId = alarms.value[0]?.id ?? null
+      await loadPreview()
+    } catch { /* 请求层提示错误，不保留旧预览。 */ }
   }
 }
 onMounted(loadAll)
@@ -314,4 +363,18 @@ onMounted(loadAll)
       span { margin-left: 8px; } }
     iframe { display: block; width: 100%; height: 720px; border: 0; } } }
 .err { color: var(--hi-p1); }
+@media (max-width: 1199px) {
+  .flow { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .flow .step { min-width: 0; }
+  .flow .step > div { min-width: 0; }
+  .flow .step:nth-child(3n) .arrow { display: none; }
+  .groups { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .preview { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 767px) {
+  .flow { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; padding: 14px 16px; }
+  .flow .step { gap: 8px; padding-right: 0; }
+  .flow .step span, .flow .step .arrow { display: none; }
+  .groups { grid-template-columns: minmax(0, 1fr); }
+}
 </style>

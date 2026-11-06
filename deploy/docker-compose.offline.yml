@@ -1,0 +1,13 @@
+# 离线包始终叠加本文件；禁止启动时联网拉取镜像。
+x-offline: &offline
+  platform: ${OFFLINE_PLATFORM:-linux/arm64}
+  pull_policy: never
+
+services:
+  postgres: *offline
+  redis: *offline
+  migrate: *offline
+  api: *offline
+  scheduler: *offline
+  notifier: *offline
+  web: *offline

@@ -1,5 +1,8 @@
+import os
 from functools import lru_cache
+from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -28,6 +31,13 @@ class Settings(BaseSettings):
     mail_link_secret: str = "change-me-too"
     metrics_token: str | None = None                  # /metrics 访问令牌（Authorization: Bearer）；为空时不校验，只应在内网暴露
 
+    # 本机运行日志，每服务独立轮转文件；无需外部日志平台。
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    log_dir: str | None = None
+    log_max_bytes: int = Field(10 * 1024 * 1024, ge=1024, le=1024 * 1024 * 1024)
+    log_backup_count: int = Field(5, ge=1, le=100)
+    log_slow_request_ms: int = Field(2000, ge=100, le=600000)
+
     # SMTP（本地开发可用 mailpit：localhost:1025）
     smtp_host: str = "localhost"
     smtp_port: int = 1025
@@ -41,6 +51,8 @@ class Settings(BaseSettings):
     # HCS 接入：以数据库中的租户（hcs_account / hcs_project，“系统管理 - 租户接入”维护）为准；
     # 下面的单账号配置只在一个租户都没有配置时作为兜底（兼容早期版本）
     hcs_version: str = "8.5.1"                        # 适配的 HCS 版本（接口路径 / 字段以该版本 OpenAPI 为准）
+    hcs_ces_enabled: bool = False                    # 本局点无 CES；仅旧部署明确启用时兼容，AUTO 不探测 CES
+    hcs_gaussdb_api_variant: str = Field("v3.3", pattern=r"^(v3\.3|v3\.2|v3\.1|opengauss_v3)$")
     hcs_scheme: str = "https"
     hcs_iam_url: str = "https://iam-apigateway-proxy.example.com"
     hcs_domain: str = "vdc_ops"
@@ -51,6 +63,11 @@ class Settings(BaseSettings):
     hcs_external_domain: str = "example.com"
     hcs_verify: bool = True                           # 校验 HCS 接口证书（内网自签证书请配 hcs_ca_file，不建议关闭校验）
     hcs_ca_file: str | None = None                    # 内部 CA 证书（PEM）路径，例如 /app/certs/hcs-ca.pem
+    hcs_max_attempts: int = Field(3, ge=1, le=4)       # 含首次发送；只有登记的只读查询可重试
+    hcs_service_concurrency: int = Field(2, ge=1, le=8)  # 每云服务跨任务在途请求上限
+    hcs_total_qps: float = Field(10, ge=0.1, le=100)
+    hcs_total_concurrency: int = Field(4, ge=1, le=16)
+    hcs_acquire_timeout_seconds: float = Field(30, ge=1, le=120)
     hcs_endpoints: dict[str, str] = {
         "dataarts": "dayu-dlf.{region}.{domain}",
         "mrs": "mrs.{region}.{domain}",
@@ -61,7 +78,7 @@ class Settings(BaseSettings):
         "ecs": "ecs.{region}.{domain}",
         "evs": "evs.{region}.{domain}",
         "vpc": "vpc.{region}.{domain}",
-        "elb": "elb.{region}.{domain}",
+        "elb": "vpc.{region}.{domain}",
         "rds": "rds.{region}.{domain}",
         "dms": "dms.{region}.{domain}",
         "cce": "cce.{region}.{domain}",
@@ -88,7 +105,8 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    env_file = os.environ.get("INSPECTOR_ENV_FILE", ".env")
+    return Settings(_env_file=env_file or None)  # type: ignore[call-arg]  # BaseSettings 的运行时参数，mypy 插件未暴露。
 
 
 _DEFAULT_SECRETS = {"change-me-in-prod-use-32+-random-bytes", "change-me-too", "please-change-me-to-32-plus-random-bytes",

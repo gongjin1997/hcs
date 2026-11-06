@@ -6,9 +6,10 @@
 - 命中静默的告警照常记录（状态“已抑制”），不发通知；静默结束后仍未恢复的告警自动转回“告警中”并补发通知
 """
 from datetime import datetime, timedelta
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field, StringConstraints
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -29,11 +30,11 @@ MANAGE = require_perm("silence:manage")
 
 
 class SilenceIn(BaseModel):
-    name: str = Field(min_length=1, max_length=128)
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
     kind: str = Field("SILENCE", pattern="^(SILENCE|MAINTENANCE)$")
     matchers: dict
-    starts_at: datetime | None = None          # 为空 = 立即开始
-    ends_at: datetime
+    starts_at: AwareDatetime | None = None     # 为空 = 立即开始；显式时间必须带时区
+    ends_at: AwareDatetime
     recurrence: dict | None = None             # {"weekdays": [4], "start": "22:00", "end": "02:00"}
     reason: str = Field("", max_length=500)
 
@@ -68,12 +69,24 @@ def _editable(scope: Scope, s: Silence) -> bool:
 def _check_scope(scope: Scope, matchers: dict) -> dict:
     """数据范围：不指定租户时自动限定为当前可见的租户（顶部切换到某个租户时 = 只静默该租户）；指定了范围外的租户时拒绝。"""
     m = dict(matchers)
+    if scope.tenant_ids == []:
+        raise BizError(ErrorCode.FORBIDDEN, "没有可静默的租户范围", 403)
+    try:
+        return _normalize_scoped_matchers(scope, m)
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise BizError(ErrorCode.BAD_REQUEST, "匹配条件中的租户和资源 ID 必须是整数数组") from exc
+
+
+def _normalize_scoped_matchers(scope: Scope, m: dict) -> dict:
     if scope.tenant_ids is not None:
-        tids = [int(t) for t in (m.get("tenant_ids") or [])] or list(scope.tenant_ids)
+        raw_tids = m.get("tenant_ids") or []
+        if not isinstance(raw_tids, list) or any(type(t) not in (int, str) for t in raw_tids):
+            raise BizError(ErrorCode.BAD_REQUEST, "匹配条件 tenant_ids 必须是整数数组")
+        tids = [int(t) for t in raw_tids] or list(scope.tenant_ids)
         if any(t not in scope.tenant_ids for t in tids):
             raise BizError(ErrorCode.FORBIDDEN, "无权静默其他租户的告警", 403)
         m["tenant_ids"] = tids
-    return m
+    return silence_service.normalize_matchers(m)
 
 
 def _out(db: Session, s: Silence, now: datetime, scope: Scope, names: dict[int, str]) -> dict:
@@ -98,11 +111,14 @@ def _get(db: Session, scope: Scope, sid: int) -> Silence:
 
 
 def _apply(db: Session, s: Silence, body: SilenceIn, scope: Scope, now: datetime) -> None:
-    rec = silence_service.normalize_recurrence(body.recurrence)
+    try:
+        rec = silence_service.normalize_recurrence(body.recurrence)
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise BizError(ErrorCode.BAD_REQUEST, "每周维护窗口的星期必须是 1 至 7 的整数数组") from exc
     starts = body.starts_at or now
     silence_service.validate_window(starts, body.ends_at, rec)
     s.name, s.kind, s.reason = body.name.strip(), body.kind, body.reason.strip()
-    s.matchers = silence_service.normalize_matchers(_check_scope(scope, body.matchers))
+    s.matchers = _check_scope(scope, body.matchers)
     s.recurrence, s.starts_at, s.ends_at = rec, starts, body.ends_at
 
 
@@ -138,7 +154,7 @@ def create(body: SilenceIn, db: Session = Depends(get_db), scope: Scope = Depend
     _apply(db, s, body, scope, now)
     db.add(s)
     db.flush()
-    res = silence_service.sweep(db, now, only=s)
+    res = silence_service.sweep(db, now, only=s, commit=False)
     names = _names(db)
     audit.log("silence.create", target_type="silence", target_id=s.id, target_name=s.name, tenant_id=scope.single,
               detail={"kind": s.kind, "matchers": silence_service.describe(s.matchers, names),
@@ -161,7 +177,7 @@ def update(sid: int, body: SilenceIn, db: Session = Depends(get_db), scope: Scop
     _apply(db, s, body, scope, now)
     db.flush()
     released = silence_service.release(db, s, now, display_name(db, cu))
-    res = silence_service.sweep(db, now, only=s)
+    res = silence_service.sweep(db, now, only=s, commit=False)
     names = _names(db)
     audit.log("silence.update", target_type="silence", target_id=s.id, target_name=s.name, tenant_id=scope.single,
               detail={"before": before, "after": {"name": s.name, "matchers": s.matchers,
@@ -216,11 +232,9 @@ def quick_silence(alarm_id: int, body: QuickSilenceIn, db: Session = Depends(get
                 created_by=display_name(db, cu), created_at=now)
     db.add(s)
     db.flush()
-    if alarm.status == "FIRING":
-        silence_service.suppress(db, alarm, s, now)
-    res = silence_service.sweep(db, now, only=s)
+    res = silence_service.sweep(db, now, only=s, commit=False)
     audit.log("alarm.silence", target_type="alarm", target_id=alarm.id,
               target_name=f"{alarm.resource_name} · {alarm.title}", tenant_id=alarm.tenant_id,
               detail={"silence_id": s.id, "minutes": body.minutes, "target": body.target, "reason": s.reason})
     return ok({"silence": _out(db, s, now, scope, _names(db)),
-               "suppressed": res["suppressed"] + (1 if alarm.status == "SUPPRESSED" else 0)})
+               "suppressed": res["suppressed"]})

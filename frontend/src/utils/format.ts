@@ -19,13 +19,3 @@ export function humanize(sec: number): string {
 }
 export const durationOf = (from?: string | null, to?: string | null) =>
   from ? humanize(dayjs(to || undefined).diff(dayjs(from), 'second')) : '-'
-
-export function downloadCsv(filename: string, header: string[], rows: (string | number | null | undefined)[][]) {
-  const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`
-  const csv = '\ufeff' + [header, ...rows].map((r) => r.map(esc).join(',')).join('\n')
-  const a = document.createElement('a')
-  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }))
-  a.download = filename
-  a.click()
-  URL.revokeObjectURL(a.href)
-}

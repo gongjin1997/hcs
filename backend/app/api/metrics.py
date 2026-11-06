@@ -6,6 +6,7 @@
 - 指标覆盖：活动告警、通知积压 / 失败、任务最近执行状态与连续失败次数、后台进程心跳、台账资源数、静默数、HTTP 请求
 """
 import hmac
+from collections import Counter
 from datetime import timedelta
 
 from fastapi import APIRouter, Header
@@ -18,9 +19,11 @@ from app.core.config import get_settings
 from app.core.db import SessionLocal
 from app.core.events import broadcaster
 from app.core.response import BizError, ErrorCode
-from app.models import AlarmEvent, HcsAccount, InspectionRun, Notification, Resource, Silence, WorkerHeartbeat
+from app.models import AlarmEvent, HcsAccount, Notification, Resource, Silence, WorkerHeartbeat
 from app.models.alarm import ACTIVE_STATUSES
 from app.models.base import utcnow
+from app.services import platform_watch
+from app.services.inspection_health import current_health
 
 router = APIRouter()
 
@@ -75,37 +78,39 @@ def collect() -> str:
         out.metric("hcs_inspector_notification_oldest_pending_seconds", "gauge", "最早一条未发送通知的等待时长",
                    [({}, round((now - oldest).total_seconds(), 1) if oldest else 0)])
         last: dict[tuple, dict] = {}
-        for code, tid, status, started, finished in db.execute(
-                select(InspectionRun.task_code, InspectionRun.tenant_id, InspectionRun.status, InspectionRun.started_at,
-                       InspectionRun.finished_at).where(InspectionRun.started_at >= now - timedelta(hours=26),
-                                                        InspectionRun.status != "RUNNING")
-                .order_by(InspectionRun.started_at.desc())):
-            k = (code, tn(tid))
-            st = last.setdefault(k, {"status": status, "at": started, "dur": (finished - started).total_seconds()
-                                     if finished else 0, "fails": 0, "counting": True, "ok_at": None})
-            if st["counting"] and status == "FAILED":
-                st["fails"] += 1
-            elif status != "FAILED":
-                st["counting"] = False
-                st["ok_at"] = st["ok_at"] or started
-        lab = lambda k: {"task": k[0], "tenant": k[1]}  # noqa: E731
+        for scope in platform_watch.task_scopes(db):
+            run = scope["run"]
+            k = (run.task_code, run.tenant_id, run.project_ref)
+            last[k] = {"status": run.status, "at": scope["last_at"], "fails": scope["fails"],
+                       "ok_at": scope["last_success_at"], "api_calls": run.api_calls or 0,
+                       "api_errors": ((run.stats or {}).get("hcs") or {}).get("errors", 0),
+                       "dur": (run.finished_at - run.started_at).total_seconds() if run.finished_at else None}
+        lab = lambda k: {"task": k[0], "tenant": tn(k[1]),  # noqa: E731
+                         "tenant_id": k[1] if k[1] is not None else "global",
+                         "project_ref": k[2] if k[2] is not None else "unknown",
+                         "project_scope": platform_watch.scope_kind(*k)}
+        out.metric("hcs_inspector_task_api_calls", "gauge", "最近一次任务的 HCS 请求次数",
+                   [(lab(k), v["api_calls"]) for k, v in last.items()])
+        out.metric("hcs_inspector_task_api_errors", "gauge", "最近一次任务的 HCS 请求错误次数（含重试）",
+                   [(lab(k), v["api_errors"]) for k, v in last.items()])
         out.metric("hcs_inspector_task_last_run_timestamp_seconds", "gauge", "任务最近一次执行时间（Unix 秒）",
                    [(lab(k), int(v["at"].timestamp())) for k, v in last.items()])
-        out.metric("hcs_inspector_task_last_success_timestamp_seconds", "gauge", "任务最近一次成功时间（近 26 小时内）",
+        out.metric("hcs_inspector_task_last_success_timestamp_seconds", "gauge", "同任务租户项目最近一次真实 SUCCESS 完成时间",
                    [(lab(k), int(v["ok_at"].timestamp())) for k, v in last.items() if v["ok_at"]])
         out.metric("hcs_inspector_task_last_duration_seconds", "gauge", "任务最近一次执行耗时",
-                   [(lab(k), round(v["dur"], 2)) for k, v in last.items()])
+                   [(lab(k), round(v["dur"], 2)) for k, v in last.items() if v["dur"] is not None])
         out.metric("hcs_inspector_task_last_status", "gauge", "任务最近一次执行状态（值恒为 1，看 status 标签）",
                    [({**lab(k), "status": v["status"]}, 1) for k, v in last.items()])
-        out.metric("hcs_inspector_task_consecutive_failures", "gauge", "任务连续失败次数",
+        out.metric("hcs_inspector_task_consecutive_failures", "gauge",
+                   "项目连续未成功次数（FAILED/TIMEOUT/PARTIAL；跳过不清零）",
                    [(lab(k), v["fails"]) for k, v in last.items()])
         out.metric("hcs_inspector_worker_heartbeat_age_seconds", "gauge", "后台进程距上次心跳的秒数",
                    [({"worker": h.name, "host": h.host or "-"}, round((now - h.beat_at).total_seconds(), 1))
                     for h in db.scalars(select(WorkerHeartbeat))])
-        res = db.execute(select(Resource.tenant_id, Resource.resource_type, Resource.health, func.count()).where(
-            Resource.lifecycle == "ACTIVE").group_by(Resource.tenant_id, Resource.resource_type, Resource.health)).all()
-        out.metric("hcs_inspector_resources", "gauge", "在用资源数（按租户 / 类型 / 健康状态）",
-                   [({"tenant": tn(t), "type": rt, "health": h}, n) for t, rt, h, n in res])
+        res = Counter((r.tenant_id, r.resource_type, current_health(r, now)) for r in db.scalars(
+            select(Resource).where(Resource.lifecycle == "ACTIVE").execution_options(yield_per=500)))
+        out.metric("hcs_inspector_resources", "gauge", "在用资源数（按租户 / 类型 / 当前巡检健康状态）",
+                   [({"tenant": tn(t), "type": rt, "health": h}, n) for (t, rt, h), n in res.items()])
         silences = sum(1 for x in db.scalars(select(Silence).where(Silence.cancelled_at.is_(None),
                                                                      Silence.starts_at <= now, Silence.ends_at > now)))
         out.metric("hcs_inspector_silences_active", "gauge", "有效期内的静默 / 维护窗口数", [({}, silences)])

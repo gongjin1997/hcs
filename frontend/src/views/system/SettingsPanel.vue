@@ -1,16 +1,16 @@
 <template>
   <div v-loading="loading" class="settings-panel">
     <el-alert type="info" :closable="false" show-icon class="mb-16"
-              title="设置保存在数据库中，保存后各进程下次使用时生效，无需重启；每次修改写入操作审计。环境变量（.env）只作为首次部署的默认值。" />
+              title="保存后生效，无需重启。未设置时使用部署默认值；修改记录可在操作审计中查看。" />
     <el-row :gutter="16">
       <!-- 数据保留 -->
-      <el-col :span="12">
+      <el-col :xs="24" :lg="12">
         <div v-if="retention" class="box">
           <div class="box-title">
             <el-icon><Delete /></el-icon>{{ retention.label }}
-            <span class="text-3">每天低峰由“数据清理”任务删除超过保留期的数据</span>
+            <span class="text-3">“数据清理”任务每天删除过期数据</span>
           </div>
-          <el-form label-width="250px" label-position="left" size="default" class="form">
+          <el-form label-width="250px" label-position="left" size="default" class="form" :disabled="!retention.editable || busy" @submit.prevent>
             <el-form-item v-for="f in retention.fields" :key="f.key" :label="f.label">
               <el-input-number v-model="ret[f.key]" :min="f.ge" :max="f.le" :step="f.key === 'pod_event_days' ? 1 : 30" controls-position="right"
                                :disabled="!retention.editable" style="width: 150px" />
@@ -27,13 +27,13 @@
       </el-col>
 
       <!-- 平台自身告警 -->
-      <el-col :span="12">
+      <el-col :xs="24" :lg="12">
         <div v-if="platform" class="box">
           <div class="box-title">
             <el-icon><WarningFilled /></el-icon>{{ platform.label }}
-            <span class="text-3">巡检平台自己出问题时（任务失败、认证失败、通知失败、进程停止）主动告警</span>
+            <span class="text-3">监测任务失败、认证失败、通知失败和进程停止</span>
           </div>
-          <el-form label-width="250px" label-position="left" class="form">
+          <el-form label-width="250px" label-position="left" class="form" :disabled="!platform.editable || busy" @submit.prevent>
             <el-form-item :label="label(platform, 'enabled')">
               <el-switch v-model="pa.enabled" :disabled="!platform.editable" />
             </el-form-item>
@@ -54,9 +54,8 @@
                 </el-radio-group>
               </el-form-item>
               <el-form-item label="兜底收件人">
-                <el-select v-model="pa.mail_to" multiple filterable allow-create default-first-option :reserve-keyword="false" class="w-full"
-                           :disabled="!platform.editable" placeholder="输入邮箱后回车" />
-                <div class="text-3 hint">{{ label(platform, 'mail_to') }}。平台告警优先按“通知管理”的路由（服务 = 巡检平台）发送</div>
+                <RecipientSelect v-model="pa.recipient_user_ids" global-only :disabled="!platform.editable || busy" :active="pa.enabled" />
+                <div class="text-3 hint">未命中路由时通知所选人员；未选择时通知可接收邮件的全租户平台管理员。</div>
               </el-form-item>
             </template>
           </el-form>
@@ -69,14 +68,19 @@
       </el-col>
     </el-row>
 
+    <CollectionPanel v-if="collection" ref="collectionRef" :setting="collection" :disabled="loading || !!saving || confirmingReload" class="mt-16" @saved="load('collect')" />
+    <SmsGlobalPanel ref="smsRef" :disabled="loading || !!saving || confirmingReload" class="mt-16" />
+
     <!-- 其他设置的入口 -->
     <div class="box mt-16 links">
       <div class="box-title"><el-icon><Link /></el-icon>其他设置</div>
       <div class="link-row">
         <span><b>定时报表</b>（发送时间 / 收件人）：系统管理 → 巡检任务 → “修改发送时间 / 收件人”</span>
-        <span><b>台账字典</b>（业务系统 / 负责人）：资源台账 → 右上角“字典”</span>
+        <span><b>台账字典</b>（业务系统）：资源台账 → 表格标题栏“字典”</span>
+        <span><b>人员 / 负责人 / 通知联系人</b>：系统管理 → 用户管理（可仅登记人员，不开通登录）</span>
         <span><b>采集开关</b>（按资源类型启停）：系统管理 → 采集开关</span>
-        <span><b>SMTP 与测试邮件</b>：通知管理 → SMTP 与测试邮件（SMTP 账号在部署目录 .env 中配置）</span>
+        <span><b>SMTP / IMAP 邮件服务</b>：通知管理 → 邮件服务与测试（页面保存，无需重启）</span>
+        <span><b>升级短信</b>：先配置租户卡片中的“短信配置”，再按需开启总开关和租户开关。</span>
       </div>
     </div>
   </div>
@@ -84,59 +88,88 @@
 
 <script setup lang="ts">
 import { Delete, Link, WarningFilled } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { getSettings, saveSetting } from '@/api'
 import type { PlatformAlarmSetting, Retention, SettingItem } from '@/types'
 import { SEVERITY } from '@/utils/dict'
 import { fmtTime } from '@/utils/format'
+import CollectionPanel from './CollectionPanel.vue'
+import RecipientSelect from '@/components/RecipientSelect.vue'
+import SmsGlobalPanel from './SmsGlobalPanel.vue'
 
 const SEV3 = ['P1', 'P2', 'P3'] as const
 const loading = ref(false)
 const saving = ref('')
+const confirmingReload = ref(false)
+const collectionRef = ref<{ busy: boolean; dirty: boolean } | null>(null)
+const smsRef = ref<{ reload: () => Promise<void>; busy: boolean; dirty: boolean } | null>(null)
+const busy = computed(() => loading.value || !!saving.value || confirmingReload.value || !!collectionRef.value?.busy || !!smsRef.value?.busy)
 const retention = ref<SettingItem<Retention> | null>(null)
 const platform = ref<SettingItem<PlatformAlarmSetting> | null>(null)
+const collection = ref<SettingItem<{ hcs_concurrency: number; hcs_qps: Record<string, number> }> | null>(null)
 const ret = reactive<Record<string, number>>({})
-const pa = reactive<PlatformAlarmSetting>({ enabled: true, task_fail_threshold: 3, auth_fail_alarm: true, notify_fail_alarm: true, heartbeat_timeout_min: 3, severity: 'P2', mail_to: [] })
+const pa = reactive<PlatformAlarmSetting & { recipient_user_ids: number[] }>({ enabled: true, task_fail_threshold: 3, auth_fail_alarm: true, notify_fail_alarm: true, heartbeat_timeout_min: 3, severity: 'P2', mail_to: [], recipient_user_ids: [] })
 
-async function load() {
+async function load(group?: 'retention' | 'platform_alarm' | 'collect') {
+  if (loading.value) return
   loading.value = true
   try {
     const s = await getSettings()
     retention.value = s.retention ?? null
     platform.value = s.platform_alarm ?? null
-    resetRet()
-    resetPa()
+    if (!group || group === 'collect' || !collectionRef.value?.dirty) collection.value = s.collect ?? null
+    if (!group || group === 'retention') resetRet()
+    if (!group || group === 'platform_alarm') resetPa()
+  } catch {
+    // 请求层提示错误，保留未保存的表单。
   } finally { loading.value = false }
 }
 onMounted(load)
-defineExpose({ reload: load })
+async function reload() {
+  if (busy.value) return
+  if (retDirty.value || paDirty.value || collectionRef.value?.dirty || smsRef.value?.dirty) {
+    confirmingReload.value = true
+    try {
+      await ElMessageBox.confirm('未保存的设置将丢失，是否刷新？', '刷新', {
+        type: 'warning', confirmButtonText: '刷新', cancelButtonText: '取消',
+      })
+    } catch { return }
+    finally { confirmingReload.value = false }
+  }
+  await Promise.all([load(), smsRef.value?.reload()])
+}
+defineExpose({ reload, busy })
 
 const label = (s: SettingItem, key: string) => s.fields.find((f) => f.key === key)?.label ?? key
 const metaText = (s: SettingItem) => (s.customized && s.updated_by ? `${s.updated_by} 于 ${fmtTime(s.updated_at, 'YYYY-MM-DD HH:mm')} 修改` : '使用默认值')
 
 function resetRet() { if (retention.value) Object.assign(ret, retention.value.value) }
-function resetPa() { if (platform.value) Object.assign(pa, { ...platform.value.value, mail_to: [...(platform.value.value.mail_to ?? [])] }) }
+function resetPa() { if (platform.value) Object.assign(pa, { ...platform.value.value, mail_to: [...(platform.value.value.mail_to ?? [])], recipient_user_ids: [...(platform.value.value.recipient_user_ids ?? [])] }) }
 const retDirty = computed(() => !!retention.value && Object.entries(retention.value.value).some(([k, v]) => ret[k] !== v))
-const paDirty = computed(() => !!platform.value && JSON.stringify({ ...platform.value.value, mail_to: platform.value.value.mail_to ?? [] }) !== JSON.stringify({ ...pa }))
+const paDirty = computed(() => !!platform.value && Object.entries({ ...platform.value.value, recipient_user_ids: platform.value.value.recipient_user_ids ?? [] })
+  .some(([key, value]) => key !== 'mail_to' && JSON.stringify(pa[key as keyof typeof pa]) !== JSON.stringify(value)))
 
 async function saveRet() {
+  if (busy.value) return
   saving.value = 'retention'
   try {
     const r = await saveSetting<Retention>('retention', { ...ret } as Partial<Retention>)
     ElMessage.success(r.changed.length ? `已保存（${r.changed.length} 项），下次数据清理按新保留期执行` : '没有变化')
-    await load()
-  } finally { saving.value = '' }
+    await load('retention')
+  } catch { /* 请求层提示错误，保留草稿。 */ }
+  finally { saving.value = '' }
 }
 async function savePa() {
-  const bad = pa.mail_to.find((m) => !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(m))
-  if (bad) return ElMessage.warning(`邮箱格式不正确：${bad}`)
+  if (busy.value) return
   saving.value = 'platform_alarm'
   try {
-    const r = await saveSetting<PlatformAlarmSetting>('platform_alarm', { ...pa })
+    const { mail_to: _resolved, ...body } = pa
+    const r = await saveSetting<PlatformAlarmSetting>('platform_alarm', body)
     ElMessage.success(r.changed.length ? '已保存，调度进程下一轮检查时生效' : '没有变化')
-    await load()
-  } finally { saving.value = '' }
+    await load('platform_alarm')
+  } catch { /* 请求层提示错误，保留草稿。 */ }
+  finally { saving.value = '' }
 }
 </script>
 
@@ -153,4 +186,7 @@ async function savePa() {
 .foot { display: flex; align-items: center; gap: 8px; padding-top: 10px; border-top: 1px dashed var(--hi-border-light);
   .text-3 { margin-right: auto; font-size: 12px; } }
 .links .link-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 24px; font-size: 13px; color: var(--hi-text-2); }
+@media (max-width: 767px) {
+  :deep(.el-row) { row-gap: 16px; }
+}
 </style>

@@ -1,12 +1,52 @@
 from datetime import datetime
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, StrictInt, field_validator
 
 from app.metrics import SOURCES
 
+from .common import ORMModel
+
+
+class TaskRunOut(ORMModel):
+    id: int
+    tenant_id: int | None = None
+    project_ref: int | None = None
+    tenant_name: str | None = None
+    project_scope: str = "UNKNOWN"
+    project_label: str = "历史未知项目（未记录）"
+    trigger_type: str
+    started_at: datetime
+    finished_at: datetime | None = None
+    status: str
+    resource_total: int
+    abnormal_total: int
+    api_calls: int
+    error_summary: str | None = None
+    stats: dict = Field(default_factory=dict)
+
+
+class TaskScopeOut(BaseModel):
+    task_code: str
+    tenant_id: int | None = None
+    tenant_name: str | None = None
+    project_ref: int | None = None
+    project_scope: str
+    project_label: str
+    last_status: str
+    last_at: datetime
+    last_success_at: datetime | None = None
+    effective_status: str | None = None
+    effective_run_id: int | None = None
+    fails: int = 0
+    resource_total: int = 0
+    abnormal_total: int = 0
+    effective_finished_at: datetime | None = None
+    effective_resource_total: int | None = None
+    effective_abnormal_total: int | None = None
+
 
 class ProjectIn(BaseModel):
-    id: int | None = None
+    id: int | None = Field(None, ge=1)
     region_id: str = Field(min_length=1, max_length=64)
     project_id: str = Field(min_length=1, max_length=64)
     project_name: str | None = None
@@ -24,7 +64,7 @@ class TenantIn(BaseModel):
     short_name: str = Field(default="", max_length=16)
     color: str = "#1d63f0"
     iam_endpoint: str = Field(min_length=8, max_length=255)
-    domain_name: str = Field(min_length=1, max_length=128)
+    domain_name: str = Field(default="", max_length=128)
     domain_id: str | None = None
     auth_type: str = "PASSWORD"
     username: str | None = None
@@ -32,11 +72,26 @@ class TenantIn(BaseModel):
     secret: str | None = None
     endpoints: dict[str, str] = {}
     enabled: bool = True
-    report_mail_to: list[str] = []
+    report_user_ids: list[StrictInt] | None = None
+    report_mail_to: list[str] = Field(default_factory=list, description="旧客户端兼容：仅接受已登记用户的邮箱")
     remark: str | None = None
-    metrics_source: str = "AUTO"
+    metrics_source: str = Field(default="AUTO", description="AUTO / CES（需全局显式启用）/ PROMETHEUS / NONE；AOM 已停用")
     prometheus_url: str | None = None
     projects: list[ProjectIn] = Field(min_length=1)
+
+    @field_validator("projects")
+    @classmethod
+    def _unique_projects(cls, projects: list[ProjectIn]) -> list[ProjectIn]:
+        ids = [p.id for p in projects if p.id is not None]
+        keys = [(p.region_id, p.project_id) for p in projects]
+        if len(ids) != len(set(ids)) or len(keys) != len(set(keys)):
+            raise ValueError("项目 ID 或区域/项目标识不能重复")
+        return projects
+
+    @field_validator("domain_name", mode="before")
+    @classmethod
+    def _domain_name(cls, value: str | None) -> str:
+        return (value or "").strip()
 
     @field_validator("auth_type")
     @classmethod
@@ -48,6 +103,8 @@ class TenantIn(BaseModel):
     @field_validator("metrics_source")
     @classmethod
     def _source(cls, v: str) -> str:
+        if v == "AOM":
+            raise ValueError("AOM 已全局停用，请选择 AUTO、PROMETHEUS 或 NONE；仅旧部署显式启用时可选择 CES")
         if v not in SOURCES:
             raise ValueError(f"监控指标来源只能是 {'/'.join(SOURCES)}")
         return v
@@ -72,10 +129,13 @@ class TenantOut(BaseModel):
     secret_set: bool
     endpoints: dict[str, str]
     enabled: bool
+    report_user_ids: list[int] = []
     report_mail_to: list[str]
     remark: str | None = None
     metrics_source: str
     metrics_effective: str
+    metrics_source_disabled: bool = False
+    metrics_source_note: str | None = None
     prometheus_url: str | None = None
     capabilities: dict
     last_check: dict

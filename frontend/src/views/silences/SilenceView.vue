@@ -1,27 +1,24 @@
 <template>
   <div class="silence-page">
-    <PageHeader title="维护与静默" desc="计划内变更、压测、已知问题处理期间屏蔽告警通知：命中的告警照常记录为“已抑制”，窗口结束后仍未恢复的会补发通知">
-      <el-button v-if="canManage" type="primary" :icon="Plus" @click="openDialog(null)">新建维护窗口 / 静默</el-button>
-      <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
-    </PageHeader>
+    <PageHeader title="维护与静默" :refresh="load" :refreshing="loading" />
 
     <el-row :gutter="16" class="mb-16">
-      <el-col :span="6">
+      <el-col :xs="12" :md="6">
         <StatCard title="生效中" :value="counts.ACTIVE ?? 0" unit="个" :icon="MuteNotification" color="#2E7D32" @click="tab = 'active'">
           <template #sub>正在抑制 <b class="num">{{ suppressedNow }}</b> 条告警</template>
         </StatCard>
       </el-col>
-      <el-col :span="6">
+      <el-col :xs="12" :md="6">
         <StatCard title="周期等待" :value="counts.WAITING ?? 0" unit="个" :icon="Calendar" color="#1d63f0" @click="tab = 'active'">
           <template #sub>{{ nextWeekly ? `下次窗口 ${fmtTime(nextWeekly.start, 'MM-DD ddd HH:mm')}` : '每周重复的例行变更窗口' }}</template>
         </StatCard>
       </el-col>
-      <el-col :span="6">
+      <el-col :xs="12" :md="6">
         <StatCard title="待生效" :value="counts.PENDING ?? 0" unit="个" :icon="AlarmClock" color="#F57C00" @click="tab = 'pending'">
           <template #sub>{{ nextPending ? `最近 ${fmtTime(nextPending.starts_at, 'MM-DD HH:mm')} 开始` : '暂无已排期的窗口' }}</template>
         </StatCard>
       </el-col>
-      <el-col :span="6">
+      <el-col :xs="12" :md="6">
         <StatCard title="累计抑制" :value="suppressedTotal" unit="次" :icon="Histogram" color="#8C8C8C" @click="tab = 'all'">
           <template #sub>已结束 {{ counts.EXPIRED ?? 0 }} 个 · 已取消 {{ counts.CANCELLED ?? 0 }} 个</template>
         </StatCard>
@@ -33,9 +30,9 @@
       <div class="section-title tl-title">
         <span>未来 7 天</span>
         <span class="legend"><i class="lg m" />维护窗口 <i class="lg s" />静默 <i class="lg now" />现在</span>
-        <span class="text-3 ml-auto">按平台时区显示；每周重复的窗口展开为具体时段</span>
+        <span class="text-3 ml-auto">平台时区 · 周期窗口已展开</span>
       </div>
-      <div v-if="!timeline.length" class="empty-dash">未来 7 天没有生效或待生效的维护窗口 / 静默</div>
+      <div v-if="!timeline.length" class="empty-dash">未来 7 天暂无维护或静默安排</div>
       <div v-else class="timeline">
         <div class="axis">
           <div class="label-col" />
@@ -61,13 +58,14 @@
     </div>
 
     <div class="hi-card">
-      <div class="table-toolbar">
+      <div class="table-toolbar table-heading">
         <el-radio-group v-model="tab">
           <el-radio-button v-for="t in TABS" :key="t.value" :value="t.value">{{ t.label }}<span class="cnt">{{ tabCount(t.value) }}</span></el-radio-button>
         </el-radio-group>
-        <div class="flex gap-12">
+        <div class="table-actions">
           <el-input v-model="keyword" clearable placeholder="名称 / 原因 / 创建人" :prefix-icon="Search" style="width: 240px" />
-          <el-link type="primary" :underline="false" @click="router.push({ path: '/alarms', query: { status_group: 'suppressed' } })">查看已抑制告警 →</el-link>
+          <el-link type="primary" underline="never" @click="router.push({ path: '/alarms', query: { status_group: 'suppressed' } })">查看已抑制告警 →</el-link>
+          <el-button v-if="canManage" type="primary" :icon="Plus" @click="openDialog(null)">新建维护窗口 / 静默</el-button>
         </div>
       </div>
 
@@ -137,13 +135,14 @@
 </template>
 
 <script setup lang="ts">
-import { AlarmClock, Calendar, Histogram, MuteNotification, Plus, Refresh, RefreshRight, Search } from '@element-plus/icons-vue'
+import { AlarmClock, Calendar, Histogram, MuteNotification, Plus, RefreshRight, Search } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { cancelSilence, listSilences, type SilenceTab } from '@/api'
 import PageHeader from '@/components/PageHeader.vue'
+import { useLatestRequest } from '@/composables/useLatestRequest'
 import StatCard from '@/components/StatCard.vue'
 import { useUserStore } from '@/stores/user'
 import type { Silence, SilenceStatus } from '@/types'
@@ -162,7 +161,8 @@ const TABS: { value: SilenceTab; label: string }[] = [
 ]
 const tab = ref<SilenceTab>('current')
 const keyword = ref('')
-const loading = ref(false)
+const listRequest = useLatestRequest()
+const loading = listRequest.loading
 const current = ref<Silence[]>([])          // 时间线始终用“当前”（生效中 + 周期等待 + 待生效）
 const tabItems = ref<Silence[]>([])
 const counts = ref<Partial<Record<SilenceStatus, number>>>({})
@@ -187,20 +187,12 @@ const nextWeekly = computed(() => current.value.filter((s) => s.status === 'WAIT
 const nextPending = computed(() => current.value.filter((s) => s.status === 'PENDING').sort((a, b) => a.starts_at.localeCompare(b.starts_at))[0])
 
 async function load() {
-  loading.value = true
+  const selected = tab.value
   now.value = dayjs()
-  try {
-    const cur = await listSilences('current')
-    current.value = cur.items
-    counts.value = cur.counts
-    if (tab.value !== 'current') tabItems.value = (await listSilences(tab.value)).items
-  } finally { loading.value = false }
+  return listRequest.run(() => Promise.all([listSilences('current'), selected === 'current' ? Promise.resolve(null) : listSilences(selected)]),
+    ([cur, selectedRows]) => { current.value = cur.items; counts.value = cur.counts; tabItems.value = selectedRows?.items ?? [] })
 }
-watch(tab, async (t) => {
-  if (t === 'current') return
-  loading.value = true
-  try { tabItems.value = (await listSilences(t)).items } finally { loading.value = false }
-})
+watch(tab, () => { void load().catch(() => undefined) })
 
 // ---- 时间线：今天 00:00 起 7 天 ----
 const axisStart = computed(() => now.value.startOf('day'))
@@ -338,4 +330,10 @@ onMounted(async () => {
 .ml-4 { margin-left: 4px; }
 .ico { vertical-align: -2px; margin-right: 4px; color: var(--el-color-primary); }
 :deep(.hl-row) { --el-table-tr-bg-color: #fff7e6; }
+@media (max-width: 767px) {
+  .tl-title { flex-wrap: wrap; gap: 8px; }
+  .timeline { overflow-x: auto; }
+  .timeline .axis, .timeline .tl-row { min-width: 680px; }
+  :deep(.el-row) { row-gap: 12px; }
+}
 </style>

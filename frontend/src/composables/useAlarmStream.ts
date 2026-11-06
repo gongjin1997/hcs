@@ -9,43 +9,52 @@ import type { AlarmPushEvent } from '@/types'
  * 登录令牌不会出现在 URL / Nginx 访问日志里。票据只能用一次，所以断线后不依赖 EventSource 自带的重连，
  * 而是关闭连接、退避（5s → 10s → … 最长 60s）后重新换票据再连；切换租户后调用 reopen()。
  */
-export function useAlarmStream(onEvent: (e: AlarmPushEvent) => void) {
+export function useAlarmStream(onEvent: (e: AlarmPushEvent) => void, enabled: () => boolean = () => true) {
   const connected = ref(false)
   let es: EventSource | null = null
   let timer: ReturnType<typeof setTimeout> | null = null
   let retry = 0
   let stopped = false
+  let generation = 0
 
   async function open() {
-    if (es || stopped || !localStorage.getItem(TOKEN_KEY)) return
+    if (es || stopped || !enabled() || !localStorage.getItem(TOKEN_KEY)) return
+    const current = generation
+    const tenant = localStorage.getItem(TENANT_KEY)
     let ticket: string
     try {
       ticket = (await streamTicket()).ticket
     } catch {
-      return schedule()                       // 未登录 / 无权限 / 网络异常：稍后再试（401 时请求层会跳转登录）
+      if (!stopped && current === generation) schedule()
+      return
     }
-    if (stopped || es) return
-    const tenant = localStorage.getItem(TENANT_KEY)
+    if (stopped || !enabled() || current !== generation || es) return
     const qs = new URLSearchParams({ ticket, ...(tenant ? { tenant } : {}) })
     const source = new EventSource(`/api/v1/stream/alarms?${qs}`)
     es = source
-    source.onopen = () => { connected.value = true; retry = 0 }
+    source.onopen = () => {
+      if (stopped || es !== source || current !== generation) return
+      connected.value = true; retry = 0
+    }
     source.onerror = () => {                  // 票据已用过，不能让 EventSource 用同一个 URL 重连
-      if (es !== source) return
+      if (stopped || es !== source || current !== generation) return
       source.close()
       es = null
       connected.value = false
       schedule()
     }
-    source.addEventListener('alarm', (m) => onEvent(JSON.parse((m as MessageEvent).data)))
+    source.addEventListener('alarm', (m) => {
+      if (!stopped && es === source && current === generation) onEvent(JSON.parse((m as MessageEvent).data))
+    })
   }
   function schedule() {
-    if (stopped || timer) return
+    if (stopped || !enabled() || timer) return
     const delay = Math.min(60, 5 * 2 ** retry) * 1000
     retry = Math.min(retry + 1, 4)
     timer = setTimeout(() => { timer = null; open() }, delay)
   }
   function close() {
+    generation++
     if (timer) { clearTimeout(timer); timer = null }
     es?.close()
     es = null

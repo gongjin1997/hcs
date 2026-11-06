@@ -10,7 +10,7 @@ import json
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 
-from app.core.deps import CurrentUser, require_perm, scope_of, user_from_ticket
+from app.core.deps import CurrentUser, refresh_session, require_perm, scope_of, user_from_ticket
 from app.core.events import broadcaster
 from app.core.response import BizError, ErrorCode, ok
 from app.core.security import SSE_TTL, create_sse_ticket
@@ -20,7 +20,8 @@ router = APIRouter(tags=["实时推送"])
 
 @router.post("/stream/ticket", summary="换取 SSE 一次性票据（60 秒内有效，只能使用一次）")
 def ticket(cu: CurrentUser = Depends(require_perm("alarm:view"))):
-    return ok({"ticket": create_sse_ticket(cu.username, cu.id), "expires_in": SSE_TTL})
+    return ok({"ticket": create_sse_ticket(cu.username, cu.id, cu.token_version, cu.token_id, cu.token_expires),
+               "expires_in": SSE_TTL})
 
 
 @router.get("/stream/alarms", summary="告警实时推送（SSE，按用户租户范围过滤）")
@@ -36,14 +37,24 @@ async def alarm_stream(request: Request, ticket: str = Query(..., description="P
         return scope.tenant_ids is None or (ev.get("alarm") or {}).get("tenant_id") in scope.tenant_ids
 
     async def gen():
+        nonlocal scope
         try:
             yield "retry: 5000\n\n"
             while not await request.is_disconnected():
                 try:
                     ev = await asyncio.wait_for(queue.get(), timeout=15)
-                    if visible(ev):
-                        yield f"event: alarm\ndata: {json.dumps(ev, ensure_ascii=False, default=str)}\n\n"
                 except TimeoutError:
+                    ev = None
+                try:
+                    current = await asyncio.to_thread(refresh_session, user)
+                    if not current.can("alarm:view"):
+                        break
+                    scope = scope_of(current, tenant)
+                except BizError:
+                    break
+                if ev is not None and visible(ev):
+                    yield f"event: alarm\ndata: {json.dumps(ev, ensure_ascii=False, default=str)}\n\n"
+                elif ev is None:
                     yield ": ping\n\n"        # 心跳，防止 Nginx / 负载均衡空闲断开
         finally:
             broadcaster.unsubscribe(queue)

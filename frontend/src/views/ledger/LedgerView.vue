@@ -1,15 +1,8 @@
 <template>
   <div class="ledger-page">
-    <PageHeader title="资源台账" desc="每小时自动从 HCS 同步各云服务资源，负责人 / 业务系统 / 环境 / 备注由运维维护；新增、变更、释放全部留痕">
-      <span v-if="summary?.last_sync" class="sync-info text-3">
-        <i :class="summary.last_sync.status === 'SUCCESS' ? 'ok' : 'warn'" />最近同步 {{ fromNow(summary.last_sync.started_at) }}
-        · {{ TASK_STATUS[summary.last_sync.status]?.label ?? summary.last_sync.status }}
-      </span>
-      <el-button :icon="Collection" @click="dictVisible = true">字典</el-button>
-      <el-button v-perm="'ledger:edit'" :icon="Upload" @click="importVisible = true">Excel 导入</el-button>
-      <el-button v-perm="'ledger:sync'" :icon="Refresh" :loading="syncing" @click="onSync">立即同步</el-button>
-      <el-button v-perm="'ledger:export'" type="primary" :icon="Download" :loading="exporting" @click="onExport">导出 Excel</el-button>
-    </PageHeader>
+    <PageHeader title="资源台账" :refresh="reload" :refreshing="loading" />
+    <el-alert v-if="scope.error.value || routeError" :title="scope.error.value || routeError" type="error" :closable="false" show-icon />
+    <template v-if="!scope.error.value && !routeError">
 
     <!-- 汇总 -->
     <div v-if="summary" class="sum-grid">
@@ -18,12 +11,12 @@
         <span class="s">{{ summary.type_count }} 类资源 · 核心 {{ summary.critical }} 个</span>
       </div>
       <div class="sum" @click="pickType('ecs_server')">
-        <span class="k">计算</span><b class="num">{{ summary.compute.vcpus }}<small>vCPU</small></b>
+        <span class="k">计算<span v-if="summary.capacity_coverage && summary.capacity_coverage.vcpus.known < summary.capacity_coverage.vcpus.total">（部分未知）</span></span><b class="num">{{ summary.compute.vcpus ?? '—' }}<small>vCPU</small></b>
         <span class="s">{{ summary.compute.ecs }} 台 ECS · 运行 {{ summary.ecs_status.ACTIVE ?? 0 }} · 关机 {{ summary.ecs_status.SHUTOFF ?? 0 }}<template v-if="summary.ecs_status.ERROR"> · <em class="err">故障 {{ summary.ecs_status.ERROR }}</em></template></span>
       </div>
       <div class="sum" @click="pickType('evs_volume')">
-        <span class="k">块存储</span><b class="num">{{ (summary.storage_gb / 1024).toFixed(1) }}<small>TB</small></b>
-        <span class="s">云硬盘合计 {{ summary.storage_gb.toLocaleString() }} GB</span>
+        <span class="k">块存储<span v-if="summary.capacity_coverage && summary.capacity_coverage.storage_gb.known < summary.capacity_coverage.storage_gb.total">（部分未知）</span></span><b class="num">{{ summary.storage_gb == null ? '—' : (summary.storage_gb / 1024).toFixed(1) }}<small>TB</small></b>
+        <span class="s">已知云硬盘容量 {{ summary.storage_gb?.toLocaleString() ?? '—' }} GB</span>
       </div>
       <div class="sum warn" :class="{ active: filters.owner === NONE }" @click="toggleUnassigned">
         <span class="k">未分配负责人</span><b class="num">{{ summary.unassigned }}<small>个</small></b>
@@ -64,6 +57,19 @@
       </aside>
 
       <section class="hi-card main">
+        <div class="table-toolbar table-heading">
+          <span v-if="summary?.last_sync" class="sync-info text-3">
+            <i :class="summary.last_sync.status === 'SUCCESS' ? 'ok' : 'warn'" />最近同步 {{ fromNow(summary.last_sync.started_at) }}
+            · {{ TASK_STATUS[summary.last_sync.status]?.label ?? summary.last_sync.status }}
+          </span>
+          <div class="table-actions">
+            <el-button :icon="Collection" @click="dictVisible = true">字典</el-button>
+            <el-button :icon="Collection" @click="classificationVisible = true">分类映射</el-button>
+            <el-button v-perm="'ledger:edit'" :icon="Upload" @click="importVisible = true">Excel 导入</el-button>
+            <el-button v-perm="'ledger:sync'" :icon="Refresh" :loading="syncing" @click="onSync">立即同步</el-button>
+            <el-button v-perm="'ledger:export'" type="primary" :icon="Download" :loading="exporting" @click="onExport">导出 Excel</el-button>
+          </div>
+        </div>
         <el-tabs v-model="tab" class="main-tabs">
           <el-tab-pane name="list">
             <template #label>资源清单 <span class="cnt">{{ total }}</span></template>
@@ -71,6 +77,9 @@
               <el-input v-model="filters.keyword" class="kw" clearable placeholder="名称 / IP / 资源 ID / 负责人 / 业务系统" :prefix-icon="Search" @keyup.enter="search" @clear="search" />
               <el-select v-model="filters.business" placeholder="业务系统" clearable filterable style="width: 140px" @change="search">
                 <el-option v-for="b in meta?.options.business ?? []" :key="b" :label="b" :value="b" />
+              </el-select>
+              <el-select v-model="filters.classification" placeholder="分类" clearable filterable style="width: 130px" @change="search">
+                <el-option v-for="category in classificationOptions" :key="category" :value="category" :label="category" />
               </el-select>
               <el-select v-model="filters.owner" placeholder="负责人" clearable filterable style="width: 130px" @change="search">
                 <el-option label="未分配" :value="NONE" />
@@ -103,6 +112,7 @@
               </el-table-column>
               <el-table-column v-if="app.multiTenant" label="租户" width="92"><template #default="{ row }"><TenantTag :id="row.tenant_id" /></template></el-table-column>
               <el-table-column v-if="sel.kind !== 'type'" label="类型" width="130"><template #default="{ row }">{{ typeName(row.resource_type) }}</template></el-table-column>
+              <el-table-column label="分类" width="100"><template #default="{ row }">{{ row.classification || classificationConfig?.fallback || '其他' }}</template></el-table-column>
               <el-table-column label="状态" width="96">
                 <template #default="{ row }">
                   <el-tag v-if="row.lifecycle === 'DELETED'" type="info" size="small" effect="dark">已释放</el-tag>
@@ -163,6 +173,7 @@
     <ResourceDrawer v-model="drawer.visible" :resource-id="drawer.id" :inspected-types="inspectedTypes"
                     :options="drawerOptions" :enforce="meta?.dict?.enforce" @saved="onSaved" />
     <LedgerDictDialog v-model:visible="dictVisible" @saved="reloadMeta" />
+    <LedgerClassificationDialog v-model:visible="classificationVisible" :resource-types="meta?.types ?? []" @saved="reloadClassifications" />
     <LedgerImportDialog v-model:visible="importVisible" :resource-type="sel.kind === 'type' ? sel.code : undefined"
                         :category="sel.kind === 'category' ? sel.code : sel.kind === 'all' ? 'ledger' : undefined"
                         :scope-text="importScope" @imported="onImported" />
@@ -178,6 +189,7 @@
         <el-table-column label="备注" prop="remark" min-width="160" show-overflow-tooltip />
       </el-table>
     </el-dialog>
+    </template>
   </div>
 </template>
 
@@ -186,17 +198,21 @@ import { Box, Coin, Collection, Connection, Cpu, DataAnalysis, Download, Files, 
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, markRaw, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { exportLedger, ledgerSummary, listResources, resourceMeta, syncLedger } from '@/api'
+import { exportLedger, getClassifications, ledgerSummary, listResources, resourceMeta, syncLedger } from '@/api'
 import HealthBadge from '@/components/HealthBadge.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import TenantTag from '@/components/TenantTag.vue'
 import { useAppStore } from '@/stores/app'
+import { useUserStore } from '@/stores/user'
+import { useResourceRouteScope } from '@/composables/useResourceRouteScope'
+import { positiveIdParam } from '@/config/resource-navigation'
 import { useTable } from '@/composables/useTable'
-import type { LedgerSummary, Resource, ResourceMeta } from '@/types'
+import type { ClassificationConfig, LedgerSummary, Resource, ResourceMeta } from '@/types'
 import { ENV_TYPE, HEALTH, IDLE_STATES, TASK_STATUS, rawStatusType, statusText, typeName, usageColor } from '@/utils/dict'
 import { fmtTime, fromNow } from '@/utils/format'
 import ChangeTable from './ChangeTable.vue'
 import LedgerDictDialog from './LedgerDictDialog.vue'
+import LedgerClassificationDialog from './LedgerClassificationDialog.vue'
 import LedgerImportDialog from './LedgerImportDialog.vue'
 import { MONITOR_COLUMNS, fmtValue, pick } from './columns'
 import ResourceDrawer from './ResourceDrawer.vue'
@@ -219,10 +235,18 @@ const catIcon = (c: string) => markRaw((ICONS[c] ?? Coin) as object)
 
 const route = useRoute()
 const router = useRouter()
+const scope = useResourceRouteScope({ query: () => route.query, app, viewer: useUserStore(), permission: 'ledger:view' })
+const routeError = computed(() => route.query.id != null && positiveIdParam(route.query.id) === null ? '资源链接无效' : '')
 const meta = ref<ResourceMeta | null>(null)
+const classificationConfig = ref<ClassificationConfig | null>(null)
+const classificationOptions = computed(() => [...new Set([
+  ...(meta.value?.classifications?.categories ?? classificationConfig.value?.categories ?? []),
+  ...(classificationConfig.value?.rules.filter(rule => rule.enabled).map(rule => rule.category) ?? []),
+  classificationConfig.value?.fallback ?? '其他',
+])])
 const summary = ref<LedgerSummary | null>(null)
 const tab = ref(route.query.tab === 'changes' ? 'changes' : 'list')
-const changeRef = ref<{ reload: () => void }>()
+const changeRef = ref<{ reload: () => Promise<void> }>()
 
 // ---- 分类选择：全部台账 / 某一分类 / 某一类型 ----
 type Sel = { kind: 'all' | 'category' | 'type'; code: string }
@@ -246,25 +270,31 @@ const typeColumns = computed(() => {
 
 // ---- 列表 ----
 const initStatus = typeof q.status === 'string' && q.status ? (q.status === 'OTHER' ? ECS_OTHER : q.status.split(',')) : []
-const filters = reactive({ keyword: typeof q.keyword === 'string' ? q.keyword : '', business: '', owner: q.unassigned === '1' ? NONE : '', env_type: '',
+const filters = reactive({ keyword: typeof q.keyword === 'string' ? q.keyword : '', classification: typeof q.classification === 'string' ? q.classification : '', business: '', owner: q.unassigned === '1' ? NONE : '', env_type: '',
   health: [] as string[], status: initStatus as string[], lifecycle: 'ACTIVE' as 'ACTIVE' | 'DELETED' | 'ALL', critical: false })
-const { page, size, total, rows, loading, load, search } = useTable<Resource, object>((p) => listResources({
+const { page, size, total, rows, loading, load, search } = useTable<Resource, object>(async (p) => {
+  if (routeError.value) return { items: [], total: 0, ...p }
+  return await scope.request('list', config => listResources({
   ...p,
   resource_type: sel.kind === 'type' ? sel.code : undefined,
   category: sel.kind === 'category' ? sel.code : sel.kind === 'all' ? 'ledger' : undefined,
   keyword: filters.keyword || undefined, business: filters.business || undefined, env_type: filters.env_type || undefined,
+  classification: filters.classification || undefined,
   owner: filters.owner && filters.owner !== NONE ? filters.owner : undefined, unassigned: filters.owner === NONE || undefined,
   health: selInspected.value && filters.health.length ? filters.health : undefined, lifecycle: filters.lifecycle,
   status: sel.kind === 'type' && sel.code === 'ecs_server' && filters.status.length ? filters.status : undefined,
   critical: filters.critical || undefined,
-}), {})
+  }, config)) ?? { items: [], total: 0, ...p }
+}, {})
 const rowClass = ({ row }: { row: Resource }) => (row.lifecycle === 'DELETED' ? 'deleted-row' : '')
 
 function syncQuery() {
   const query: Record<string, string> = {}
+  if (typeof route.query.tenant_id === 'string') query.tenant_id = route.query.tenant_id
   if (sel.kind === 'type') query.type = sel.code
   if (sel.kind === 'category') query.category = sel.code
   if (tab.value === 'changes') query.tab = 'changes'
+  if (filters.classification) query.classification = filters.classification
   router.replace({ query })
 }
 function select(s: Sel) {
@@ -279,7 +309,7 @@ const pickCategory = (code: string) => select({ kind: 'category', code })
 const pickType = (code: string) => select({ kind: 'type', code })
 function toggleUnassigned() { filters.owner = filters.owner === NONE ? '' : NONE; tab.value = 'list'; search() }
 function resetFilters() {
-  Object.assign(filters, { keyword: '', business: '', owner: '', env_type: '', health: [], status: [], lifecycle: 'ACTIVE', critical: false })
+  Object.assign(filters, { keyword: '', classification: '', business: '', owner: '', env_type: '', health: [], status: [], lifecycle: 'ACTIVE', critical: false })
   search()
 }
 watch(tab, syncQuery)
@@ -291,14 +321,24 @@ async function onSaved() { await Promise.all([load(), loadMeta()]); changeRef.va
 
 // ---- v0.4：台账字典 / Excel 导入 ----
 const dictVisible = ref(false)
+const classificationVisible = ref(false)
+async function loadClassifications() {
+  if (scope.error.value || routeError.value) return
+  const current = scope.key.value
+  try {
+    const result = await getClassifications()
+    if (current === scope.key.value && !scope.error.value) classificationConfig.value = result
+  } catch { /* 列表仍可使用类型元数据中的分类。 */ }
+}
+async function reloadClassifications() { await Promise.all([loadClassifications(), loadMeta(), load()]) }
 const importVisible = ref(false)
 const uniq = (a: string[], b: string[]) => [...new Set([...a, ...b])].sort((x, y) => x.localeCompare(y, 'zh-CN'))
-/** 资源详情下拉：字典取值 + 已在用的取值；开启“只能从字典选择”时只给字典取值 */
+/** 业务系统下拉：字典 + 已在用取值；负责人由详情按资源租户读取人员选项。 */
 const drawerOptions = computed(() => {
   const d = meta.value?.dict
   const o = meta.value?.options ?? { owner: [], business: [] }
-  if (!d) return o
-  return d.enforce ? { owner: d.owners, business: d.business } : { owner: uniq(d.owners, o.owner), business: uniq(d.business, o.business) }
+  if (!d) return { business: o.business }
+  return { business: d.enforce ? d.business : uniq(d.business, o.business) }
 })
 const importScope = computed(() => {
   if (sel.kind === 'type') return typeName(sel.code)
@@ -312,15 +352,26 @@ async function onImported() {
 }
 
 // ---- 汇总 / 同步 / 导出 ----
-const loadMeta = async () => { [meta.value, summary.value] = await Promise.all([resourceMeta(), ledgerSummary()]) }
+const loadMeta = async () => {
+  if (routeError.value) return
+  const result = await scope.request('meta', config => Promise.all([resourceMeta(config), ledgerSummary(config)]))
+  if (result) [meta.value, summary.value] = result
+}
+async function reload() {
+  await Promise.all([loadMeta(), loadClassifications(), tab.value === 'changes' ? changeRef.value?.reload() : load()])
+}
 const idleTotal = computed(() => (summary.value ? Object.values(summary.value.idle).reduce((a, b) => a + b, 0) : 0))
 const syncing = ref(false)
 async function onSync() {
-  const scope = sel.kind === 'type' && !isJob.value ? sel.code : undefined
-  await ElMessageBox.confirm(scope ? `立即从 HCS 同步「${typeName(scope)}」？` : '立即从 HCS 同步全部台账资源？（约 10~30 秒）', '立即同步', { type: 'info' })
+  if (scope.error.value || routeError.value) return
+  const current = scope.key.value
+  const resourceType = sel.kind === 'type' && !isJob.value ? sel.code : undefined
+  await ElMessageBox.confirm(resourceType ? `立即从 HCS 同步「${typeName(resourceType)}」？` : '立即从 HCS 同步全部台账资源？（约 10~30 秒）', '立即同步', { type: 'info' })
+  if (current !== scope.key.value || scope.error.value) return
   syncing.value = true
   try {
-    const r = await syncLedger(scope)
+    const r = await syncLedger(resourceType)
+    if (current !== scope.key.value || scope.error.value) return
     const st = r.stats as { created?: number; updated?: number; deleted?: number }
     ElMessage.success(`同步完成：${r.resource_total} 个资源，新增 ${st.created ?? 0} / 变更 ${st.updated ?? 0} / 释放 ${st.deleted ?? 0}`)
     await Promise.all([load(), loadMeta()])
@@ -331,8 +382,8 @@ const exporting = ref(false)
 async function onExport() {
   exporting.value = true
   try {
-    const name = await exportLedger(sel.kind === 'type' ? { resource_type: sel.code } : sel.kind === 'category' ? { category: sel.code } : {})
-    ElMessage.success(`已导出：${name}`)
+    const name = await scope.request('export', config => exportLedger({ ...(sel.kind === 'type' ? { resource_type: sel.code } : sel.kind === 'category' ? { category: sel.code } : {}), classification: filters.classification || undefined }, config))
+    if (name) ElMessage.success(`已导出：${name}`)
   } finally { exporting.value = false }
 }
 
@@ -344,22 +395,37 @@ watch(idleVisible, async (v) => {
   if (!v) return
   idleLoading.value = true
   try {
-    const res = await Promise.all(['evs_volume', 'eip', 'ecs_server'].map((t) => listResources({ resource_type: t, page_size: 500 })))
-    idleRows.value = res.flatMap((p) => p.items).filter((r) => r.status_raw && IDLE_STATES.includes(r.status_raw))
+    const res = await scope.request('idle', config => Promise.all(['evs_volume', 'eip', 'ecs_server'].map((t) => listResources({ resource_type: t, page_size: 500 }, config))))
+    if (res) idleRows.value = res.flatMap((p) => p.items).filter((r) => r.status_raw && IDLE_STATES.includes(r.status_raw))
   } finally { idleLoading.value = false }
 })
 
+function applyResourceRoute() {
+  const id = positiveIdParam(route.query.id)
+  if (scope.error.value || routeError.value) { drawer.visible = false; drawer.id = null; return }
+  if (id !== null) openDetail(id)
+  else { drawer.visible = false; drawer.id = null }
+}
 onMounted(async () => {
-  await Promise.all([loadMeta(), search()])
-  if (typeof route.query.id === 'string') openDetail(Number(route.query.id))
+  applyResourceRoute()
+  await Promise.all([loadMeta(), loadClassifications(), search()])
 })
 watch(() => route.query.keyword, (k) => { if (typeof k === 'string' && k !== filters.keyword) { filters.keyword = k; tab.value = 'list'; search() } })
-watch(() => route.query.id, (id) => { if (typeof id === 'string') openDetail(Number(id)) })
+watch(() => route.query.id, () => { applyResourceRoute(); void reload() })
+watch(scope.key, () => {
+  rows.value = []; total.value = 0; meta.value = null; summary.value = null; idleRows.value = []
+  drawer.visible = false; drawer.id = null; applyResourceRoute(); void reload()
+}, { flush: 'sync' })
+watch(() => [route.query.type, route.query.category], () => {
+  Object.assign(sel, typeof route.query.type === 'string' ? { kind: 'type', code: route.query.type }
+    : typeof route.query.category === 'string' ? { kind: 'category', code: route.query.category } : { kind: 'all', code: 'ledger' })
+  void search()
+})
 </script>
 
 <style scoped lang="scss">
-.sync-info { display: inline-flex; align-items: center; gap: 6px; margin-right: 8px;
-  i { width: 7px; height: 7px; border-radius: 50%; &.ok { background: var(--hi-ok); } &.warn { background: var(--hi-p2); } } }
+.sync-info { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; font-size: 12px;
+  i { flex: none; width: 7px; height: 7px; border-radius: 50%; &.ok { background: var(--hi-ok); } &.warn { background: var(--hi-p2); } } }
 .sum-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin-bottom: 16px;
   .sum { display: flex; flex-direction: column; gap: 4px; padding: 14px 16px; background: #fff; border: 1px solid var(--hi-border);
     border-radius: var(--hi-radius); cursor: pointer; transition: border-color 0.2s, box-shadow 0.2s; min-width: 0;
@@ -393,4 +459,13 @@ watch(() => route.query.id, (id) => { if (typeof id === 'string') openDetail(Num
 .idle-tip { margin: -6px 0 12px; line-height: 1.7; }
 :deep(.el-table__row) { cursor: pointer; }
 :deep(.deleted-row) { color: var(--hi-text-3); .name { text-decoration: line-through; font-weight: 500; } }
+@media (max-width: 767px) {
+  .sum-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .sum-grid .sum { min-width: 0; padding: 12px; }
+  .body { flex-direction: column; align-items: stretch; gap: 12px; }
+  .nav { width: auto; max-height: 200px; overflow: auto; position: static; }
+  .main { width: 100%; box-sizing: border-box; }
+  .main .table-heading { align-items: flex-start; }
+  .kw { width: 100% !important; }
+}
 </style>

@@ -4,9 +4,11 @@
 #       SKIP_BACKUP=1 scripts/upgrade.sh 0.4.1
 # 回退：scripts/rollback.sh <旧版本号> <升级前备份文件>（make rollback V= F=）
 source "$(dirname "$0")/common.sh"
+if [[ "${1:-}" == *.tar.gz ]]; then exec bash scripts/update-code.sh "$@"; fi
 need_docker; need_env
 old="$(env_get HCS_INSPECTOR_VERSION)"
 new="${1:-$old}"
+[ ! -f bundle.env ] || [ "$new" = "$old" ] || die "请先拷入 v$new 的完整离线包；当前 bundle.env 对应 v$old，不能只修改版本号"
 set_version() { sed -i "s/^HCS_INSPECTOR_VERSION=.*/HCS_INSPECTOR_VERSION=$1/" .env; }
 
 backup=""

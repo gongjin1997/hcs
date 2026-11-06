@@ -16,6 +16,11 @@
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { reactive, ref } from 'vue'
 import { changePassword } from '@/api'
+import { useUserStore } from '@/stores/user'
+import { useRouter } from 'vue-router'
+
+const user = useUserStore()
+const router = useRouter()
 
 defineProps<{ modelValue: boolean }>()
 const emit = defineEmits<{ 'update:modelValue': [boolean] }>()
@@ -29,12 +34,16 @@ const rules: FormRules = {
 }
 const reset = () => { Object.assign(form, { old: '', pwd: '', pwd2: '' }); formRef.value?.clearValidate() }
 async function submit() {
+  if (saving.value) return
   if (!(await formRef.value?.validate().catch(() => false))) return
+  if (saving.value) return
   saving.value = true
   try {
     await changePassword(form.old, form.pwd)
-    ElMessage.success('密码已修改')
+    user.clearSession()
+    ElMessage.success('密码已修改，请重新登录')
     emit('update:modelValue', false)
+    await router.replace('/login')
   } finally { saving.value = false }
 }
 </script>

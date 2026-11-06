@@ -1,7 +1,7 @@
 # HCS-Inspector 部署运维命令（在 deploy 目录执行；配置读取同目录 .env，compose 文件组合由 .env 的 COMPOSE_FILE 决定）
 # 首次：make gen-env → 修改 .env 必改项 → make install；升级：make upgrade V=0.4.1；日常：make status / make backup
 SHELL   := /bin/bash
-COMPOSE := docker compose
+COMPOSE := bash -c 'source scripts/common.sh; dc "$$@"' --
 S       ?=
 V       ?=
 F       ?=
@@ -9,7 +9,7 @@ TENANT  ?=
 ONLY    ?=
 LIMIT   ?= 5
 
-.PHONY: help gen-env install upgrade rollback status ps logs restart up down reload-web backup restore migrate probe probe-list shell psql bundle config
+.PHONY: help gen-env install upgrade rollback status ps logs restart up down reload-web backup restore migrate probe probe-list shell psql bundle code-bundle config
 
 help:            ## 显示帮助
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  \033[36m%-11s\033[0m %s\n", $$1, $$2}'
@@ -17,11 +17,11 @@ help:            ## 显示帮助
 gen-env:         ## 由 .env.example 生成 .env（随机密钥 / 口令）；已有 .env 时拒绝覆盖
 	scripts/gen-env.sh
 
-install:         ## 首次安装：环境检查 → 镜像（离线包 / 已有 / 源码构建）→ 迁移 + 初始化 → 启动 → 健康检查（可重复执行）
-	scripts/install.sh
+install:         ## 正式环境一键安装：保留现有配置和数据；新装自动生成 .env
+	bash deploy.sh
 
-upgrade:         ## 升级：备份 → 新版本先迁移数据库 → 替换进程 → 健康检查，例：make upgrade V=0.4.1
-	scripts/upgrade.sh $(V)
+upgrade:         ## 更新代码（复用镜像）：make upgrade F=代码包.tar.gz
+	bash deploy.sh update "$(F)"
 
 rollback:        ## 回退到升级前：改回旧版本号 → 用升级前备份恢复数据库 → 启动旧版本，例：make rollback V=0.4.0 F=backups/xxx.tar.gz
 	scripts/rollback.sh "$(V)" "$(F)"
@@ -75,5 +75,8 @@ psql:            ## 连接数据库（只读排查；修改数据前先 make bac
 config:          ## 打印合并后的 compose 配置（核对 COMPOSE_FILE / 端口 / 镜像版本；输出含密钥，勿外发）
 	$(COMPOSE) config
 
-bundle:          ## 构建机：打离线安装包 dist/hcs-inspector-<版本>-offline.tar.gz（加 DEMO=1 带 mailpit）
-	scripts/offline-bundle.sh $(if $(DEMO),--with-demo)
+bundle:          ## 构建机：打 ARM64 正式离线包（PLATFORM=linux/amd64 可切架构）
+	bash scripts/offline-bundle.sh $(if $(PLATFORM),--platform $(PLATFORM))
+
+code-bundle:     ## 构建机：仅生成业务代码包，不导出镜像
+	sh scripts/code-bundle.sh

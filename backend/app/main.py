@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
@@ -16,7 +16,7 @@ from app.api.router import api_router
 from app.core.config import ensure_prod_ready, get_settings
 from app.core.db import Base, SessionLocal, engine
 from app.core.events import broadcaster, redis_forwarder
-from app.core.logging import RequestIdMiddleware, setup_logging
+from app.core.logging import RequestIdMiddleware, bind_log_context, setup_logging
 from app.core.response import BizError, ErrorCode
 
 log = logging.getLogger(__name__)
@@ -28,10 +28,11 @@ def _err(status: int, code: int, message: str, data=None) -> JSONResponse:
 
 def create_app() -> FastAPI:
     settings = get_settings()
-    setup_logging()
+    setup_logging(service="api")
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        log.info("service.starting", extra={"version": __version__, "environment": settings.env})
         ensure_prod_ready(settings)
         if settings.env != "prod":
             Base.metadata.create_all(engine)     # 开发便捷；生产环境使用 alembic upgrade head
@@ -44,34 +45,58 @@ def create_app() -> FastAPI:
                     log.info("demo data seeded")
         broadcaster.bind_loop(asyncio.get_running_loop())
         forwarder = asyncio.create_task(redis_forwarder()) if settings.redis_url else None
-        yield
-        if forwarder:
-            forwarder.cancel()
+        try:
+            log.info("service.ready", extra={"version": __version__, "redis_enabled": bool(settings.redis_url)})
+            yield
+        finally:
+            if forwarder:
+                forwarder.cancel()
+                with suppress(asyncio.CancelledError):
+                    await forwarder
+            log.info("service.stopped")
 
     app = FastAPI(title="HCS 巡检平台 API", version=__version__, lifespan=lifespan, docs_url="/api/docs",
                   openapi_url="/api/openapi.json", redoc_url=None)
     app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_credentials=True,
-                       allow_methods=["*"], allow_headers=["*"])
+                       allow_methods=["*"], allow_headers=["*"], expose_headers=["X-Request-Id"])
     app.add_middleware(RequestIdMiddleware)
+
+    @app.middleware("http")
+    async def docs_csp(request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path == "/api/docs":
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+                "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+                "img-src 'self' data: https://fastapi.tiangolo.com; object-src 'none'; frame-ancestors 'none'")
+        return response
 
     @app.exception_handler(BizError)
     async def biz_error(_: Request, e: BizError):
+        bind_log_context(error_code=e.code, error_type=type(e).__name__)
         return _err(e.http_status, e.code, e.message, e.data)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(_: Request, e: RequestValidationError):
+        bind_log_context(error_code=ErrorCode.BAD_REQUEST, error_type="RequestValidationError")
         return _err(400, ErrorCode.BAD_REQUEST, "参数校验失败", e.errors())
 
     @app.exception_handler(StarletteHTTPException)
     async def http_error(_: Request, e: StarletteHTTPException):
+        bind_log_context(error_type="HTTPException")
         code = {401: ErrorCode.UNAUTHORIZED, 403: ErrorCode.FORBIDDEN, 404: ErrorCode.NOT_FOUND}.get(
             e.status_code, ErrorCode.BAD_REQUEST if e.status_code < 500 else ErrorCode.INTERNAL)
         return _err(e.status_code, code, str(e.detail))
 
     @app.exception_handler(Exception)
     async def unhandled(request: Request, e: Exception):
-        log.exception("unhandled error", extra={"request_id": getattr(request.state, "request_id", None)})
-        return _err(500, ErrorCode.INTERNAL, "服务器内部错误", {"request_id": getattr(request.state, "request_id", None)})
+        rid = getattr(request.state, "request_id", None)
+        if not getattr(request.state, "request_error_logged", False):
+            log.error("request.failed", exc_info=(type(e), e, e.__traceback__), extra={"request_id": rid})
+        response = _err(500, ErrorCode.INTERNAL, "服务器内部错误", {"request_id": rid})
+        if rid:
+            response.headers["X-Request-Id"] = rid
+        return response
 
     app.include_router(api_router)
     app.include_router(metrics_router)

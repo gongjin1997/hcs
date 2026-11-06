@@ -1,6 +1,6 @@
 <template>
-  <el-dialog :model-value="visible" :title="title" width="860px" top="6vh" append-to-body destroy-on-close class="silence-dialog" @close="emit('update:visible', false)">
-    <el-form ref="formRef" :model="f" label-width="96px" :rules="rules">
+  <el-dialog :model-value="visible" :title="title" width="860px" top="6vh" append-to-body destroy-on-close class="silence-dialog" :close-on-click-modal="!saving" :close-on-press-escape="!saving" :show-close="!saving" @close="emit('update:visible', false)">
+    <el-form ref="formRef" :model="f" :disabled="saving" label-width="96px" :rules="rules">
       <el-form-item label="类型">
         <el-radio-group v-model="f.kind">
           <el-radio-button v-for="(k, code) in SILENCE_KIND" :key="code" :value="code">{{ k.label }}</el-radio-button>
@@ -132,7 +132,8 @@
 import { Clock, View } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onScopeDispose, reactive, ref, watch } from 'vue'
+import { useLatestRequest } from '@/composables/useLatestRequest'
 import { createSilence, getResource, listResources, listRules, previewSilence, updateSilence } from '@/api'
 import SeverityTag from '@/components/SeverityTag.vue'
 import StatusTag from '@/components/StatusTag.vue'
@@ -165,7 +166,11 @@ const typeOptions = computed(() => Object.entries(RESOURCE_TYPES).map(([code, na
   .filter((t) => !m.services.length || m.services.some((s) => t.code.startsWith(s === 'dataarts' ? 'dgc' : s === 'dms' ? 'kafka' : s === 'vpc' ? 'vpc' : s) || (s === 'vpc' && t.code === 'eip'))))
 const ruleOptions = ref<Rule[]>([])
 const resourceOptions = ref<Pick<Resource, 'id' | 'name' | 'resource_type' | 'ip'>[]>([])
-const searching = ref(false)
+const searchRequest = useLatestRequest()
+const preloadRequest = useLatestRequest()
+const searching = searchRequest.loading
+let session = 0
+let disposed = false
 
 /** 快捷时间 */
 const at = (d: dayjs.Dayjs, hm: string) => d.hour(Number(hm.slice(0, 2))).minute(Number(hm.slice(3))).second(0).millisecond(0)
@@ -201,28 +206,36 @@ const hasMatcher = computed(() => Object.keys(matchers.value).length > 0)
 const pv = ref<SilencePreview | null>(null)
 const pvError = ref('')
 const danger = computed(() => !!pv.value && (pv.value.by_severity.P1 > 0 || pv.value.critical > 0))
+const previewRequest = useLatestRequest()
 let timer: ReturnType<typeof setTimeout> | undefined
-watch(matchers, () => {
+watch([matchers, () => props.visible], () => {
   clearTimeout(timer)
+  previewRequest.invalidate()
   pv.value = null
   pvError.value = ''
   if (!hasMatcher.value || !props.visible) return
-  timer = setTimeout(async () => {
-    try { pv.value = await previewSilence(matchers.value) } catch (e) { pvError.value = (e as Error).message }
+  const snapshot = structuredClone(matchers.value)
+  timer = setTimeout(() => {
+    void previewRequest.run(() => previewSilence(snapshot), value => { pv.value = value })
+      .catch(error => { pvError.value = error instanceof Error ? error.message : '影响预估失败' })
   }, 350)
-}, { deep: true })
+}, { deep: true, flush: 'sync' })
+onScopeDispose(() => { disposed = true; session++; clearTimeout(timer) })
 
 async function searchResource(q: string) {
+  searchRequest.invalidate()
   if (!q.trim()) return
-  searching.value = true
-  try {
-    const page = await listResources({ keyword: q.trim(), page: 1, page_size: 20 })
-    const chosen = resourceOptions.value.filter((r) => m.resource_refs.includes(r.id))
-    resourceOptions.value = [...chosen, ...page.items.filter((r) => !m.resource_refs.includes(r.id))]
-  } finally { searching.value = false }
+  const keyword = q.trim()
+  return searchRequest.run(() => listResources({ keyword, page: 1, page_size: 20 }), page => {
+    const chosen = resourceOptions.value.filter(resource => m.resource_refs.includes(resource.id))
+    resourceOptions.value = [...chosen, ...page.items.filter(resource => !m.resource_refs.includes(resource.id))]
+  }).catch(() => undefined)
 }
 
 function reset() {
+  searchRequest.invalidate()
+  preloadRequest.invalidate()
+  resourceOptions.value = []
   const s = props.silence
   const p = props.preset
   f.kind = s?.kind ?? (p?.kind as SilenceKind) ?? 'MAINTENANCE'
@@ -243,44 +256,67 @@ function reset() {
   }
   pv.value = null
   if (m.resource_refs.length) {
-    Promise.all(m.resource_refs.slice(0, 20).map((id) => getResource(id).then((d) => d.resource).catch(() => null)))
-      .then((rows) => { resourceOptions.value = rows.filter((r): r is Resource => !!r) })
+    void preloadRequest.run(() => Promise.all(m.resource_refs.slice(0, 20).map(id => getResource(id).then(detail => detail.resource).catch(() => null))),
+      rows => { resourceOptions.value = rows.filter((resource): resource is Resource => !!resource) }).catch(() => undefined)
   }
 }
 watch(() => props.visible, async (v) => {
-  if (!v) return
+  session++
+  if (!v) {
+    clearTimeout(timer)
+    previewRequest.invalidate()
+    searchRequest.invalidate()
+    preloadRequest.invalidate()
+    return
+  }
   reset()
-  if (!ruleOptions.value.length) ruleOptions.value = await listRules()
-  if (hasMatcher.value) pv.value = await previewSilence(matchers.value).catch(() => null)
+  if (!ruleOptions.value.length) {
+    const current = session
+    try { const rows = await listRules(); if (!disposed && current === session) ruleOptions.value = rows } catch { /* 请求层提示。 */ }
+  }
 }, { immediate: true })
 
 async function submit() {
-  await formRef.value?.validate()
-  if (!hasMatcher.value) return ElMessage.warning('至少需要一个匹配条件（例如租户、服务、资源或规则），防止误把全部告警静默')
-  let body: SilenceIn
-  if (mode.value === 'once') {
-    const [s, e] = range.value
-    if (!dayjs(e).isAfter(dayjs(s))) return ElMessage.warning('结束时间需要晚于开始时间')
-    body = { name: f.name.trim(), kind: f.kind, matchers: matchers.value, reason: f.reason, starts_at: dayjs(s).format(), ends_at: dayjs(e).format(), recurrence: null }
-  } else {
-    if (!weekly.weekdays.length || !weekly.start || !weekly.end) return ElMessage.warning('请选择星期和时段')
-    body = {
-      name: f.name.trim(), kind: f.kind, matchers: matchers.value, reason: f.reason,
-      starts_at: dayjs(valid.value[0]).startOf('day').format(), ends_at: dayjs(valid.value[1]).endOf('day').format(),
-      recurrence: { weekdays: [...weekly.weekdays].sort(), start: weekly.start, end: weekly.end },
-    }
-  }
-  if (danger.value && !editing.value) {
-    await ElMessageBox.confirm(`当前会命中 ${pv.value!.total} 条活动告警，其中包含 P1 告警或核心资源。确认继续？`, '范围确认',
-      { type: 'warning', confirmButtonText: '确认创建', cancelButtonText: '再检查一下' })
-  }
+  if (saving.value || !props.visible || disposed) return
+  const current = session
+  const id = editing.value ? props.silence!.id : null
+  const tenantId = app.tenantId
   saving.value = true
+  clearTimeout(timer)
+  previewRequest.invalidate()
   try {
-    const res = editing.value ? await updateSilence(props.silence!.id, body) : await createSilence(body)
+    if (!await formRef.value?.validate().catch(() => false)) return
+    if (!hasMatcher.value) return ElMessage.warning('至少需要一个匹配条件')
+    let body: SilenceIn
+    if (mode.value === 'once') {
+      const [start, end] = range.value
+      if (!dayjs(end).isAfter(dayjs(start))) return ElMessage.warning('结束时间需要晚于开始时间')
+      body = { name: f.name.trim(), kind: f.kind, matchers: matchers.value, reason: f.reason,
+        starts_at: dayjs(start).format(), ends_at: dayjs(end).format(), recurrence: null }
+    } else {
+      if (!weekly.weekdays.length || !weekly.start || !weekly.end) return ElMessage.warning('请选择星期和时段')
+      body = { name: f.name.trim(), kind: f.kind, matchers: matchers.value, reason: f.reason,
+        starts_at: dayjs(valid.value[0]).startOf('day').format(), ends_at: dayjs(valid.value[1]).endOf('day').format(),
+        recurrence: { weekdays: [...weekly.weekdays].sort(), start: weekly.start, end: weekly.end } }
+    }
+    const impact = await previewSilence(body.matchers)
+    if (disposed || session !== current || !props.visible || tenantId !== app.tenantId) return
+    pv.value = impact
+    if (impact.by_severity.P1 > 0 || impact.critical > 0) {
+      await ElMessageBox.confirm(`当前会命中 ${impact.total} 条活动告警，其中包含 P1 告警或核心资源。确认继续？`, '范围确认',
+        { type: 'warning', confirmButtonText: id ? '确认保存' : '确认创建', cancelButtonText: '再检查一下' })
+    }
+    if (disposed || session !== current || !props.visible || tenantId !== app.tenantId) return
+    const res = id == null ? await createSilence(body) : await updateSilence(id, body)
+    if (disposed || session !== current) return
     const extra = 'released' in res && res.released ? `，${res.released} 条告警已解除抑制并补发通知` : ''
-    ElMessage.success(`${editing.value ? '已保存' : '已创建'}${res.suppressed ? `，立即抑制 ${res.suppressed} 条告警` : ''}${extra}`)
+    ElMessage.success(`${id == null ? '已创建' : '已保存'}${res.suppressed ? `，立即抑制 ${res.suppressed} 条告警` : ''}${extra}`)
     emit('saved', res)
     emit('update:visible', false)
+  } catch (error) {
+    if (!disposed && session === current && error !== 'cancel' && error !== 'close') {
+      pvError.value = error instanceof Error ? error.message : '保存失败'
+    }
   } finally { saving.value = false }
 }
 </script>

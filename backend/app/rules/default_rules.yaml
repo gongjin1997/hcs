@@ -27,7 +27,7 @@
   kind: state
   expr: {when: "status == 'STARTING' and status_duration_min > 10", severity: P2,
          title: "作业启动中已持续 {status_duration_min} 分钟"}
-  recover: {when: "status != 'STARTING'"}
+  recover: {when: "status in ('NORMAL', 'EXCEPTION', 'STOPPING', 'STOPPED')"}
   runbook: 检查资源队列是否不足、MRS / DLI 集群是否可用，必要时停止后重新提交。
 - id: R-DGC-RT-004
   name: 实时作业长时间停止中
@@ -36,7 +36,7 @@
   kind: state
   expr: {when: "status == 'STOPPING' and status_duration_min > 10", severity: P3,
          title: "作业停止中已持续 {status_duration_min} 分钟"}
-  recover: {when: "status != 'STOPPING'"}
+  recover: {when: "status in ('STARTING', 'NORMAL', 'EXCEPTION', 'STOPPED')"}
   runbook: |
     1. 在 DataArts Studio 运维调度中查看作业停止进度，确认是否卡在 Checkpoint / Savepoint 或下游写入阻塞；
     2. 超过 30 分钟仍未停止时，先确认业务影响再选择强制停止；
@@ -70,7 +70,7 @@
   kind: state
   expr: {when: "last_status == 'running-exception'", severity: P2, value_field: last_status,
          title: "批作业运行异常（running-exception）"}
-  recover: {when: "last_status != 'running-exception'"}
+  recover: {when: "last_status in ('waiting', 'running', 'success', 'fail', 'pause', 'manual-stop')"}
   runbook: |
     1. 在运维调度 → 实例监控中打开该实例，查看失败节点的日志；
     2. 确认上游依赖与数据源连通性，排查 SQL / 脚本报错；
@@ -82,11 +82,19 @@
   kind: state
   expr: {when: "last_status == 'running' and run_minutes > max(p90_minutes * 2, p90_minutes + 30, 30)",
          severity: P2, value_field: run_minutes, title: "批作业已运行 {run_minutes} 分钟，超过基线"}
-  recover: {when: "last_status != 'running'"}
+  recover: {when: "last_status in ('waiting', 'success', 'fail', 'running-exception', 'pause', 'manual-stop')"}
   runbook: |
-    1. 对比该作业近 7 天运行时长（P90），确认是否数据量突增或资源队列拥塞；
-    2. 查看当前运行节点是否卡在等待锁 / 等待资源，必要时联系数据库或队列管理员；
-    3. 影响下游时间窗时，评估终止后重跑或通知下游延后。
+    1. 基线仅取本轮完整24h实例列表。
+       按workspace和jobName隔离。
+       仅success且毫秒起止有效，instanceId独立。
+       按nearest-rank计算P90，不预先取整。
+    2. 最少5条是本地策略；
+       用p90_min_samples调整。
+       不足不判定超时。
+       不使用上游p90_minutes扩展；
+       不使用executeTime猜单位。
+    3. 检查当前节点日志、锁与资源队列。
+       核对24h真实样本和下游时间窗。
 - id: R-MRS-CLU-001
   name: MRS 集群状态异常
   resource_type: mrs_cluster
@@ -118,7 +126,7 @@
   kind: state
   expr: {when: "job_state == 'FAILED' or job_result == 'FAILED'", severity: P2, critical_severity: P1,
          value_field: job_result, title: "作业执行失败（{job_result}）"}
-  recover: {when: "job_result == 'SUCCEEDED'"}
+  recover: {when: "job_state in ('FINISHED', 'SUCCEEDED') and job_result == 'SUCCEEDED'"}
   runbook: 通过 MRS Manager / Yarn 查看 application 日志；资源不足时调整队列配额后重新提交。
 - id: R-MRS-JOB-003
   name: MRS 作业排队超时
@@ -127,7 +135,7 @@
   kind: state
   expr: {when: "job_state == 'ACCEPTED' and status_duration_min > 15", severity: P3, value_field: job_state,
          title: "作业排队已 {status_duration_min} 分钟"}
-  recover: {when: "job_state != 'ACCEPTED'"}
+  recover: {when: "job_state in ('RUNNING', 'FINISHED', 'FAILED', 'SUCCEEDED', 'KILLED')"}
   runbook: |
     1. 在 YARN ResourceManager 查看作业所在队列的资源使用率与排队作业数；
     2. 资源不足时与业务协商错峰运行，或临时调整队列容量；
@@ -151,6 +159,22 @@
     1. 实例冻结通常由欠费、配额或管理员操作导致，先在 HCS 运营面确认冻结原因；
     2. 联系租户管理员处理后解冻，确认实例状态恢复为 ACTIVE；
     3. 解冻后检查业务连接与主备同步状态。
+- id: R-GS-009
+  name: GaussDB 实例创建失败
+  resource_type: gaussdb_instance
+  check_item: instance_status
+  kind: state
+  expr: {when: "status == 'BUILD_FAILED'", severity: P2, title: "实例创建失败（BUILD_FAILED）"}
+  recover: {when: "status == 'ACTIVE'"}
+  runbook: 查看实例创建任务及失败原因，核对配额、规格与网络条件；由数据库管理员确认后续处置。
+- id: R-GS-010
+  name: GaussDB 实例非预期停止
+  resource_type: gaussdb_instance
+  check_item: instance_status
+  kind: state
+  expr: {when: "status == 'SHUTDOWN' and expected_running", severity: P2, title: "实例非预期停止（SHUTDOWN）"}
+  recover: {when: "status == 'ACTIVE' or not expected_running"}
+  runbook: 核对是否为计划停机；非计划停止时联系数据库管理员检查实例任务和业务连接。
 - id: R-GS-006
   name: GaussDB 磁盘使用率过高
   resource_type: gaussdb_instance
@@ -275,11 +299,11 @@
     levels: [{severity: P2, op: ">=", threshold: 90}, {severity: P3, op: ">=", threshold: 80}]
   for_count: 3
   recover: {below: 70}
-# ---------------- ECS 云服务器（任务 ecs_status；使用率类规则需要 CES 或 Prometheus 指标，没有指标时不评估） ----------------
   runbook: |
     1. 使用 client list 查看连接来源，确认是否有客户端连接泄漏或连接池配置过大；
     2. 通知相关业务调整连接池（最大连接数、空闲回收）；
     3. 确有业务增长时评估调大 maxclients 或扩容实例。
+# ---------------- ECS 云服务器（任务 ecs_status；使用率类规则需要 CES 或 Prometheus 指标，没有指标时不评估） ----------------
 - id: R-ECS-001
   name: ECS 实例故障
   resource_type: ecs_server

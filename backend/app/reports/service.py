@@ -3,17 +3,21 @@ import logging
 from collections.abc import Callable
 from datetime import date
 from email.message import EmailMessage
+from time import perf_counter
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.core.logging import log_context
 from app.core.response import BizError, ErrorCode
 from app.models import HcsAccount, Report
 from app.models.base import utcnow
 from app.notify.render import env
 from app.notify.smtp import build_message
 from app.notify.smtp import send as smtp_send
+from app.services import mail_settings_service
+from app.services.recipients import emails_for_users, ids_for_emails, validate_user_ids
 
 from .builder import KINDS, build_report, period_of, summary_of
 from .excel import report_workbook
@@ -25,6 +29,22 @@ log = logging.getLogger(__name__)
 def generate(db: Session, kind: str, ref: date | None = None, created_by: str = "system",
              tenant_id: int | None = None) -> Report:
     """tenant_id 为空 = 全部租户合并统计（含分租户对比）；否则只统计该租户。"""
+    with log_context(task="report_generate", report_kind=kind, tenant_id=tenant_id):
+        started = perf_counter()
+        log.info("report_generation_started", extra={"event": "report_generation_started"})
+        try:
+            report = _generate(db, kind, ref, created_by, tenant_id)
+        except Exception as exc:
+            log.warning("report_generation_failed", extra={"event": "report_generation_failed",
+                        "exception_type": type(exc).__name__, "cost_ms": round((perf_counter() - started) * 1000, 2)},
+                        exc_info=(RuntimeError, RuntimeError(type(exc).__name__), exc.__traceback__))
+            raise
+        log.info("report_generation_finished", extra={"event": "report_generation_finished", "report_id": report.id,
+                 "cost_ms": round((perf_counter() - started) * 1000, 2)})
+        return report
+
+
+def _generate(db: Session, kind: str, ref: date | None, created_by: str, tenant_id: int | None) -> Report:
     if kind not in KINDS:
         raise BizError(ErrorCode.BAD_REQUEST, f"未知报表类型：{kind}")
     if tenant_id is not None and db.get(HcsAccount, tenant_id) is None:
@@ -40,35 +60,67 @@ def generate(db: Session, kind: str, ref: date | None = None, created_by: str = 
         db.add(rpt)
     rpt.title, rpt.data, rpt.summary = data["title"], data, summary_of(data)
     rpt.created_by, rpt.created_at = created_by, utcnow()
+    rpt.sent_to, rpt.sent_at, rpt.send_error = [], None, None
     db.commit()
     return rpt
 
 
 def render_mail(report: Report) -> tuple[str, str, str]:
     s = get_settings()
-    ctx = {"r": report.data, "link": f"{s.base_url}/reports?id={report.id}", "env_tag": s.env_tag}
-    subject = f"【{s.env_tag}】{report.title}"
-    return subject, env.get_template("report.html.j2").render(**ctx), env.get_template("report.txt.j2").render(**ctx)
+    ctx = {"r": report.data, "link": f"{s.base_url}/reports?id={report.id}"}
+    return report.title, env.get_template("report.html.j2").render(**ctx), env.get_template("report.txt.j2").render(**ctx)
 
 
-def default_recipients(db: Session, report: Report) -> list[str]:
-    """租户报表发给租户配置的收件人（未配置时不发送）；合并报表发给“报表设置”里的收件人（未设置时取 REPORT_MAIL_TO）。"""
+def default_recipient_user_ids(db: Session, report: Report) -> list[int]:
+    """报表只使用用户引用；0009 已迁移租户旧邮箱，空 ID 列表明确表示不发送。"""
     from app.services.settings_service import get_report
 
     if report.tenant_id is not None:
         t = db.get(HcsAccount, report.tenant_id)
-        return list(t.report_mail_to) if t is not None and t.report_mail_to else []
-    return list(get_report(db).mail_to)
+        if t is None:
+            return []
+        return list(t.report_user_ids)
+    return list(get_report(db).recipient_user_ids)
+
+
+def default_recipients(db: Session, report: Report) -> list[str]:
+    return emails_for_users(db, default_recipient_user_ids(db, report), tenant_id=report.tenant_id)
 
 
 def send_report(db: Session, report: Report, to: list[str] | None = None,
-                sender: Callable[[EmailMessage], None] | None = None) -> list[str]:
-    recipients = [x.strip() for x in (to or default_recipients(db, report)) if x and x.strip()]
+                sender: Callable[[EmailMessage], None] | None = None, *,
+                recipient_user_ids: list[int] | None = None) -> list[str]:
+    with log_context(task="report_send", report_id=report.id, report_kind=report.kind, tenant_id=report.tenant_id):
+        started = perf_counter()
+        try:
+            recipients = _send_report(db, report, to, sender, recipient_user_ids=recipient_user_ids)
+        except Exception as exc:
+            log.warning("report_delivery_failed", extra={"event": "report_delivery_failed",
+                        "exception_type": type(exc).__name__, "cost_ms": round((perf_counter() - started) * 1000, 2)},
+                        exc_info=(RuntimeError, RuntimeError(type(exc).__name__), exc.__traceback__))
+            raise
+        log.info("report_delivery_finished", extra={"event": "report_delivery_finished", "recipient_count": len(recipients),
+                 "cost_ms": round((perf_counter() - started) * 1000, 2)})
+        return recipients
+
+
+def _send_report(db: Session, report: Report, to: list[str] | None,
+                 sender: Callable[[EmailMessage], None] | None, *,
+                 recipient_user_ids: list[int] | None = None) -> list[str]:
+    if recipient_user_ids is not None:
+        ids = validate_user_ids(db, recipient_user_ids, tenant_id=report.tenant_id)
+    elif to is not None:
+        ids = validate_user_ids(db, ids_for_emails(db, to, tenant_id=report.tenant_id), tenant_id=report.tenant_id)
+    else:
+        ids = default_recipient_user_ids(db, report)
+    recipients = emails_for_users(db, ids, tenant_id=report.tenant_id)
     if not recipients:
-        raise BizError(ErrorCode.BAD_REQUEST, "未指定收件人：租户报表请在租户接入里配置报表收件人，合并报表请在报表设置里配置")
+        raise BizError(ErrorCode.BAD_REQUEST, "未指定可用收件人：请在用户管理中维护启用、通知、邮箱及租户范围，"
+                       "并在租户接入或报表设置里选择人员")
     subject, html, text = render_mail(report)
     msg = build_message(subject=subject, html=html, text=text, recipients=recipients,
-                        message_id=f"<report-{report.id}-{int(utcnow().timestamp())}@hcs-inspector>")
+                        message_id=f"<report-{report.id}-{int(utcnow().timestamp())}@hcs-inspector>",
+                        settings=mail_settings_service.get(db).smtp)
     msg.add_attachment(report_workbook(db, report.data), maintype=XLSX[0], subtype=XLSX[1],
                        filename=f"{report.title}.xlsx")
     try:
@@ -91,6 +143,7 @@ def scheduled(db: Session, kind: str) -> list[Report]:
         if default_recipients(db, rpt):
             try:
                 send_report(db, rpt)
-            except BizError as e:
-                log.error("report %s send failed: %s", rpt.id, e.message)
+            except BizError:
+                # send_report 已记录带 report_id/tenant_id 的安全异常栈；此处不重复打印摘要或正文。
+                continue
     return out

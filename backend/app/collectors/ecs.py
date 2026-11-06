@@ -2,20 +2,18 @@
 
 1. 实例状态：GET /v1/{project_id}/cloudservers/detail（HCS 8.5.1 ECS 接口）——status、OS-EXT-STS:task_state / power_state。
    状态变化由流水线写入台账变更（类型“状态变更”），资源详情里能看到“几点几分从运行中变为关机”
-2. 资源使用率（可选，来源见 app.metrics）：CES（cpu_util；内存 / 磁盘需安装 CES Agent）或 Prometheus（node_exporter）
-3. 重启：轮询时看到 REBOOT / HARD_REBOOT 记一次；接了 Prometheus 时开机时间（node_boot_time_seconds）变化也记一次，
-   能发现在操作系统内执行 reboot、宕机后被 HA 拉起这类不经过 ECS 接口的重启
+2. 规则使用独立 ecs_metrics 任务保存的有效采样，不重复查询指标源
+3. 重启：轮询时看到 REBOOT / HARD_REBOOT 记一次；指标任务发现开机时间变化另记一次
 """
 import logging
 from datetime import UTC, datetime, timedelta
+from urllib.parse import quote
 
 from sqlalchemy import select
 
+from app.hcs import HcsError
 from app.hcs.pager import page_all
-from app.metrics import ces as ces_metrics
-from app.metrics import effective, guarded_ces, mark
-from app.metrics.prometheus import PromError, prom_for
-from app.metrics.prometheus import ecs_metrics as prom_metrics
+from app.metrics.ecs_readings import ecs_source
 from app.models import Resource, ResourceChange
 from app.models.base import utcnow
 from app.services.catalog import ECS_STATUS
@@ -42,9 +40,58 @@ class EcsStatusCollector:
     code, service, name = "ecs_status", "ecs", "ECS 云服务器状态与资源使用"
 
     def collect(self, ctx: RunContext) -> list[Observation]:
-        servers = [s for s in page_all(lambda p: ctx.client.get("ecs", "/v1/{project_id}/cloudservers/detail",
-                                                                params=p), "servers", mode="page", start=1,
-                                       total_key="count") if s.get("status") != "DELETED"]
+        from app.services.ecs_monitoring import parse_at
+
+        policy = None
+        selected = None
+        if ctx.db is not None:
+            from app.services import collection_policy
+            from app.services.ecs_monitoring import policy_dict
+
+            policy = ctx.params.get("_collection_policy") or policy_dict(ctx.db, ctx.tenant_id)
+            if not collection_policy.stage_enabled(ctx.db, ctx.tenant_id, "inspection", policy):
+                return []
+            selected = collection_policy.select_resources(ctx.db, ctx.tenant_id, ctx.project_ref, policy)
+            if not selected and policy["selection"]["mode"] != "all":
+                ctx.stats.update(servers=0, with_metrics=0, inspection_skipped="no_selected_resources")
+                return []
+
+        def fetch_page(params: dict) -> dict:
+            if policy is not None:
+                params = {**params, "expect_fields": "basic"}
+            data = ctx.client.get("ecs", "/v1/{project_id}/cloudservers/detail", params=params)
+            count = data.get("count")
+            # ECS 5.2.5 表 5-70 定义整数总数，不能退回通用分页器的短页结束推断。
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                raise HcsError(0, "LOCAL.INVALID_RESPONSE", "ECS 列表 count 缺失或格式不正确，未使用不完整清单")
+            return data
+
+        if policy is not None and policy["selection"]["mode"] != "all" and len(selected or []) <= 3:
+            servers = []
+            for resource in selected or []:
+                try:
+                    body = ctx.client.get("ecs", f"/v1/{{project_id}}/cloudservers/{quote(resource.resource_id, safe='')}",
+                                          params={"expect_fields": "basic"})
+                    server = body.get("server")
+                    if not isinstance(server, dict) or server.get("id") != resource.resource_id:
+                        raise HcsError(0, "LOCAL.INVALID_RESPONSE", "ECS 单机状态响应与请求实例不一致")
+                    servers.append(server)
+                except HcsError:
+                    ctx.errors.append("所选 ECS 实例的状态查询失败，请核对实例是否存在及项目权限")
+                    servers.append({"id": resource.resource_id, "name": resource.name, "_state_unavailable": True})
+        else:
+            try:
+                servers = [s for s in page_all(fetch_page, "servers", mode="page", start=1,
+                                               total_key="count") if s.get("status") != "DELETED"]
+            except HcsError:
+                if ctx.db is None or not selected:
+                    raise
+                ctx.errors.append("ECS 状态查询失败，本轮仅使用仍有效的独立指标，不推断机器状态")
+                servers = [{"id": resource.resource_id, "name": resource.name, "_state_unavailable": True}
+                           for resource in selected or []]
+        if policy is not None and policy["selection"]["mode"] != "all":
+            allowed = {resource.resource_id for resource in selected or []}
+            servers = [server for server in servers if server["id"] in allowed]
         ids = [s["id"] for s in servers]
         metrics, source = self._metrics(ctx, ids, {ip: s["id"] for s in servers for ip in _fixed_ips(s)})
         now = utcnow()
@@ -54,9 +101,10 @@ class EcsStatusCollector:
         if ctx.db is not None and ids:
             known = {r.resource_id: r for r in ctx.db.scalars(select(Resource).where(
                 Resource.resource_type == RESOURCE_TYPE, Resource.resource_id.in_(ids),
+                Resource.project_ref == ctx.project_ref,
                 Resource.tenant_id == ctx.tenant_id if ctx.tenant_id is not None else Resource.tenant_id.is_(None)))}
             for ch in ctx.db.scalars(select(ResourceChange).where(
-                    ResourceChange.resource_type == RESOURCE_TYPE, ResourceChange.resource_id.in_(ids),
+                    ResourceChange.resource_ref.in_([r.id for r in known.values()]),
                     ResourceChange.change_type.in_(("STATUS", "REBOOT")),
                     ResourceChange.detected_at >= now - timedelta(hours=24))):
                 if ch.change_type == "REBOOT" or any(c.get("new") in REBOOTING for c in ch.changes or []):
@@ -65,13 +113,16 @@ class EcsStatusCollector:
         for s in servers:
             sid, name, status = s["id"], s["name"], s.get("status") or "UNKNOWN"
             old, m = known.get(sid), dict(metrics.get(sid, {}))
+            if policy is not None and (policy.get("metrics") or {}).get("enabled", True):
+                for key in policy.get("metric_keys", ("cpu_util", "mem_util", "disk_util")):
+                    m.setdefault(key, None)
             count = reboots.get(sid, 0)
             if status in REBOOTING and (old is None or old.status_raw not in REBOOTING):
                 count += 1                                   # 本轮新看到的重启（状态变更由流水线记录）
             ps = s.get("OS-EXT-STS:power_state")
             power = POWER_STATE.get(ps, str(ps or "-")) if isinstance(ps, int) else str(ps or "-")
             attrs: dict = {"task_state": s.get("OS-EXT-STS:task_state") or None, "power_state": power,
-                           "metrics_source": source}
+                           "metrics_source": source, "ecs_state_checked_at": now.isoformat()}
             boot = m.pop("boot_time", None)
             if boot:
                 prev = (old.attrs or {}).get("boot_ts") if old is not None else None
@@ -82,38 +133,70 @@ class EcsStatusCollector:
                     count += 1
                 attrs["boot_time"] = _iso(int(boot))
                 attrs["boot_ts"] = int(boot)
-            facts = {"status": status, "status_text": ECS_STATUS.get(status, status), "power_state": power,
+            known_status = status in ECS_STATUS and status != "UNKNOWN"
+            if not known_status and not s.get("_state_unavailable"):
+                ctx.errors.append("ECS 实例状态缺失或未识别，本次不判定为正常")
+            facts = {"status": status if known_status else None, "status_text": ECS_STATUS.get(status, status),
+                     "power_state": power,
                      "task_state": s.get("OS-EXT-STS:task_state") or "", "transitional": status in TRANSITIONAL}
-            obs.append(Observation(RESOURCE_TYPE, sid, name, "instance_status", facts, status_raw=status, attrs=attrs))
+            if not s.get("_state_unavailable"):
+                obs.append(Observation(RESOURCE_TYPE, sid, name, "instance_status", facts, status_raw=status, attrs=attrs,
+                                       metrics={"cpu_util": None, "mem_util": None, "disk_util": None, "disk_mount": None}))
             if "cpu_util" in m:
                 obs.append(Observation(RESOURCE_TYPE, sid, name, "cpu", {"cpu_util": m["cpu_util"]},
-                                       metrics={"cpu_util": m["cpu_util"]}))
+                    metrics={"cpu_util": m["cpu_util"]}, metric_observed_at=parse_at(m.get("cpu_util_observed_at")),
+                    metric_config_signature=m.get("metric_config_signature")))
             if "mem_util" in m:
                 obs.append(Observation(RESOURCE_TYPE, sid, name, "memory", {"mem_util": m["mem_util"]},
-                                       metrics={"mem_util": m["mem_util"]}))
+                    metrics={"mem_util": m["mem_util"]}, metric_observed_at=parse_at(m.get("mem_util_observed_at")),
+                    metric_config_signature=m.get("metric_config_signature")))
             if "disk_util" in m:
                 d = {"disk_util": m["disk_util"], "disk_mount": m.get("disk_mount", "-")}
-                obs.append(Observation(RESOURCE_TYPE, sid, name, "disk", d, metrics=d))
+                obs.append(Observation(RESOURCE_TYPE, sid, name, "disk", d, metrics=d,
+                    metric_observed_at=parse_at(m.get("disk_util_observed_at")),
+                    metric_config_signature=m.get("metric_config_signature")))
             obs.append(Observation(RESOURCE_TYPE, sid, name, "reboot", {"reboots_24h": count},
                                    metrics={"reboots_24h": count}))
         return obs
 
     @staticmethod
     def _metrics(ctx: RunContext, ids: list[str], ip_index: dict[str, str]) -> tuple[dict[str, dict], str]:
-        source = effective(ctx.tenant)
+        """只读独立采样的缓存；同一个指标点由规则流水线去重评估。"""
+        from app.services.ecs_monitoring import config_signature, included, number, parse_at, policy_dict
+
+        policy = ctx.params
+        if ctx.db is not None:
+            policy = ctx.params.get("_collection_policy") or policy_dict(ctx.db, ctx.tenant_id)
+        source = ecs_source(ctx.tenant, policy, client=ctx.client)
         data: dict[str, dict] = {}
-        if source == "CES" and ids:
-            data = guarded_ces(ctx, lambda: ces_metrics.ecs_metrics(ctx.client, ids), {})
-            source = effective(ctx.tenant)                   # 本轮刚探测到 CES 不可用：改用 Prometheus / 只巡检状态
-        if source == "PROMETHEUS" and ids:
-            prom = prom_for(ctx)
-            if prom is not None:
-                try:
-                    data = prom_metrics(prom, ip_index, ctx.params.get("prometheus"))
-                    mark(ctx.tenant, "prometheus", True, "巡检查询成功")
-                except PromError as e:
-                    ctx.errors.append(str(e))
-                    mark(ctx.tenant, "prometheus", False, str(e)[:160])
+        if ctx.db is None or source == "NONE":
+            return data, source
+        if not policy["metrics"]["enabled"]:
+            return data, source
+        now, signature = utcnow(), config_signature(ctx.tenant, policy, source)
+        for offset in range(0, len(ids), 500):
+            rows = ctx.db.scalars(select(Resource).where(Resource.tenant_id == ctx.tenant_id,
+                Resource.project_ref == ctx.project_ref, Resource.resource_type == RESOURCE_TYPE,
+                Resource.resource_id.in_(ids[offset:offset+500])))
+            for resource in rows:
+                meta = (resource.attrs or {}).get("ecs_monitoring") or {}
+                if (not included(resource, policy) or not isinstance(meta, dict)
+                        or meta.get("config_signature") != signature or meta.get("source") != source):
+                    continue
+                for key, point in (meta.get("latest") or {}).items():
+                    if (key not in policy["metric_keys"] or not isinstance(point, dict)
+                            or point.get("source") != source):
+                        continue
+                    at, value = parse_at(point.get("observed_at")), number(point.get("value"))
+                    if (at is None or value is None or not now-timedelta(seconds=policy["stale_after_sec"]) <= at
+                            <= now+timedelta(seconds=30)):
+                        continue
+                    current = data.setdefault(resource.resource_id, {})
+                    current["metric_config_signature"] = signature
+                    current[key], current[f"{key}_observed_at"] = value, at.isoformat()
+                    if key == "disk_util":
+                        dims = point.get("dimensions") or {}
+                        current["disk_mount"] = dims.get("mountpoint", dims.get("mount_point", "-"))
         return data, source
 
     @staticmethod
@@ -124,4 +207,5 @@ class EcsStatusCollector:
                                   changes=[{"field": "boot_time", "label": "开机时间", "old": _iso(prev),
                                             "new": _iso(boot)}],
                                   source="INSPECT", operator="system", detected_at=datetime.fromtimestamp(boot, UTC)))
-        log.info("ecs %s rebooted at %s", r.name, _iso(boot))
+        log.debug("ecs_reboot_observed", extra={"event": "ecs_reboot_observed", "cloud_service": "ecs",
+                  "tenant_id": ctx.tenant_id, "project_id": ctx.project_id, "resource_ref": r.id, "boot_time": _iso(boot)})

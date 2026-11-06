@@ -1,8 +1,11 @@
 """系统管理 - 用户、角色与权限、操作审计。"""
 from datetime import timedelta
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, File, Query, UploadFile
+from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.audit import ACTIONS, Auditor, get_auditor
@@ -11,20 +14,63 @@ from app.core.deps import CurrentUser, Scope, get_scope, require_perm
 from app.core.permissions import ALL, PERMISSIONS, normalize
 from app.core.response import ApiResponse, BizError, ErrorCode, not_found, ok
 from app.core.security import hash_password
-from app.models import AuditLog, HcsAccount, Role, User
+from app.core.xlsx import filename_stamp, xlsx_response
+from app.models import AuditLog, Contact, ContactGroup, HcsAccount, Resource, Role, User
 from app.models.base import utcnow
 from app.schemas.auth import ResetPasswordIn, RoleIn, RoleOut, RolePatchIn, UserAdminOut, UserCreateIn, UserPatchIn
+from app.services import identity
 from app.services.tenancy import tenant_map
 
-router = APIRouter(prefix="/system", tags=["用户与权限"])
+
+class IdentityRoute(APIRoute):
+    """身份参数错误只返回字段和消息，绝不回显输入密码。"""
+
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+
+        async def safe_handler(request):
+            try:
+                return await handler(request)
+            except RequestValidationError as exc:
+                errors = [{"loc": list(e["loc"]), "msg": e["msg"], "type": e["type"]} for e in exc.errors()]
+                raise BizError(ErrorCode.BAD_REQUEST, "用户参数校验失败", 400, errors) from None
+
+        return safe_handler
+
+
+router = APIRouter(prefix="/system", tags=["用户与权限"], route_class=IdentityRoute)
+
+
+def _global_identity_scope(scope: Scope = Depends(get_scope)) -> Scope:
+    """用户与角色属于全局身份配置，不能借租户内管理权限提升全局权限。"""
+    if not scope.full:
+        raise BizError(ErrorCode.FORBIDDEN, "用户与角色为全局配置，管理需要全部租户的数据权限", 403)
+    return scope
 
 
 # ---------------- 用户 ----------------
-def _user_out(db: Session, u: User, roles: dict[int, Role] | None = None) -> UserAdminOut:
+def _user_metadata(db: Session) -> dict:
+    contacts = dict(db.execute(select(Contact.user_id, Contact.id).where(Contact.user_id.is_not(None))).all())
+    counts = dict(db.execute(select(Resource.owner_user_id, func.count()).where(Resource.lifecycle == "ACTIVE")
+                             .group_by(Resource.owner_user_id)).all())
+    by_contact: dict[int, list[str]] = {}
+    for group in db.scalars(select(ContactGroup)):
+        for cid in set((group.member_ids or []) + (group.leader_ids or [])):
+            by_contact.setdefault(cid, []).append(group.name)
+    return {"contacts": contacts, "counts": counts, "groups": by_contact}
+
+
+def _user_out(db: Session, u: User, roles: dict[int, Role] | None = None, metadata: dict | None = None) -> UserAdminOut:
     role = (roles or {}).get(u.role_id or 0) if roles is not None else (db.get(Role, u.role_id) if u.role_id else None)
+    meta = metadata if metadata is not None else _user_metadata(db)
+    contact_id = meta["contacts"].get(u.id)
     return UserAdminOut(id=u.id, username=u.username, display_name=u.display_name, email=u.email, role_id=u.role_id,
                         role_code=role.code if role else None, role_name=role.name if role else "未分配角色",
                         tenant_ids=None if u.tenant_ids is None else [int(x) for x in u.tenant_ids],
+                        phone=u.phone, login_enabled=u.login_enabled, notify_enabled=u.notify_enabled,
+                        has_password=bool(u.password_hash and u.password_hash != "!"),
+                        contact_id=contact_id, owner_count=meta["counts"].get(u.id, 0),
+                        groups=meta["groups"].get(contact_id, []),
                         enabled=u.enabled, last_login_at=u.last_login_at, created_at=u.created_at,
                         locked=bool(u.locked_until and u.locked_until > utcnow()))
 
@@ -62,57 +108,89 @@ def _tenant_names(db: Session, ids: list[int] | None) -> str:
     return "、".join((tm[i].short_name or tm[i].name) if i in tm else str(i) for i in ids)
 
 
-@router.get("/users", response_model=ApiResponse[list[UserAdminOut]], summary="用户列表")
+@router.get("/users", response_model=ApiResponse[list[UserAdminOut]], summary="用户列表",
+            dependencies=[Depends(_global_identity_scope)])
 def list_users(db: Session = Depends(get_db), _: object = Depends(require_perm("user:manage"))):
     roles = {r.id: r for r in db.scalars(select(Role))}
-    return ok([_user_out(db, u, roles) for u in db.scalars(select(User).order_by(User.id))])
+    metadata = _user_metadata(db)
+    return ok([_user_out(db, u, roles, metadata) for u in db.scalars(select(User).order_by(User.id))])
 
 
-@router.post("/users", response_model=ApiResponse[UserAdminOut], summary="新增用户（角色 + 租户范围）")
+@router.get("/user-options", summary="人员选项（台账 / 通知引用统一用户）")
+def user_options(tenant_id: int | None = Query(None, ge=1), include_disabled: bool = False,
+                 db: Session = Depends(get_db),
+                 scope: Scope = Depends(get_scope),
+                 _: CurrentUser = Depends(require_perm(
+                     "ledger:view", "notify:view", "user:manage", "report:view", "report:manage",
+                     "report:config", "setting:manage", "tenant:manage", any_of=True))):
+    if tenant_id is not None:
+        scope.ensure(tenant_id, "租户")
+    ids = [tenant_id] if tenant_id is not None else scope.tenant_ids
+    return ok(identity.user_options(db, ids, include_disabled=include_disabled))
+
+
+@router.get("/users/export", summary="导出用户 Excel（不含密码）", dependencies=[Depends(_global_identity_scope)])
+def export_users(db: Session = Depends(get_db), audit: Auditor = Depends(get_auditor),
+                 _: CurrentUser = Depends(require_perm("user:manage"))):
+    from app.services import user_excel
+
+    content = user_excel.export_users(db)
+    audit.log("user.export", target_type="user", target_name="用户管理")
+    return xlsx_response(content, f"用户管理_{filename_stamp(utcnow(), '%Y%m%d_%H%M')}.xlsx")
+
+
+@router.get("/users/import/template", summary="下载用户导入 Excel 模板", dependencies=[Depends(_global_identity_scope)])
+def user_template(db: Session = Depends(get_db), _: CurrentUser = Depends(require_perm("user:manage"))):
+    from app.services import user_excel
+
+    return xlsx_response(user_excel.template(db), "用户导入模板.xlsx")
+
+
+@router.post("/users/import", summary="用户 Excel 导入（先预览，全部校验通过后原子写入）",
+             dependencies=[Depends(_global_identity_scope)])
+def import_users(file: UploadFile = File(...), dry_run: bool = Query(True), db: Session = Depends(get_db),
+                 audit: Auditor = Depends(get_auditor), cu: CurrentUser = Depends(require_perm("user:manage"))):
+    from app.services import user_excel
+
+    content = file.file.read(10 * 1024 * 1024 + 1)
+    if len(content) > 10 * 1024 * 1024:
+        raise BizError(ErrorCode.BAD_REQUEST, "文件不能超过 10 MB")
+    result, todo = user_excel.parse(db, content, cu)
+    out = result.as_dict()
+    if dry_run:
+        return ok({**out, "dry_run": True, "applied": 0})
+    if out["error_count"]:
+        raise BizError(ErrorCode.BAD_REQUEST, "存在校验错误，请修改后重新导入", 400, out)
+    try:
+        applied = user_excel.apply(db, todo, cu)
+        audit.log("user.import", target_type="user", target_name="用户管理",
+                  detail={"total": out["total"], "created": out["created"], "updated": out["updated"], "applied": applied})
+    except Exception:
+        db.rollback()
+        raise
+    return ok({**out, "dry_run": False, "applied": applied})
+
+
+@router.post("/users", response_model=ApiResponse[UserAdminOut], summary="新增统一用户（登录 / 通知 / 角色 / 租户范围）",
+             dependencies=[Depends(_global_identity_scope)])
 def create_user(body: UserCreateIn, db: Session = Depends(get_db), audit: Auditor = Depends(get_auditor),
-                _: object = Depends(require_perm("user:manage"))):
-    if db.scalar(select(User.id).where(User.username == body.username)):
-        raise BizError(ErrorCode.CONFLICT, f"用户名已存在：{body.username}", 409)
-    role = _check_role(db, body.role_id)
-    tenants = _check_tenants(db, body.tenant_ids)
-    u = User(username=body.username, display_name=body.display_name, email=body.email, role_id=role.id,
-             tenant_ids=tenants, password_hash=hash_password(body.password))
-    db.add(u)
-    db.flush()
+                cu: CurrentUser = Depends(require_perm("user:manage"))):
+    try:
+        u = identity.create_user_record(db, body, cu)
+    except IntegrityError:
+        db.rollback()
+        raise BizError(ErrorCode.CONFLICT, "账号或人员关联已存在，请刷新后重试", 409) from None
     audit.log("user.create", target_type="user", target_id=u.id, target_name=f"{u.display_name}（{u.username}）",
-              detail={"role": role.name, "tenants": _tenant_names(db, tenants)})
+              detail={"role_id": u.role_id, "tenants": _tenant_names(db, u.tenant_ids), "login_enabled": u.login_enabled})
     return ok(_user_out(db, u))
 
 
 @router.patch("/users/{user_id}", response_model=ApiResponse[UserAdminOut],
-              summary="修改用户（姓名 / 邮箱 / 角色 / 租户范围 / 启停）")
+              summary="修改统一用户（自动同步联系人和负责人）", dependencies=[Depends(_global_identity_scope)])
 def patch_user(user_id: int, body: UserPatchIn, db: Session = Depends(get_db), audit: Auditor = Depends(get_auditor),
                cu: CurrentUser = Depends(require_perm("user:manage"))):
     u = _get_user(db, user_id)
-    changes: dict[str, list] = {}
-    if body.enabled is False and u.id == cu.id:
-        raise BizError(ErrorCode.BAD_REQUEST, "不能停用自己的账号")
-    if body.role_id is not None and body.role_id != u.role_id:
-        role = _check_role(db, body.role_id)
-        if u.id == cu.id and cu.is_admin and role.code != "admin":
-            raise BizError(ErrorCode.BAD_REQUEST, "不能取消自己的平台管理员角色")
-        old = db.get(Role, u.role_id) if u.role_id else None
-        changes["角色"] = [old.name if old else None, role.name]
-        u.role_id = role.id
-    if body.all_tenants:
-        if u.tenant_ids is not None:
-            changes["租户范围"] = [_tenant_names(db, u.tenant_ids), "全部租户"]
-        u.tenant_ids = None
-    elif body.tenant_ids is not None:
-        new = _check_tenants(db, body.tenant_ids)
-        if new != u.tenant_ids:
-            changes["租户范围"] = [_tenant_names(db, u.tenant_ids), _tenant_names(db, new)]
-        u.tenant_ids = new
-    for f, label in (("display_name", "姓名"), ("email", "邮箱"), ("enabled", "启用")):
-        v = getattr(body, f)
-        if v is not None and v != getattr(u, f):
-            changes[label] = [getattr(u, f), v]
-            setattr(u, f, v)
+    changes = identity.update_user_record(db, u, body, cu)
     if changes:
         audit.log("user.update", target_type="user", target_id=u.id, target_name=f"{u.display_name}（{u.username}）",
                   detail={"changes": changes})
@@ -121,11 +199,13 @@ def patch_user(user_id: int, body: UserPatchIn, db: Session = Depends(get_db), a
     return ok(_user_out(db, u))
 
 
-@router.post("/users/{user_id}/reset-password", summary="重置密码（同时解除锁定）")
+@router.post("/users/{user_id}/reset-password", summary="重置密码（同时解除锁定）",
+             dependencies=[Depends(_global_identity_scope)])
 def reset_password(user_id: int, body: ResetPasswordIn, db: Session = Depends(get_db),
                    audit: Auditor = Depends(get_auditor), _: object = Depends(require_perm("user:manage"))):
     u = _get_user(db, user_id)
     u.password_hash, u.failed_attempts, u.locked_until = hash_password(body.password), 0, None
+    u.token_version += 1
     audit.log("user.reset_password", target_type="user", target_id=u.id, target_name=f"{u.display_name}（{u.username}）")
     return ok(message="密码已重置")
 
@@ -162,7 +242,8 @@ def _perms(perms: list[str]) -> list[str]:
         raise BizError(ErrorCode.BAD_REQUEST, str(e)) from e
 
 
-@router.post("/roles", response_model=ApiResponse[RoleOut], summary="新增自定义角色")
+@router.post("/roles", response_model=ApiResponse[RoleOut], summary="新增自定义角色",
+             dependencies=[Depends(_global_identity_scope)])
 def create_role(body: RoleIn, db: Session = Depends(get_db), audit: Auditor = Depends(get_auditor),
                 _: object = Depends(require_perm("role:manage"))):
     if db.scalar(select(Role.id).where(Role.code == body.code)) is not None:
@@ -178,7 +259,8 @@ def create_role(body: RoleIn, db: Session = Depends(get_db), audit: Auditor = De
     return ok(_role_out(r, {}))
 
 
-@router.patch("/roles/{role_id}", response_model=ApiResponse[RoleOut], summary="修改角色（名称 / 说明 / 权限点）")
+@router.patch("/roles/{role_id}", response_model=ApiResponse[RoleOut], summary="修改角色（名称 / 说明 / 权限点）",
+              dependencies=[Depends(_global_identity_scope)])
 def patch_role(role_id: int, body: RolePatchIn, db: Session = Depends(get_db), audit: Auditor = Depends(get_auditor),
                _: object = Depends(require_perm("role:manage"))):
     r = db.get(Role, role_id)
@@ -202,7 +284,8 @@ def patch_role(role_id: int, body: RolePatchIn, db: Session = Depends(get_db), a
     return ok(_role_out(r, _counts(db)))
 
 
-@router.delete("/roles/{role_id}", summary="删除自定义角色（内置角色、仍有用户的角色不能删除）")
+@router.delete("/roles/{role_id}", summary="删除自定义角色（内置角色、仍有用户的角色不能删除）",
+               dependencies=[Depends(_global_identity_scope)])
 def delete_role(role_id: int, db: Session = Depends(get_db), audit: Auditor = Depends(get_auditor),
                 _: object = Depends(require_perm("role:manage"))):
     r = db.get(Role, role_id)

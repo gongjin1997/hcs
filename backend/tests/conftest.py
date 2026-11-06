@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import tempfile
+from uuid import uuid4
 
 # 必须在导入 app 之前设置：测试使用独立的临时 SQLite 库
 _TMP = tempfile.mkdtemp(prefix="inspector-test-")
@@ -8,15 +9,80 @@ os.environ["INSPECTOR_DATABASE_URL"] = f"sqlite:///{_TMP}/test.db"
 os.environ["INSPECTOR_DEMO_SEED"] = "true"
 os.environ["INSPECTOR_ENV"] = "test"
 os.environ["INSPECTOR_JWT_SECRET"] = "test-jwt-secret-0123456789abcdef0123456789"
+os.environ["INSPECTOR_REDIS_URL"] = ""
+os.environ["INSPECTOR_INIT_ADMIN_PASSWORD"] = ""
+_PG_URL = os.environ.get("INSPECTOR_TEST_DATABASE_URL")
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import create_engine  # noqa: E402
+from sqlalchemy.engine import make_url  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
+from sqlalchemy.schema import CreateSchema, DropSchema  # noqa: E402
+
+_pg_root = create_engine(_PG_URL) if _PG_URL else None
+_schemas: set[str] = set()
+
+
+def _pg_url() -> tuple[str, str]:
+    assert _pg_root is not None and _PG_URL
+    schema = f"hcs_test_{uuid4().hex}"
+    with _pg_root.begin() as conn:
+        conn.execute(CreateSchema(schema))
+    _schemas.add(schema)
+    url = make_url(_PG_URL).update_query_dict({"options": f"-csearch_path={schema}"})
+    return url.render_as_string(hide_password=False), schema
+
+
+def _drop_schema(schema: str) -> None:
+    assert _pg_root is not None
+    with _pg_root.begin() as conn:
+        conn.execute(DropSchema(schema, cascade=True))
+    _schemas.discard(schema)
+
+
+if _PG_URL:
+    os.environ["INSPECTOR_DATABASE_URL"], _app_schema = _pg_url()
 
 from app.core.db import Base, engine  # noqa: E402
 from app.main import app  # noqa: E402
+
+
+@pytest.fixture(scope="session", autouse=True)
+def database_lifecycle():
+    if _PG_URL:
+        from alembic import command
+        from alembic.config import Config
+
+        cfg = Config("alembic.ini")
+        cfg.attributes["database_url"] = os.environ["INSPECTOR_DATABASE_URL"]
+        command.upgrade(cfg, "head")
+    yield
+    engine.dispose()
+    if _pg_root is not None:
+        for schema in list(_schemas):
+            _drop_schema(schema)
+        _pg_root.dispose()
+
+
+def pytest_collection_modifyitems(items):
+    if not _PG_URL:
+        for item in items:
+            if "pg" in item.keywords:
+                item.add_marker(pytest.mark.skip(reason="需要 make test-pg 的 PostgreSQL 测试库"))
+
+
+@pytest.fixture()
+def migration_url(tmp_path):
+    if not _PG_URL:
+        yield f"sqlite:///{tmp_path / 'mig.db'}"
+        return
+    url, schema = _pg_url()
+    try:
+        yield url
+    finally:
+        _drop_schema(schema)
 
 
 @pytest.fixture(scope="session")
@@ -29,19 +95,26 @@ def demo_template() -> dict:
     from app.services.seed import seed_demo
 
     path = f"{_TMP}/demo-template.db"
-    tpl = create_engine(f"sqlite:///{path}")
+    tpl = engine if _PG_URL else create_engine(f"sqlite:///{path}")
     Base.metadata.create_all(tpl)
     with sessionmaker(bind=tpl, expire_on_commit=False, autoflush=False)() as db:
         bootstrap(db)
         users_after_bootstrap = db.scalar(select(func.count()).select_from(User))
         seeded = seed_demo(db)
-    tpl.dispose()
+    if not _PG_URL:
+        tpl.dispose()
     return {"path": path, "users_after_bootstrap": users_after_bootstrap, "seeded": seeded}
 
 
 @pytest.fixture()
-def demo_db(demo_template):
+def demo_db(demo_template, mem_db):
     """模板库的独立内存副本（含演示数据），用例可随意读写。"""
+    if _PG_URL:
+        from app.services.seed import seed_demo
+
+        seed_demo(mem_db)
+        yield mem_db
+        return
     eng = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     with eng.connect() as conn, sqlite3.connect(demo_template["path"]) as src:
         src.backup(conn.connection.driver_connection)
@@ -54,8 +127,9 @@ def demo_db(demo_template):
 @pytest.fixture(scope="session")
 def client(demo_template):
     # 把模板库整库复制进应用库，启动时 seed_demo 发现已有用户直接跳过
-    with engine.connect() as conn, sqlite3.connect(demo_template["path"]) as src:
-        src.backup(conn.connection.driver_connection)
+    if not _PG_URL:
+        with engine.connect() as conn, sqlite3.connect(demo_template["path"]) as src:
+            src.backup(conn.connection.driver_connection)
     with TestClient(app) as c:
         yield c
 
@@ -74,12 +148,21 @@ def admin(client):
 @pytest.fixture()
 def mem_db():
     """独立的内存库（不含演示数据），用于流水线测试。"""
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    Base.metadata.create_all(engine)
-    session = sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)()
-    yield session
-    session.close()
-    engine.dispose()
+    schema = None
+    if _PG_URL:
+        url, schema = _pg_url()
+        eng = create_engine(url)
+    else:
+        eng = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(eng)
+    session = sessionmaker(bind=eng, expire_on_commit=False, autoflush=False)()
+    try:
+        yield session
+    finally:
+        session.close()
+        eng.dispose()
+        if schema:
+            _drop_schema(schema)
 
 
 def demo_login(client: TestClient, username: str, tenant_id: int | None = None) -> dict:

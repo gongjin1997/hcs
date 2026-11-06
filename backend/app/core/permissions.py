@@ -25,7 +25,7 @@ PERMISSIONS: list[dict[str, str]] = [
     {"code": "rule:view", "name": "查看规则", "group": "规则管理"},
     {"code": "rule:edit", "name": "修改规则", "group": "规则管理"},
     {"code": "notify:view", "name": "查看通知路由与记录", "group": "通知"},
-    {"code": "notify:manage", "name": "编辑通知路由 / 联系组 / 联系人", "group": "通知"},
+    {"code": "notify:manage", "name": "编辑通知路由 / 联系组", "group": "通知"},
     {"code": "task:view", "name": "查看巡检任务", "group": "系统管理"},
     {"code": "task:run", "name": "立即执行任务", "group": "系统管理"},
     {"code": "task:edit", "name": "修改任务周期 / 启停", "group": "系统管理"},

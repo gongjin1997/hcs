@@ -13,7 +13,7 @@
       <div class="sched-row recv">
         <span class="lbl">合并报表收件人</span>
         <span v-if="schedule.mail_to.length" class="mono">{{ schedule.mail_to.join('、') }}</span>
-        <span v-else class="text-3">未配置（只生成不发送，环境变量 INSPECTOR_REPORT_MAIL_TO）</span>
+        <span v-else class="text-3">未设置收件人，仅生成报表</span>
         <template v-for="t in schedule.tenants" :key="t.id">
           <span class="sep" /><TenantTag :id="t.id" :name="t.name" />
           <span v-if="t.mail_to.length" class="mono">{{ t.mail_to.join('、') }}</span><span v-else class="text-3">未配置收件人</span>
@@ -26,15 +26,18 @@
       <el-table-column type="expand">
         <template #default="{ row }">
           <div class="runs">
-            <div class="sub-title">最近 {{ row.runs.length }} 次运行（每个租户各执行一次，互不影响）</div>
+            <div class="sub-title">已展示 {{ row.runs.length }} 次运行（每个租户 / 项目各保留最近 12 次；未知项目单独保留）</div>
             <el-table :data="row.runs" size="small" border>
               <el-table-column label="开始时间" width="140"><template #default="{ row: r }">{{ fmtTime(r.started_at) }}</template></el-table-column>
               <el-table-column label="租户" width="110"><template #default="{ row: r }"><TenantTag :id="r.tenant_id" :name="r.tenant_name" /></template></el-table-column>
+              <el-table-column label="项目" min-width="170"><template #default="{ row: r }">{{ projectLabel(r as ProjectRun) }}</template></el-table-column>
               <el-table-column label="触发" width="70"><template #default="{ row: r }">{{ r.trigger_type === 'MANUAL' ? '手动' : '调度' }}</template></el-table-column>
               <el-table-column label="状态" width="90"><template #default="{ row: r }"><el-tag :type="TASK_STATUS[r.status]?.type ?? 'info'" size="small">{{ TASK_STATUS[r.status]?.label ?? r.status }}</el-tag></template></el-table-column>
               <el-table-column label="耗时" width="76"><template #default="{ row: r }">{{ r.finished_at ? `${secs(r as TaskRun)} s` : '-' }}</template></el-table-column>
               <el-table-column :label="cnt(row.code).b ? `${cnt(row.code).a} / ${cnt(row.code).b}` : cnt(row.code).a" width="96"><template #default="{ row: r }">{{ r.resource_total }}<template v-if="cnt(row.code).b"> / <b :class="{ danger: cnt(row.code).warn && r.abnormal_total }">{{ r.abnormal_total }}</b></template></template></el-table-column>
               <el-table-column label="API 调用" width="80" prop="api_calls" />
+              <el-table-column label="API 错误" width="90"><template #default="{ row: r }">{{ r.stats?.hcs?.errors ?? '-' }}</template></el-table-column>
+              <el-table-column label="限流等待" width="100"><template #default="{ row: r }">{{ r.stats?.hcs ? `${Math.round(r.stats.hcs.rate_limit_ms)} ms` : '-' }}</template></el-table-column>
               <el-table-column label="采集明细" min-width="220"><template #default="{ row: r }"><span class="text-2">{{ statsText(row.code, r as TaskRun) || '-' }}</span></template></el-table-column>
               <el-table-column label="错误摘要" min-width="180" show-overflow-tooltip><template #default="{ row: r }"><span :class="{ danger: r.error_summary }">{{ r.error_summary ?? '-' }}</span></template></el-table-column>
             </el-table>
@@ -67,11 +70,12 @@
           <span v-else class="text-3">-</span>
         </template>
       </el-table-column>
-      <el-table-column label="各租户最近一次" min-width="300">
+      <el-table-column label="各租户 / 项目最近一次" min-width="380">
         <template #default="{ row }">
           <div class="latest">
-            <div v-for="r in latestByTenant(row as InspectionTask)" :key="r.tenant_id ?? 0" class="lt" :class="r.status.toLowerCase()">
+            <div v-for="r in latestByTenant(row as InspectionTask)" :key="`${r.tenant_id ?? 'global'}:${r.project_ref ?? 'unknown'}`" class="lt" :class="r.status.toLowerCase()">
               <TenantTag :id="r.tenant_id" :name="r.tenant_name" />
+              <span class="text-3">{{ projectLabel(r) }}</span>
               <el-tag :type="TASK_STATUS[r.status]?.type ?? 'info'" size="small" effect="plain">{{ TASK_STATUS[r.status]?.label ?? r.status }}</el-tag>
               <span class="text-3">{{ fromNow(r.started_at) }}</span>
               <span class="cnt">{{ cnt(row.code).a }} {{ r.resource_total }}<template v-if="cnt(row.code).b"> · {{ cnt(row.code).b }} <b :class="{ danger: cnt(row.code).warn && r.abnormal_total }">{{ r.abnormal_total }}</b></template></span>
@@ -86,8 +90,8 @@
           </div>
         </template>
       </el-table-column>
-      <el-table-column :label="`成功率（近 ${maxRuns} 次）`" width="150">
-        <template #default="{ row }"><el-progress :percentage="successRate(row as InspectionTask)" :color="successRate(row as InspectionTask) >= 90 ? '#2e7d32' : '#f57c00'" :stroke-width="8" /></template>
+      <el-table-column label="已展示执行成功率" width="150">
+        <template #default="{ row }"><el-progress v-if="successRate(row as InspectionTask) != null" :percentage="successRate(row as InspectionTask) ?? 0" :color="(successRate(row as InspectionTask) ?? 0) >= 90 ? '#2e7d32' : '#f57c00'" :stroke-width="8" /><span v-else class="text-3">未知（无已完成执行）</span></template>
       </el-table-column>
       <el-table-column label="启用" width="64">
         <template #default="{ row }">
@@ -107,7 +111,7 @@
 
     <!-- 修改任务周期 -->
     <el-dialog v-model="edit.visible" :title="`修改任务：${edit.task?.name ?? ''}`" width="560px" append-to-body>
-      <el-form v-if="edit.task" label-width="92px">
+      <el-form v-if="edit.task" label-width="92px" @submit.prevent>
         <el-form-item label="执行方式">
           <el-radio-group v-model="edit.mode">
             <el-radio value="interval" :disabled="edit.task.code === 'data_cleanup'">按周期</el-radio>
@@ -132,6 +136,16 @@
           <el-switch v-model="edit.enabled" />
           <span class="text-3 hint-inline">停用后调度进程不再执行（手动执行也不可用）</span>
         </el-form-item>
+        <el-form-item v-if="edit.task.code === 'dgc_batch_instance'" label="P90 样本数">
+          <el-input-number v-model="edit.p90MinSamples" :min="1" :max="10000" :step="1" :precision="0" aria-label="P90 最少有效样本数" />
+          <div class="text-3 hint">近24小时同作业成功实例的有效耗时；样本不足时基线留空。</div>
+        </el-form-item>
+        <div v-if="edit.task.code === 'dcs_status'" class="text-3 hint">指标来自 DCS 原生接口，历史为实际采样记录。CPU 累计秒数不作为使用率，实例连接数暂无数据。</div>
+        <div v-if="edit.task.code === 'gaussdb_status'" class="text-3 hint">指标来自 GaussDB 原生接口；磁盘、慢 SQL、会话等在 GaussDB 面板查看，不使用 AOM 映射。</div>
+        <el-form-item v-if="hasLegacyAom" label="旧配置">
+          <el-checkbox v-model="edit.clearLegacyAom" :disabled="edit.saving">清除旧 AOM 映射</el-checkbox>
+          <div class="text-3 hint">AOM 已停用，旧映射不再生效。勾选后保存清除，保留其他任务参数。</div>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="edit.visible = false">取消</el-button>
@@ -141,15 +155,14 @@
 
     <!-- 修改定时报表 -->
     <el-dialog v-model="sched.visible" title="定时报表设置" width="640px" append-to-body>
-      <el-form label-width="110px">
+      <el-form label-width="110px" @submit.prevent>
         <el-form-item v-for="(_c, k) in schedule?.cron ?? {}" :key="k" :label="schedule?.kinds[k] ?? String(k)">
           <el-switch v-model="sched.enabled[k]" />
           <el-input v-model="sched.cron[k]" class="mono cron-in" :disabled="!sched.enabled[k]" placeholder="分 时 日 月 周" />
           <span class="text-3 hint-inline">{{ sched.enabled[k] ? cronText(sched.cron[k] ?? '') : '不自动生成' }}</span>
         </el-form-item>
         <el-form-item label="合并报表收件人">
-          <el-select v-model="sched.mail_to" multiple filterable allow-create default-first-option :reserve-keyword="false" class="w-full"
-                     placeholder="输入邮箱后回车，可多个；留空 = 只生成不发送" />
+          <RecipientSelect v-model="sched.recipient_user_ids" global-only :active="sched.visible" :disabled="sched.saving" />
           <div class="text-3 hint">各租户报表发给“租户接入”里配置的租户收件人；这里是全部租户合并报表的收件人</div>
         </el-form-item>
       </el-form>
@@ -168,21 +181,24 @@ import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
 import { computed, h, onMounted, reactive, ref } from 'vue'
 import { type InspectionTask, type ReportSchedule, type TaskRun, listTasks, reportSchedule, runTask, saveReportSchedule, updateTask } from '@/api'
 import TenantTag from '@/components/TenantTag.vue'
+import RecipientSelect from '@/components/RecipientSelect.vue'
 import { useAppStore } from '@/stores/app'
 import { useUserStore } from '@/stores/user'
-import { METRICS_SOURCE, SERVICES, TASK_STATUS, typeName } from '@/utils/dict'
+import { METRICS_SOURCE, SERVICES, TASK_STATUS, historicalMetricsSourceLabel, typeName } from '@/utils/dict'
 import { fmtTime, fromNow, humanize } from '@/utils/format'
 
 const app = useAppStore()
 const user = useUserStore()
-const canEdit = computed(() => user.can('task:edit'))
-const canReportConfig = computed(() => user.can('report:config') && !!schedule.value?.editable)
+const globalConfigScope = computed(() => !!user.user && user.user.tenant_ids == null)
+const canEdit = computed(() => globalConfigScope.value && user.can('task:edit'))
+const canReportConfig = computed(() => globalConfigScope.value && user.can('report:config') && !!schedule.value?.editable)
 const loading = ref(false)
 const tasks = ref<InspectionTask[]>([])
 const schedule = ref<ReportSchedule | null>(null)
 const running = ref('')
 const expanded = ref<string[]>([])
-const maxRuns = computed(() => Math.max(0, ...tasks.value.map((t) => t.runs.length)) || 12)
+type ProjectRun = TaskRun & { project_ref?: number | null; project_scope?: string; project_label?: string }
+const projectLabel = (r: ProjectRun) => r.project_label ?? (r.project_ref != null ? `项目#${r.project_ref}` : '历史未知项目（未记录）')
 
 async function load() {
   loading.value = true
@@ -224,15 +240,28 @@ const CRON_PRESETS = [
 ]
 
 // ---- 修改任务 ----
-const edit = reactive({ visible: false, task: null as InspectionTask | null, mode: 'interval' as 'interval' | 'cron', value: 1, unit: 60, cron: '', enabled: true, saving: false })
+const edit = reactive({ visible: false, task: null as InspectionTask | null, mode: 'interval' as 'interval' | 'cron', value: 1, unit: 60, cron: '', enabled: true, saving: false,
+  clearLegacyAom: false, p90MinSamples: 5,
+})
+const hasLegacyAom = computed(() => !!edit.task && Object.prototype.hasOwnProperty.call(edit.task.params ?? {}, 'aom')
+  && (edit.task.params as { aom?: unknown }).aom != null)
 function openEdit(t: InspectionTask) {
+  if (edit.saving) return
   const sec = t.interval_sec
   const unit = sec % 3600 === 0 ? 3600 : sec % 60 === 0 ? 60 : 1
-  Object.assign(edit, { visible: true, task: t, mode: t.cron ? 'cron' : 'interval', value: sec / unit, unit, cron: t.cron ?? '', enabled: t.enabled })
+  Object.assign(edit, { visible: true, task: t, mode: t.cron ? 'cron' : 'interval', value: sec / unit, unit, cron: t.cron ?? '', enabled: t.enabled,
+    clearLegacyAom: false, p90MinSamples: (t.params as { p90_min_samples?: number }).p90_min_samples ?? 5,
+  })
 }
 async function saveEdit() {
-  const t = edit.task!
-  const body: { interval_sec?: number; cron?: string | null; enabled?: boolean } = { enabled: edit.enabled }
+  if (edit.saving || !edit.task || !canEdit.value) return
+  const t = edit.task
+  const body: { interval_sec?: number; cron?: string | null; enabled?: boolean; aom?: null; p90_min_samples?: number } = { enabled: edit.enabled }
+  if (t.code === 'dgc_batch_instance') {
+    if (!Number.isInteger(edit.p90MinSamples) || edit.p90MinSamples < 1 || edit.p90MinSamples > 10000) return ElMessage.warning('P90 最少样本数须为 1–10000 的整数')
+    body.p90_min_samples = edit.p90MinSamples
+  }
+  if (hasLegacyAom.value && edit.clearLegacyAom) body.aom = null
   if (edit.mode === 'interval') {
     const sec = Math.round(edit.value * edit.unit)
     if (sec < t.min_interval) return ElMessage.warning(`周期不能小于 ${humanize(t.min_interval)}`)
@@ -251,6 +280,7 @@ async function saveEdit() {
 }
 const toggling = ref('')
 async function toggle(t: InspectionTask, on: boolean) {
+  if (!canEdit.value || toggling.value) return
   if (!on) await ElMessageBox.confirm(`停用后“${t.name}”不再自动执行，相关检查项不会产生新告警。确认停用？`, '停用任务', { type: 'warning' })
   toggling.value = t.code
   try {
@@ -261,39 +291,45 @@ async function toggle(t: InspectionTask, on: boolean) {
 }
 
 // ---- 定时报表 ----
-const sched = reactive({ visible: false, cron: {} as Record<string, string>, enabled: {} as Record<string, boolean>, mail_to: [] as string[], saving: false })
+const sched = reactive({ visible: false, cron: {} as Record<string, string>, enabled: {} as Record<string, boolean>, recipient_user_ids: [] as number[], saving: false })
 function openSchedule() {
   const s = schedule.value!
   Object.assign(sched, {
-    visible: true, cron: { ...s.cron }, mail_to: [...s.mail_to],
+    visible: true, cron: { ...s.cron }, recipient_user_ids: [...(s.recipient_user_ids ?? [])],
     enabled: Object.fromEntries(Object.keys(s.cron).map((k) => [k, s.enabled?.[k] !== false])),   // 只有日 / 周 / 月报定时生成；台账报表为手动生成
   })
 }
 async function saveSchedule() {
-  const bad = sched.mail_to.find((m) => !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(m))
-  if (bad) return ElMessage.warning(`邮箱格式不正确：${bad}`)
+  if (sched.saving || !canReportConfig.value) return
   sched.saving = true
   try {
-    schedule.value = await saveReportSchedule({ cron: sched.cron, enabled: sched.enabled, mail_to: sched.mail_to })
+    schedule.value = await saveReportSchedule({ cron: sched.cron, enabled: sched.enabled, recipient_user_ids: [...sched.recipient_user_ids] })
     ElMessage.success('已保存，调度进程最迟 30 秒按新时间生成报表')
     sched.visible = false
   } finally { sched.saving = false }
 }
 
-/** 每个租户最近一次运行（runs 按开始时间倒序） */
-function latestByTenant(t: InspectionTask): TaskRun[] {
-  const seen = new Map<number, TaskRun>()
-  for (const r of t.runs) if (!seen.has(r.tenant_id ?? 0)) seen.set(r.tenant_id ?? 0, r)
-  return [...seen.values()].sort((a, b) => (a.tenant_id ?? 0) - (b.tenant_id ?? 0))
+/** 每个租户 / 项目最近一次；空项目是独立的历史未知范围。 */
+function latestByTenant(t: InspectionTask): ProjectRun[] {
+  const seen = new Map<string, ProjectRun>()
+  for (const r of t.runs as ProjectRun[]) {
+    const key = `${r.tenant_id ?? 'global'}:${r.project_ref ?? 'unknown'}`
+    if (!seen.has(key)) seen.set(key, r)
+  }
+  return [...seen.values()].sort((a, b) => (a.tenant_id ?? 0) - (b.tenant_id ?? 0)
+    || (a.project_ref ?? 0) - (b.project_ref ?? 0))
 }
 const secs = (r: TaskRun) => Math.max(0, Math.round((new Date(r.finished_at!).getTime() - new Date(r.started_at).getTime()) / 100) / 10)
-const successRate = (t: InspectionTask) => (t.runs.length ? Math.round((t.runs.filter((r) => r.status === 'SUCCESS').length / t.runs.length) * 100) : 0)
+function successRate(t: InspectionTask): number | null {
+  const completed = t.runs.filter(r => !['RUNNING', 'SKIPPED'].includes(r.status))
+  return completed.length ? Math.round(completed.filter(r => r.status === 'SUCCESS').length / completed.length * 100) : null
+}
 
 /** 各任务的附加统计（stats 字段，按任务类型解释） */
 function statsText(code: string, r: TaskRun): string {
   const s = r.stats ?? {}
   if (code === 'ecs_status' && s.servers != null) {
-    const src = METRICS_SOURCE[s.metrics_source]?.label ?? s.metrics_source ?? '-'
+    const src = s.metrics_source === 'AOM' ? historicalMetricsSourceLabel(s.metrics_source) : METRICS_SOURCE[s.metrics_source]?.label ?? s.metrics_source ?? '-'
     return `指标来源 ${src} · ${s.with_metrics ?? 0}/${s.servers} 台有指标`
   }
   if (code === 'cce_pod_events' && s.events_created != null) return `新增事件 ${s.events_created} · 执行探针 ${s.probes ?? 0}`
@@ -315,6 +351,7 @@ function cnt(code: string): { a: string; b: string; warn: boolean } {
 }
 
 async function run(t: InspectionTask) {
+  if (running.value) return
   running.value = t.code
   try {
     const r = await runTask(t.code)
@@ -345,7 +382,10 @@ async function run(t: InspectionTask) {
 .runs { padding: 4px 48px 12px; }
 .sub-title { margin: 0 0 8px; font-weight: 600; font-size: 13px; color: var(--hi-text-2); }
 .latest { display: flex; flex-direction: column; gap: 4px; padding: 2px 0;
-  .lt { display: flex; align-items: center; gap: 8px; font-size: 12px; .cnt { margin-left: auto; color: var(--hi-text-2); } } }
+  .lt { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; font-size: 12px;
+    > .text-3, .cnt { white-space: nowrap; }
+    .cnt { color: var(--hi-text-2); }
+  } }
 .danger { color: var(--hi-p1); }
 .tip { margin-top: 12px; font-size: 12px; }
 .note { margin-top: 2px; font-size: 12px; line-height: 1.5; }

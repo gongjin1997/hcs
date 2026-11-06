@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, Float, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base, JsonType, UtcDateTime
@@ -18,7 +18,11 @@ class Resource(Base):
 
     __tablename__ = "resource"
     __table_args__ = (
-        UniqueConstraint("resource_type", "resource_id"),
+        Index("uk_resource_project", "project_ref", "resource_type", "resource_id", unique=True,
+              sqlite_where=text("project_ref IS NOT NULL"), postgresql_where=text("project_ref IS NOT NULL")),
+        Index("uk_resource_legacy", "resource_type", "resource_id", unique=True,
+              sqlite_where=text("project_ref IS NULL"), postgresql_where=text("project_ref IS NULL")),
+        Index("idx_resource_project_type", "project_ref", "resource_type"),
         Index("idx_resource_type_health", "resource_type", "health"),
         Index("idx_resource_lifecycle", "lifecycle", "resource_type"),
         Index("idx_resource_tenant_type", "tenant_id", "resource_type"),
@@ -34,9 +38,9 @@ class Resource(Base):
     health: Mapped[str] = mapped_column(String(16), default="UNKNOWN")  # OK/INFO/WARNING/MAJOR/CRITICAL/UNKNOWN
     # ---- 台账字段（同步写入）----
     region: Mapped[str | None] = mapped_column(String(64))
-    az: Mapped[str | None] = mapped_column(String(64))
-    ip: Mapped[str | None] = mapped_column(String(128))
-    spec: Mapped[str | None] = mapped_column(String(128))              # 规格摘要，例如 “8 vCPU | 32 GB”
+    az: Mapped[str | None] = mapped_column(Text)
+    ip: Mapped[str | None] = mapped_column(Text)
+    spec: Mapped[str | None] = mapped_column(Text)                     # 上游可返回多 AZ / 多 IP，规格为组合摘要
     vcpus: Mapped[int | None] = mapped_column(Integer)
     memory_gb: Mapped[float | None] = mapped_column(Float)
     storage_gb: Mapped[float | None] = mapped_column(Float)
@@ -46,6 +50,8 @@ class Resource(Base):
     metrics: Mapped[dict] = mapped_column(JsonType, default=dict)       # 最新关键指标，供列表展示
     expected_state: Mapped[dict] = mapped_column(JsonType, default=dict)
     # ---- 管理字段（页面维护）----
+    owner_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("sys_user.id", name="fk_resource_owner_user_id_sys_user", ondelete="SET NULL"), index=True)
     owner: Mapped[str | None] = mapped_column(String(64))
     business: Mapped[str | None] = mapped_column(String(64))            # 所属业务系统
     env_type: Mapped[str | None] = mapped_column(String(16))            # PROD / TEST / DEV

@@ -3,16 +3,19 @@
 - 环境变量（INSPECTOR_*）里的同名配置只作为默认值；页面保存后以数据库为准，各进程每次使用时读取（无需重启）
 - 每个键对应一个 Pydantic 模型：保存前校验取值范围，读取时缺失字段补默认值（新版本加字段不需要迁移）
 """
+import math
 import re
-from typing import Literal
+from typing import Annotated, Literal
 
 from apscheduler.triggers.cron import CronTrigger
 from pydantic import BaseModel, Field, ValidationError, field_validator
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.response import BizError, ErrorCode
-from app.models import SysSetting
+from app.models import SysSetting, User
+from app.services.recipients import emails_for_users, ids_for_emails, validate_user_ids
 
 EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 REPORT_KINDS = ("DAILY", "WEEKLY", "MONTHLY")
@@ -48,7 +51,9 @@ class ReportSettings(BaseModel):
 
     cron: dict[str, str] = Field(default_factory=dict, description="发送时间（crontab：分 时 日 月 周）")
     enabled: dict[str, bool] = Field(default_factory=dict, description="是否启用")
-    mail_to: list[str] = Field(default_factory=list, description="合并报表收件人")
+    recipient_user_ids: list[Annotated[int, Field(strict=True, gt=0)]] = Field(
+        default_factory=list, description="合并报表收件人员")
+    mail_to: list[str] = Field(default_factory=list, description="合并报表收件邮箱（只读，来自用户管理）")
 
     @field_validator("cron")
     @classmethod
@@ -80,7 +85,9 @@ class PlatformAlarm(BaseModel):
     notify_fail_alarm: bool = Field(True, description="通知重试 5 次仍失败时告警")
     heartbeat_timeout_min: int = Field(3, ge=1, le=60, description="后台进程无心跳 N 分钟告警")
     severity: Literal["P1", "P2", "P3"] = Field("P2", description="平台告警级别")
-    mail_to: list[str] = Field(default_factory=list, description="没有通知路由命中时的收件人；为空发给有邮箱的平台管理员")
+    recipient_user_ids: list[Annotated[int, Field(strict=True, gt=0)]] = Field(
+        default_factory=list, description="平台告警收件人员")
+    mail_to: list[str] = Field(default_factory=list, description="收件邮箱（只读）；未选择人员时发给全租户平台管理员")
 
     @field_validator("mail_to")
     @classmethod
@@ -94,11 +101,11 @@ class DictItem(BaseModel):
 
 
 class LedgerDict(BaseModel):
-    """台账字典：业务系统、负责人的统一取值（台账编辑和 Excel 导入时使用，避免同一个系统多种写法）。"""
+    """业务系统字典；owners 为统一用户目录的只读兼容投影。"""
 
     business: list[DictItem] = Field(default_factory=list, description="业务系统")
-    owners: list[DictItem] = Field(default_factory=list, description="负责人")
-    enforce: bool = Field(False, description="只能从字典选择（Excel 导入时字典外的取值会被拒绝）")
+    owners: list[DictItem] = Field(default_factory=list, description="负责人（只读，来自用户管理）")
+    enforce: bool = Field(False, description="业务系统只能从字典选择")
 
     @field_validator("business", "owners")
     @classmethod
@@ -113,13 +120,35 @@ class LedgerDict(BaseModel):
         return out
 
 
+class CollectionSettings(BaseModel):
+    hcs_concurrency: int = Field(4, ge=1, le=16, description="HCS 明细请求并发数")
+    hcs_qps: dict[str, float] = Field(default_factory=dict, description="各服务每秒请求数上限")
+
+    @field_validator("hcs_qps")
+    @classmethod
+    def _qps(cls, value: dict[str, float]) -> dict[str, float]:
+        from app.hcs.factory import DEFAULT_QPS
+
+        if any(service not in DEFAULT_QPS for service in value):
+            raise ValueError("QPS 配置包含未知云服务")
+        if any(not math.isfinite(rate) or not 0.1 <= rate <= 1000 for rate in value.values()):
+            raise ValueError("QPS 必须为 0.1 到 1000 之间的有限数值")
+        return {**DEFAULT_QPS, **value}
+
+
 MODELS: dict[str, type[BaseModel]] = {"retention": Retention, "report": ReportSettings,
-                                      "platform_alarm": PlatformAlarm, "ledger_dict": LedgerDict}
-LABELS = {"retention": "数据保留", "report": "定时报表", "platform_alarm": "平台自身告警", "ledger_dict": "台账字典"}
+                                      "platform_alarm": PlatformAlarm, "ledger_dict": LedgerDict,
+                                      "collect": CollectionSettings}
+LABELS = {"retention": "数据保留", "report": "定时报表", "platform_alarm": "平台自身告警", "ledger_dict": "台账字典",
+          "collect": "HCS 采集性能"}
 
 
 def _defaults(key: str) -> dict:
     s = get_settings()
+    if key == "collect":
+        from app.hcs.factory import DEFAULT_QPS
+
+        return {"hcs_qps": dict(DEFAULT_QPS)}
     if key == "retention":
         return {"pod_event_days": s.pod_event_retention_days}
     if key == "report":
@@ -128,14 +157,30 @@ def _defaults(key: str) -> dict:
     return {}
 
 
+def _recipient_values(db: Session, data: dict) -> dict:
+    if "recipient_user_ids" in data:
+        raw = data["recipient_user_ids"]
+        ids = list(dict.fromkeys(uid for uid in raw if type(uid) is int and uid > 0)) if isinstance(raw, list) else []
+    else:
+        # 包括 REPORT_MAIL_TO 环境默认值：只引用已登记且范围匹配的人员。
+        ids = ids_for_emails(db, data.get("mail_to", []), strict=False)
+    return {"recipient_user_ids": ids, "mail_to": emails_for_users(db, ids)}
+
+
 def get(db: Session, key: str) -> BaseModel:
-    model = MODELS[key]
-    row = db.get(SysSetting, key)
-    data = {**_defaults(key), **((row.value if row else None) or {})}
-    try:
-        return model.model_validate(data)
-    except ValueError:                     # 库里的历史值不合法（例如手工改库）：退回默认值，不影响运行
-        return model.model_validate(_defaults(key))
+    with db.no_autoflush:
+        model = MODELS[key]
+        row = db.scalar(select(SysSetting).where(SysSetting.key == key).execution_options(populate_existing=True))
+        data = {**_defaults(key), **((row.value if row else None) or {})}
+        recipients = _recipient_values(db, data) if key in {"report", "platform_alarm"} else {}
+        data.update(recipients)
+        if key == "ledger_dict":
+            names = sorted(set(db.scalars(select(User.display_name).where(User.enabled.is_(True)))))
+            data["owners"] = [{"name": name} for name in names]
+        try:
+            return model.model_validate(data)
+        except ValueError:                     # 其他历史字段非法时仍保留 ID 权威，不能退回任意旧邮箱。
+            return model.model_validate({**_defaults(key), **recipients})
 
 
 def get_retention(db: Session) -> Retention:
@@ -160,6 +205,12 @@ def get_ledger_dict(db: Session) -> LedgerDict:
     v = get(db, "ledger_dict")
     assert isinstance(v, LedgerDict)
     return v
+
+
+def get_collect(db: Session) -> CollectionSettings:
+    value = get(db, "collect")
+    assert isinstance(value, CollectionSettings)
+    return value
 
 
 def explain(e: ValidationError, model: type[BaseModel]) -> str:
@@ -189,17 +240,36 @@ def save(db: Session, key: str, data: dict, operator: str) -> tuple[BaseModel, d
     if key not in MODELS:
         raise BizError(ErrorCode.NOT_FOUND, f"未知设置项：{key}", 404)
     before = get(db, key).model_dump(mode="json")
+    if key == "ledger_dict" and "owners" in data:
+        owners = data["owners"]
+        valid = isinstance(owners, list) and all(
+            isinstance(item, dict) and isinstance(item.get("name"), str) for item in owners)
+        if not valid or sorted(item["name"] for item in owners) != sorted(item["name"] for item in before["owners"]):
+            raise BizError(ErrorCode.BAD_REQUEST, "负责人由用户管理统一维护，不能修改负责人字典")
+        data = {k: v for k, v in data.items() if k != "owners"}
+    if key in {"report", "platform_alarm"}:
+        if "recipient_user_ids" in data:
+            ids = data["recipient_user_ids"]
+        elif "mail_to" in data:
+            ids = ids_for_emails(db, data["mail_to"])
+        else:
+            ids = before["recipient_user_ids"]
+        ids = validate_user_ids(db, ids, existing_ids=before["recipient_user_ids"])
+        data = {**data, "recipient_user_ids": ids, "mail_to": emails_for_users(db, ids)}
     try:
         value = MODELS[key].model_validate({**before, **data})
     except ValidationError as e:
         raise BizError(ErrorCode.BAD_REQUEST, explain(e, MODELS[key])) from e
     after = value.model_dump(mode="json")
     row = db.get(SysSetting, key)
+    stored = after
+    if key == "ledger_dict":
+        stored = {**after, "owners": (row.value or {}).get("owners", []) if row else []}
     if row is None:
-        row = SysSetting(key=key, value=after, updated_by=operator)
+        row = SysSetting(key=key, value=stored, updated_by=operator)
         db.add(row)
     else:
-        row.value, row.updated_by = after, operator
+        row.value, row.updated_by = stored, operator
     db.flush()
     return value, {k: [before.get(k), after[k]] for k in after if before.get(k) != after[k]}
 

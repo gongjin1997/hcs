@@ -11,6 +11,9 @@ htmlcov/
 coverage.xml
 *.db
 .env
+.runtime/
+output/playwright/
+.playwright-cli/
 
 # Node
 node_modules/
@@ -31,6 +34,11 @@ deploy/data/
 deploy/backups/
 deploy/exports/
 deploy/images/
+deploy/code/
+deploy/releases/
+deploy/.code.env
+deploy/.code-env.*
+deploy/.compose-legacy/
 deploy/nginx/certs/*
 !deploy/nginx/certs/README.md
 deploy/certs/*

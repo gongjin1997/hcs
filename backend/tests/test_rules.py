@@ -51,7 +51,7 @@ def test_state_rule_critical_severity():
 
 
 def test_page_all_offset_and_page_modes():
-    data = list(range(250))
+    data = [{"id": i} for i in range(250)]
     got = list(page_all(lambda p: {"items": data[p["offset"]:p["offset"] + p["limit"]], "total": 250}, "items"))
     assert got == data
     calls = []

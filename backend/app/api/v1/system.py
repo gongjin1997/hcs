@@ -4,13 +4,17 @@
 - 采集开关：按资源类型（全局 + 每个租户单独设置）启停台账同步和巡检，collect:manage；部分租户用户只能改自己租户的设置
 - 系统设置：数据保留 / 平台自身告警（setting:manage）、定时报表（report:config）、台账字典（ledger:edit）
 """
+import logging
+import threading
+import time
 from datetime import datetime, timedelta
+from typing import Annotated
 from zoneinfo import ZoneInfo
 
 from apscheduler.triggers.cron import CronTrigger
-from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app import __version__
@@ -27,40 +31,89 @@ from app.models import AlarmEvent, InspectionRun, InspectionTask, Notification, 
 from app.models.alarm import ACTIVE_STATUSES
 from app.models.base import utcnow
 from app.schemas.alarm import AlarmOut
+from app.schemas.system import TaskRunOut, TaskScopeOut
 from app.services import collect_switch, pipeline, platform_watch, settings_service, silence_service
 from app.services.cleanup import CLEANUP_TASK
 from app.services.tenancy import tenant_map
 
 router = APIRouter(prefix="/system", tags=["系统管理"])
 STARTED_AT = utcnow()
+log = logging.getLogger(__name__)
+_redis_health_lock = threading.Lock()
+_redis_failed = False
+_redis_next_log = 0.0
+
+
+def _redis_health(url: str) -> bool:
+    global _redis_failed, _redis_next_log
+    failure = None
+    try:
+        import redis
+
+        with redis.Redis.from_url(url, socket_timeout=1, socket_connect_timeout=1) as client:
+            healthy = bool(client.ping())
+    except Exception as exc:
+        failure, healthy = exc, False
+    with _redis_health_lock:
+        now = time.monotonic()
+        if not healthy and (not _redis_failed or now >= _redis_next_log):
+            safe = RuntimeError(type(failure).__name__ if failure else "Redis ping failed")
+            log.warning("dependency.failed", extra={"dependency": "redis", "exception_type": type(failure).__name__},
+                        exc_info=(RuntimeError, safe, failure.__traceback__) if failure else None)
+            _redis_next_log = now + 60
+        elif healthy and _redis_failed:
+            log.info("dependency.restored", extra={"dependency": "redis"})
+        _redis_failed = not healthy
+    return healthy
+
+
 # 系统设置：键 → (查看权限, 修改权限)
 SETTING_PERMS = {"retention": ("setting:manage", "setting:manage"), "platform_alarm": ("setting:manage", "setting:manage"),
-                 "report": ("report:view", "report:config"), "ledger_dict": ("ledger:view", "ledger:edit")}
+                 "report": ("report:view", "report:config"), "ledger_dict": ("ledger:view", "ledger:edit"),
+                 "collect": ("setting:manage", "setting:manage")}
 MIN_INTERVAL = {LEDGER_TASK: 600}
 TASK_NOTES = {
     LEDGER_TASK: "同步 14 类资源的台账（新增 / 变更 / 释放），关闭采集的资源类型会跳过",
     CLEANUP_TASK: "按“系统设置 → 数据保留”删除过期的运行记录、通知、已恢复告警、审计、变更记录等",
     "cce_pod_events": "采集 CCE 集群 Kubernetes Events，汇总容器重启 / OOM / 背压等事件",
+    "cce_cluster_health": "只读采集 CCE 集群节点、节点池健康与显式启用的 Kubernetes 原生指标",
+    "mrs_job_status": "作业 API 与时长单位需按局点 MRS 组件版本确认",
+    "ecs_status": "ECS 状态与告警判定；使用独立指标采样点，不重复查询指标源。各租户频率在 ECS 采集策略配置",
+    "ecs_metrics": "按租户策略采样 CPU、内存等指标；只查询纳入范围的本地实例，缺失不补零",
+    "ecs_quota": "查询各项目实际配额；独立启停与周期，不调用云端配额修改接口",
+    "gaussdb_status": "使用 GaussDB 原生接口只读采集，不使用 AOM 映射；磁盘、慢 SQL、会话等见 GaussDB 面板",
 }
+AOM_MAPPING_FIELDS = {"namespace", "dimension", "metrics", "units", "period", "window_sec", "prometheus_instance_id"}
 
 
 @router.get("/info", summary="平台信息（适配的 HCS 版本、指标来源说明）")
 def info(_: object = Depends(require_perm("task:view", "tenant:view", any_of=True))):
     s = get_settings()
     return ok({"version": __version__, "hcs_version": s.hcs_version, "env": s.env, "metrics_sources": SOURCES,
-               "capabilities": CAPABILITIES, "mock": bool(s.hcs_mock_url) and s.env != "prod",
+               "capabilities": CAPABILITIES, "ces_enabled": s.hcs_ces_enabled,
+               "mock": bool(s.hcs_mock_url) and s.env != "prod",
                "notes": {
-                   "ces": "HCS 8.5.1 的云监控 CES 为可选组件：选“自动探测”时首次巡检 / 连通性测试会调用 CES 接口，"
-                          "未部署（404 / 域名无法解析）时自动降级为 Prometheus 或只巡检状态",
-                   "prometheus": "可选：租户已有 Prometheus（node_exporter）时填写地址，作为 CES 的替代或补充",
-                   "es": "不需要 Elasticsearch：事件 / 告警 / 台账均为结构化数据，PostgreSQL + 索引 + 定期清理足够"}})
+                   "aom": "AOM 已全局停用，所有资源（含 ECS）均不使用；旧地址、映射和历史记录不代表当前可用来源",
+                   "ces": "当前 HCS 8.5.1 局点无 CES；AUTO 不探测、不请求 CES。仅旧部署显式启用 "
+                          "INSPECTOR_HCS_CES_ENABLED 并选择 CES 时保留兼容路径；DCS 不走 CES，实时内存使用原生数据",
+                   "prometheus": "可选：填写租户已有 Prometheus（node_exporter）地址后可采集 ECS 使用率；"
+                                 "AUTO 可选择已配置的此来源，否则仅保留服务原生字段；不使用 AOM"}})
 
 
 # ---------------- 巡检任务 ----------------
 class TaskPatch(BaseModel):
+    p90_min_samples: int | None = Field(None, strict=True, ge=1, le=10000)
     interval_sec: int | None = Field(None, ge=30, le=7 * 86400)
     cron: str | None = None                  # 空字符串 = 改回按周期执行
     enabled: bool | None = None
+    aom: None = Field(None, description="AOM 已全局停用；仅接受 null 清除旧映射，未传保留历史配置")
+
+    @field_validator("aom", mode="before")
+    @classmethod
+    def _aom_disabled(cls, value: object) -> None:
+        if value is not None:
+            raise ValueError("AOM 已全局停用，所有任务均不支持 AOM 映射；仅可传 null 清除旧映射")
+        return None
 
 
 def _next_runs(db: Session) -> dict[str, str | None]:
@@ -95,39 +148,73 @@ def _skipped(db: Session, code: str, scope: Scope, tm: dict) -> list[str]:
     return [t.label for t in pipeline.skipped_targets(db, code, scope.tenant_ids)]
 
 
-@router.get("/tasks", summary="巡检任务与最近运行（每个租户一条运行记录）")
+@router.get("/tasks", summary="巡检任务与项目运行（每个租户项目独立保留最近记录）")
 def tasks(db: Session = Depends(get_db), scope: Scope = Depends(get_scope),
-          _: object = Depends(require_perm("task:view"))):
+          _: object = Depends(require_perm("task:view")), project_ref: Annotated[int | None, Query(ge=1)] = None,
+          unknown_project: bool = False):
+    if project_ref is not None and unknown_project:
+        raise BizError(ErrorCode.BAD_REQUEST, "不能同时选择已知项目和历史未知项目")
     tm = tenant_map(db)
     nxt = _next_runs(db)
     now = utcnow()
+    all_scopes = platform_watch.task_scopes(db, tenant_ids=scope.tenant_ids, include_global=scope.full,
+                                           project_ref=project_ref, unknown_project=unknown_project)
     out = []
     for t in db.scalars(select(InspectionTask).order_by(InspectionTask.code)):
         q = scope.apply(select(InspectionRun).where(InspectionRun.task_code == t.code), InspectionRun.tenant_id,
                         include_global=True)
-        runs = db.scalars(q.order_by(InspectionRun.started_at.desc()).limit(12)).all()
+        if project_ref is not None:
+            q = q.where(InspectionRun.project_ref == project_ref)
+        if unknown_project:
+            q = q.where(InspectionRun.project_ref.is_(None),
+                        or_(InspectionRun.task_code != CLEANUP_TASK, InspectionRun.tenant_id.is_not(None)))
+        ranked = q.with_only_columns(InspectionRun.id, func.row_number().over(
+            partition_by=(InspectionRun.tenant_id, InspectionRun.project_ref),
+            order_by=(func.coalesce(InspectionRun.finished_at, InspectionRun.started_at).desc(),
+                      InspectionRun.id.desc())).label("position")).subquery()
+        runs = db.scalars(select(InspectionRun).join(ranked, InspectionRun.id == ranked.c.id)
+                          .where(ranked.c.position <= 12)
+                          .order_by(func.coalesce(InspectionRun.finished_at, InspectionRun.started_at).desc(),
+                                    InspectionRun.id.desc())).all()
+        current = [s for s in all_scopes if s["task_code"] == t.code]
         next_run = nxt.get(t.code) if nxt else _estimate_next(t, runs[0].started_at if runs else None, now)
         out.append({"code": t.code, "name": t.name, "service": t.service, "interval_sec": t.interval_sec,
                     "cron": t.cron, "enabled": t.enabled, "params": t.params, "next_run": next_run,
                     "next_run_source": "scheduler" if nxt else "estimate",
                     "types": collect_switch.TASK_TYPES.get(t.code, []), "note": TASK_NOTES.get(t.code),
                     "min_interval": MIN_INTERVAL.get(t.code, 30), "skipped_tenants": _skipped(db, t.code, scope, tm),
-                    "runs": [{"id": r.id, "tenant_id": r.tenant_id, "tenant_name": _tenant_name(tm, r.tenant_id),
-                              "trigger_type": r.trigger_type, "started_at": r.started_at,
-                              "finished_at": r.finished_at, "status": r.status, "resource_total": r.resource_total,
-                              "abnormal_total": r.abnormal_total, "api_calls": r.api_calls,
-                              "error_summary": r.error_summary, "stats": r.stats or {}} for r in runs]})
+                    "scopes": [TaskScopeOut(**{k: v for k, v in s.items() if k != "run"},
+                                           tenant_name=_tenant_name(tm, s["tenant_id"])).model_dump() for s in current],
+                    "history_limit_per_scope": 12,
+                    "runs": [TaskRunOut.model_validate(r).model_copy(update={
+                        "tenant_name": _tenant_name(tm, r.tenant_id),
+                        "project_scope": platform_watch.scope_kind(r.task_code, r.tenant_id, r.project_ref),
+                        "project_label": f"项目#{r.project_ref}" if r.project_ref is not None else
+                                         "全局内部任务" if r.task_code == CLEANUP_TASK and r.tenant_id is None else
+                                         "历史未知项目（未记录）"}).model_dump() for r in runs]})
     return ok(out)
 
 
-@router.put("/tasks/{code}", summary="修改任务：周期（秒）/ crontab / 启停（调度进程最迟 30 秒生效）")
+@router.put("/tasks/{code}", summary="修改任务：周期（秒）/ crontab / 启停 / 清除旧 AOM 映射（调度进程最迟 30 秒生效）")
 def update_task(code: str, body: TaskPatch, db: Session = Depends(get_db), audit: Auditor = Depends(get_auditor),
-                _: CurrentUser = Depends(require_perm("task:edit"))):
+                _: CurrentUser = Depends(require_perm("task:edit")), scope: Scope = Depends(get_scope)):
+    if not scope.full:
+        raise BizError(ErrorCode.FORBIDDEN, "任务调度为全局配置，修改需要全部租户的数据权限", 403)
     t = db.get(InspectionTask, code)
     if t is None:
         raise not_found("巡检任务")
     data = body.model_dump(exclude_unset=True)
-    before = {"interval_sec": t.interval_sec, "cron": t.cron, "enabled": t.enabled}
+    before: dict[str, object] = {"interval_sec": t.interval_sec, "cron": t.cron, "enabled": t.enabled}
+    if "p90_min_samples" in data:
+        if code != "dgc_batch_instance":
+            raise BizError(ErrorCode.BAD_REQUEST, "P90 样本数仅用于 DataArts 批作业任务")
+        params = dict(t.params or {})
+        before["p90_min_samples"] = params.get("p90_min_samples", 5)
+        if data["p90_min_samples"] is None:
+            params.pop("p90_min_samples", None)
+        else:
+            params["p90_min_samples"] = data["p90_min_samples"]
+        t.params = params
     if data.get("interval_sec") is not None:
         low = MIN_INTERVAL.get(code, 30)
         if data["interval_sec"] < low:
@@ -145,13 +232,24 @@ def update_task(code: str, body: TaskPatch, db: Session = Depends(get_db), audit
         t.cron = expr
     if data.get("enabled") is not None:
         t.enabled = bool(data["enabled"])
-    after = {"interval_sec": t.interval_sec, "cron": t.cron, "enabled": t.enabled}
+    if "aom" in data:
+        params = dict(t.params or {})
+        previous = params.get("aom")
+        before["aom"] = ({key: value for key, value in previous.items() if key in AOM_MAPPING_FIELDS}
+                         if isinstance(previous, dict) else "旧格式映射" if previous is not None else None)
+        params.pop("aom", None)
+        t.params = params
+    after: dict[str, object] = {"interval_sec": t.interval_sec, "cron": t.cron, "enabled": t.enabled}
+    if "p90_min_samples" in data:
+        after["p90_min_samples"] = (t.params or {}).get("p90_min_samples", 5)
+    if "aom" in data:
+        after["aom"] = (t.params or {}).get("aom")
     diff = {k: [before[k], after[k]] for k in after if before[k] != after[k]}
     if diff:
         audit.log("task.update", target_type="task", target_id=code, target_name=t.name, detail={"changes": diff})
     else:
         db.commit()
-    return ok({**after, "code": code, "changed": bool(diff)})
+    return ok({**after, "code": code, "params": t.params or {}, "changed": bool(diff)})
 
 
 @router.post("/tasks/{code}/run", summary="立即执行（按当前租户范围逐个租户执行；关闭采集的租户跳过）")
@@ -170,17 +268,20 @@ def run_task(code: str, db: Session = Depends(get_db), scope: Scope = Depends(ge
     if not runs and skipped:
         raise BizError(ErrorCode.CONFLICT, f"当前范围内的租户都已关闭该任务的采集：{'、'.join(skipped)}", 409,
                        {"skipped": skipped})
-    items = [{"run_id": r.id, "tenant_id": r.tenant_id, "tenant_name": _tenant_name(tm, r.tenant_id),
+    items = [{"run_id": r.id, "tenant_id": r.tenant_id, "project_ref": r.project_ref,
+              "tenant_name": _tenant_name(tm, r.tenant_id),
               "status": r.status, "resource_total": r.resource_total, "abnormal_total": r.abnormal_total,
               "api_calls": r.api_calls, "error_summary": r.error_summary, "stats": r.stats or {}} for r in runs]
-    failed = [i for i in items if i["status"] == "FAILED"]
+    failed = [i for i in items if i["status"] in ("FAILED", "TIMEOUT")]
+    outcome = platform_watch.run_outcome(runs, skipped=bool(skipped))
     audit.log("task.run", target_type="task", target_id=code, target_name=task.name,
-              tenant_id=scope.single, result="FAILED" if runs and len(failed) == len(runs) else "SUCCESS",
-              detail={"runs": [{"tenant": i["tenant_name"], "status": i["status"]} for i in items], "skipped": skipped})
-    if runs and len(failed) == len(runs):
+              tenant_id=scope.single, result="SUCCESS" if outcome == "SUCCESS" else "FAILED",
+              detail={"outcome": outcome, "runs": [{"tenant": i["tenant_name"], "project_ref": i["project_ref"],
+                      "status": i["status"]} for i in items], "skipped": skipped})
+    if outcome == "FAILED":
         raise BizError(ErrorCode.HCS_UPSTREAM, "执行失败：" + "；".join(
             f"{i['tenant_name'] or '默认'}：{i['error_summary']}" for i in failed)[:500], 502, {"runs": items})
-    return ok({"runs": items, "skipped": skipped, "status": "PARTIAL" if failed else "SUCCESS"})
+    return ok({"runs": items, "skipped": skipped, "status": outcome})
 
 
 # ---------------- 采集开关 ----------------
@@ -307,7 +408,10 @@ def _worker(hb: WorkerHeartbeat | None, name: str, timeout_min: int) -> dict:
 
 @router.get("/platform", summary="平台状态：后台进程心跳、通知投递、任务健康、平台自身告警、数据清理")
 def platform(db: Session = Depends(get_db), scope: Scope = Depends(get_scope),
-             _: object = Depends(require_perm("task:view"))):
+             _: object = Depends(require_perm("task:view")), project_ref: Annotated[int | None, Query(ge=1)] = None,
+             unknown_project: bool = False):
+    if project_ref is not None and unknown_project:
+        raise BizError(ErrorCode.BAD_REQUEST, "不能同时选择已知项目和历史未知项目")
     s = get_settings()
     now = utcnow()
     cfg = settings_service.get_platform_alarm(db)
@@ -321,40 +425,29 @@ def platform(db: Session = Depends(get_db), scope: Scope = Depends(get_scope),
     last_sent = db.scalar(select(func.max(Notification.sent_at)).where(Notification.status == "SENT"))
     tm = tenant_map(db)
     health = []
+    all_scopes = platform_watch.task_scopes(db, tenant_ids=scope.tenant_ids, include_global=scope.full,
+                                           project_ref=project_ref, unknown_project=unknown_project)
     for t in db.scalars(select(InspectionTask).order_by(InspectionTask.code)):
-        q = scope.apply(select(InspectionRun).where(InspectionRun.task_code == t.code, InspectionRun.status != "RUNNING"),
-                        InspectionRun.tenant_id, include_global=True)
-        runs = db.scalars(q.order_by(InspectionRun.started_at.desc()).limit(60)).all()
-        per: dict = {}
-        for r in runs:
-            p = per.setdefault(r.tenant_id, {"tenant_id": r.tenant_id, "tenant_name": _tenant_name(tm, r.tenant_id),
-                                             "last_status": r.status, "last_at": r.started_at, "fails": 0,
-                                             "counting": True, "last_success_at": None})
-            if p["counting"] and r.status == "FAILED":
-                p["fails"] += 1
-            elif r.status != "FAILED":
-                p["counting"] = False
-                p["last_success_at"] = p["last_success_at"] or r.started_at
-        tenants = [{k: v for k, v in p.items() if k != "counting"} for p in per.values()]
+        selected = [s for s in all_scopes if s["task_code"] == t.code]
+        tenants = [TaskScopeOut(**{k: v for k, v in p.items() if k != "run"},
+                               tenant_name=_tenant_name(tm, p["tenant_id"])).model_dump() for p in selected]
         health.append({"code": t.code, "name": t.name, "enabled": t.enabled, "interval_sec": t.interval_sec,
                        "cron": t.cron, "tenants": tenants,
-                       "status": "FAILED" if any(p["fails"] >= cfg.task_fail_threshold for p in tenants)
-                       else ("WARN" if any(p["fails"] for p in tenants) else "OK")})
+                       "status": platform_watch.task_health(selected, cfg.task_fail_threshold, enabled=t.enabled)})
     alarms_q = scope.apply(select(AlarmEvent).where(AlarmEvent.service == platform_watch.PLATFORM,
                                                     AlarmEvent.status.in_(ACTIVE_STATUSES)),
                            AlarmEvent.tenant_id, include_global=True)
+    if project_ref is not None:
+        alarms_q = alarms_q.where(AlarmEvent.detail["project_ref"].as_integer() == project_ref)
+    if unknown_project:
+        alarms_q = alarms_q.where(AlarmEvent.detail["project_ref"].as_integer().is_(None))
     alarms = db.scalars(alarms_q.order_by(AlarmEvent.first_seen.desc()).limit(20)).all()
     cleanup = db.scalar(select(InspectionRun).where(InspectionRun.task_code == CLEANUP_TASK)
                         .order_by(InspectionRun.started_at.desc()).limit(1))
     silences = len(silence_service.active_silences(db, now))
     redis_ok = None
     if s.redis_url:
-        try:
-            import redis
-
-            redis_ok = bool(redis.Redis.from_url(s.redis_url, socket_timeout=1).ping())
-        except Exception:  # noqa: BLE001
-            redis_ok = False
+        redis_ok = _redis_health(s.redis_url)
     return ok({
         "version": __version__, "env": s.env, "timezone": s.timezone, "api_started_at": STARTED_AT,
         "database": db.bind.dialect.name if db.bind is not None else None,

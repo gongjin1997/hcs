@@ -2,10 +2,10 @@
   <div class="simulate">
     <div class="form-side">
       <div class="p-title">模拟一条告警</div>
-      <el-form label-width="72px" size="default">
+      <el-form label-width="72px" size="default" @submit.prevent>
         <el-form-item v-if="app.tenants.length > 1" label="租户">
-          <el-select v-model="q.tenant_id" clearable placeholder="不指定" class="w-full">
-            <el-option v-for="t in app.tenants" :key="t.id" :value="t.id" :label="t.name" />
+          <el-select v-model="q.tenant_id" :clearable="canEmptyTenant" placeholder="不指定" class="w-full">
+            <el-option v-for="t in tenantOptions" :key="t.id" :value="t.id" :label="t.name" />
           </el-select>
         </el-form-item>
         <el-form-item label="服务">
@@ -43,7 +43,7 @@
               <el-tag v-for="e in res.platform_fallback" :key="e" type="warning" effect="plain" class="mono">{{ e }}</el-tag>
               <span class="text-3">（没有路由命中，平台告警发给兜底收件人）</span>
             </template>
-            <span v-else class="text-danger">没有任何路由命中 —— 这类告警不会通知任何人，建议增加兜底路由</span>
+            <span v-else class="text-danger">没有任何路由命中：这类告警不会通知任何人，建议增加兜底路由</span>
           </div>
         </div>
         <div class="p-title">路由匹配过程（按优先级）</div>
@@ -79,20 +79,33 @@
 
 <script setup lang="ts">
 import { Promotion, Timer } from '@element-plus/icons-vue'
-import { reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
+import { ElMessage } from 'element-plus'
+import { useUserStore } from '@/stores/user'
+import { useLatestRequest } from '@/composables/useLatestRequest'
 import { simulateRoute } from '@/api'
 import { useAppStore } from '@/stores/app'
 import type { SimulateResult } from '@/types'
 import { RESOURCE_TYPES, SERVICES, SEVERITIES } from '@/utils/dict'
 
 const app = useAppStore()
-const q = reactive({ tenant_id: (app.currentTenant?.id ?? app.tenants[app.tenants.length - 1]?.id ?? null) as number | null,
+const user = useUserStore()
+const tenantOptions = computed(() => app.currentTenant ? [app.currentTenant] : app.tenants)
+const canEmptyTenant = computed(() => !!user.user && user.user.tenant_ids == null && app.tenantId == null)
+const q = reactive({ tenant_id: (app.currentTenant?.id ?? tenantOptions.value[0]?.id ?? null) as number | null,
   service: 'dcs', resource_type: 'dcs_instance' as string | null, severity: 'P1', resource_name: 'redis-prod-01' })
-const loading = ref(false)
+const request = useLatestRequest()
+const loading = request.loading
 const res = ref<SimulateResult | null>(null)
+watch(q, () => { request.invalidate(); res.value = null }, { deep: true, flush: 'sync' })
 async function run() {
-  loading.value = true
-  try { res.value = await simulateRoute({ ...q }) } finally { loading.value = false }
+  if ((q.tenant_id == null && !canEmptyTenant.value) || (q.tenant_id != null && !tenantOptions.value.some(tenant => tenant.id === q.tenant_id))) {
+    ElMessage.warning('请选择当前范围内的租户')
+    return false
+  }
+  const snapshot = { ...q }
+  res.value = null
+  return request.run(() => simulateRoute(snapshot), result => { res.value = result }).catch(() => false)
 }
 defineExpose({ run })
 </script>

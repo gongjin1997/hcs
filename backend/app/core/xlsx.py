@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi.responses import Response
 from openpyxl import Workbook
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
@@ -21,6 +22,11 @@ THIN = Side(style="thin", color="E5E6EB")
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
+def filename_stamp(at: datetime, pattern: str = "%Y%m%d_%H%M%S") -> str:
+    """文件名与工作簿使用同一系统时区，不依赖宿主机 TZ。"""
+    return at.astimezone(ZoneInfo(get_settings().timezone)).strftime(pattern)
+
+
 def cell_value(v: Any) -> Any:
     if isinstance(v, datetime):
         return v.astimezone(ZoneInfo(get_settings().timezone)).replace(tzinfo=None)
@@ -28,6 +34,8 @@ def cell_value(v: Any) -> Any:
         return "是" if v else "否"
     if isinstance(v, list | dict):
         return str(v)
+    if isinstance(v, str):
+        return ILLEGAL_CHARACTERS_RE.sub("", v)[:32767]
     return v
 
 
@@ -40,6 +48,8 @@ def write_table(ws: Worksheet, headers: Sequence[str], rows: Iterable[Sequence[A
     for n, row in enumerate(rows, start_row + 1):
         for i, v in enumerate(row, 1):
             c = ws.cell(row=n, column=i, value=cell_value(v))
+            if isinstance(c.value, str):
+                c.data_type = "s"
             c.border = Border(bottom=THIN)
             if isinstance(c.value, datetime):
                 c.number_format = "yyyy-mm-dd hh:mm"

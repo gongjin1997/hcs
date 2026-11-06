@@ -22,24 +22,35 @@ def test_dashboard(client, admin, tenant_ids):
     assert 0 <= data["health_score"] <= 100
     assert [g["code"] for g in data["groups"]] == ["ecs", "dgc_realtime", "dgc_batch", "mrs", "gaussdb", "dcs", "cce"]
     assert len(data["trend"]["hours"]) == 24
-    assert data["kpis"]["active_alarms"] == 30 and data["kpis"]["p1"] == 4 and data["kpis"]["resources"] == 97
+    # 规则/证据修复会改变合成告警数；总览须与同范围告警清单一致，不能固定旧误报数量。
+    active = client.get("/api/v1/alarms", params={"status_group": "active", "page_size": 200}, headers=admin).json()["data"]
+    assert data["kpis"]["active_alarms"] == active["total"]
+    assert data["kpis"]["p1"] == sum(row["severity"] == "P1" for row in active["items"])
+    assert data["kpis"]["resources"] == 97
     assert data["ledger"]["total"] == 196 and len(data["ledger"]["by_category"]) == 5
     tenants = {t["code"]: t for t in data["tenants"]}
     assert set(tenants) == {"tenant-a", "tenant-b"}
-    assert (tenants["tenant-a"]["auth_type"], tenants["tenant-a"]["metrics_source"]) == ("PASSWORD", "CES")
+    assert (tenants["tenant-a"]["auth_type"], tenants["tenant-a"]["metrics_source"]) == ("PASSWORD", "AUTO")
+    # 演示 AUTO 只选已配置的本地合成 Prometheus；生产数据源配置不受演示初始化影响。
+    assert tenants["tenant-a"]["metrics_effective"] == "PROMETHEUS"
     assert (tenants["tenant-b"]["auth_type"], tenants["tenant-b"]["metrics_source"]) == ("AKSK", "PROMETHEUS")
     assert [sum(e["count"] for e in tenants[c]["ecs"]) for c in ("tenant-a", "tenant-b")] == [34, 15]
     assert data["ecs"]["total"] == 49 and {s["status"] for s in data["ecs"]["by_status"]} >= {"ACTIVE", "SHUTOFF", "ERROR"}
-    assert data["pods"]["restarts_24h"] > 0 and data["pods"]["top_restart"][0]["workload"] == "web/portal-api"
+    # 演示历史按业务高峰分布，24h 窗口内的榜首会随测试时间变化。
+    top = data["pods"]["top_restart"]
+    assert data["pods"]["restarts_24h"] > 0 and top
+    assert all(item["workload"] and item["count"] > 0 for item in top)
+    assert [item["count"] for item in top] == sorted((item["count"] for item in top), reverse=True)
+    assert sum(item["count"] for item in top) <= data["pods"]["restarts_24h"]
     # 顶部切换到租户A：只统计租户A 的数据
     a = client.get("/api/v1/dashboard/summary", headers={**admin, "X-Tenant-Id": str(tenant_ids["tenant-a"])}).json()
-    assert a["data"]["ledger"]["total"] == 138 and a["data"]["kpis"]["active_alarms"] == 23   # 含 1 条平台告警
+    assert a["data"]["ledger"]["total"] == 138 and a["data"]["kpis"]["active_alarms"] == 20   # 含 1 条平台告警
     assert [t["code"] for t in a["data"]["tenants"]] == ["tenant-a"]
 
 
 def test_alarm_list_and_ack(client, admin):
     page = client.get("/api/v1/alarms", params={"severity": ["P1"]}, headers=admin).json()["data"]
-    assert page["total"] == 4 and all(a["severity"] == "P1" for a in page["items"])
+    assert page["total"] == 3 and all(a["severity"] == "P1" for a in page["items"])
     firing = next(a for a in page["items"] if a["status"] == "FIRING")
     r = client.post(f"/api/v1/alarms/{firing['id']}/ack", json={"note": "处理中"}, headers=admin)
     assert r.json()["data"]["status"] == "ACKED"
@@ -74,7 +85,7 @@ def test_oncall_can_operate_but_not_manage(client):
 
 def test_resources_and_rules(client, admin):
     meta = client.get("/api/v1/resources/types", headers=admin).json()["data"]
-    assert set(meta) == {"categories", "types", "env_types", "options", "dict"}
+    assert set(meta) == {"categories", "types", "env_types", "options", "dict", "classifications"}
     assert all(t["collect"]["enabled"] for t in meta["types"])
     assert "电商交易" in meta["options"]["business"] and "张伟" in meta["options"]["owner"]
     assert {t["code"] for t in meta["types"]} >= {"ecs_server", "dcs_instance", "dgc_realtime_job", "cce_workload"}
@@ -94,5 +105,10 @@ def test_resources_and_rules(client, admin):
 def test_mail_preview(client, admin):
     page = client.get("/api/v1/alarms", params={"keyword": "redis-prod-01"}, headers=admin).json()["data"]
     data = client.get(f"/api/v1/notify/preview/{page['items'][0]['id']}", headers=admin).json()["data"]
-    assert data["subject"] == "【P2-重要】【PROD·租户A】【DCS】redis-prod-01 内存使用率 92.3%（≥90%）"
-    assert "redis-prod-01" in data["html"] and "chenjing@example.com" in data["recipients"]
+    assert data["subject"] == "【P2-重要】【租户A】【DCS】redis-prod-01 内存使用率 92.3%（≥90%）"
+    assert "redis-prod-01" in data["html"]
+    assert set(data["recipients"]) == {"zhangwei@example.com", "lina@example.com", "zhoumin@example.com"}
+    contacts = client.get("/api/v1/notify/contacts", headers=admin).json()["data"]
+    disabled = next(c for c in contacts if c["username"] == "chenjing")
+    assert disabled["user_id"] and disabled["enabled"] is False
+    assert disabled["email"] not in data["recipients"]

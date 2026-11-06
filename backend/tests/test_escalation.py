@@ -6,7 +6,7 @@ from sqlalchemy import select
 
 from app.core.config import Settings
 from app.hcs import build_client
-from app.models import AlarmEvent, AlarmEventLog, Contact, ContactGroup, Notification, NotifyRoute
+from app.models import AlarmEvent, AlarmEventLog, Contact, ContactGroup, Notification, NotifyRoute, User
 from app.notify.escalation import escalate_unacked, escalation_plan
 from app.rules.loader import sync_default_rules
 from app.services.pipeline import run_task
@@ -22,8 +22,14 @@ def _client(settings: Settings = SETTINGS):
 
 def _setup(db):
     sync_default_rules(db)
-    db.add_all([Contact(id=1, name="张伟", email="zhangwei@example.com"),
-                Contact(id=2, name="赵磊", email="zhaolei@example.com")])
+    member = User(username="escalation-member", display_name="张伟", email="zhangwei@example.com",
+                  password_hash="!", login_enabled=False, enabled=True, notify_enabled=True, tenant_ids=None)
+    leader = User(username="escalation-leader", display_name="赵磊", email="zhaolei@example.com",
+                  password_hash="!", login_enabled=False, enabled=True, notify_enabled=True, tenant_ids=None)
+    db.add_all([member, leader])
+    db.flush()
+    db.add_all([Contact(id=1, user_id=member.id, name=member.display_name, email=member.email),
+                Contact(id=2, user_id=leader.id, name=leader.display_name, email=leader.email)])
     db.add(ContactGroup(code="ops", name="值班组", member_ids=[1], leader_ids=[2]))
     db.add(NotifyRoute(name="默认路由", priority=100, match={}, group_code="ops",
                        escalation=[{"after_min": 15, "to": "leader", "severities": ["P1", "P2"]}]))

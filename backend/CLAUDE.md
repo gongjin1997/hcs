@@ -61,12 +61,12 @@ cd backend && .venv/bin/alembic revision --autogenerate --rev-id 0004 -m "resour
 - 规则用 `tests/test_rules.py`（纯函数）；流水线 / 多租户用 `world` + `mock_http` 跑 `run_task`；接口用 `client` + `demo_login`
 - `client` 是会话级共享库：用例之间会互相看到数据，断言用“包含 / 增量”，不要断言全表条数；需要干净库用 `mem_db` / `world`
 - 全量约 23 秒；最慢的是首次启动写演示数据（约 5 秒）和 `test_bootstrap`（约 5 秒）
-- 当前只在 SQLite 上测试，PostgreSQL 差异（部分索引、`SKIP LOCKED`、VARCHAR 长度、JSONB）见任务书 T02
+- `make test-pg` 在 PostgreSQL 16 独立随机 schema 上执行全量测试；可用 `PG_URL` 指定测试库。部分索引、并发 Outbox、VARCHAR、JSONB 和时区均有专项用例；测试不会清空 public schema。
 
 ## 易踩的坑
 
 - `Session` 不是线程安全的：采集器并发调用 HCS 时，只把 HTTP 请求放进线程，写库回到主线程
-- 资源唯一键目前是全局 `(resource_type, resource_id)`，跨租户同 ID 会串数据（任务书 C01 / T04 修复）；在那之前新增查询务必带上 `tenant_id` / `project_ref`
+- 资源按 `project_ref + resource_type + resource_id` 唯一；无项目历史资源使用单独部分唯一索引。新增查询与清理必须同时限定租户 / 项目，不得收编其他项目的同 ID 记录（迁移 0004）。
 - `default_rules.yaml` 只在规则不存在时写入，改了 YAML 已部署环境不会变（要么页面改，要么写迁移）
 - 采集开关（`services/collect_switch.py`）和静默（`services/silence_service.py`）会影响“有没有告警”，排查时先看这两处
 - `services/seed*.py` 只服务演示环境，复杂度高，不在重构范围

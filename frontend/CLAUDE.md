@@ -23,17 +23,17 @@
 
 - Element Plus 组件直接写在模板里（`unplugin-vue-components` 按需引入）；`ElMessage` / `ElMessageBox` 等函数式 API 需手动 `import { ElMessage } from 'element-plus'`
 - EP 样式在 `main.ts` 整体引入一次（为了让 `styles/index.scss` 的覆盖样式始终排在后面），**组件里不要再引入 EP 样式**；不要把 `element-plus/*` 手工并进一个 chunk（会让按需引入失效，见 `vite.config.ts` 注释）
-- 页面：页头 `PageHeader`、分页 `useTable`、标签 `StatusTag` / `SeverityTag`、文案字典放 `utils/dict.ts`、时间用 `utils/format.ts`
+- 页面：`PageHeader` 通过 `:refresh` 和 `:refreshing` 注册顶栏右侧统一刷新；导入、导出、新建等按钮放对应表格/表单标题栏（`table-heading` / `table-actions`），不再使用页头操作插槽；分页 `useTable`、标签 `StatusTag` / `SeverityTag`、文案字典放 `utils/dict.ts`、时间用 `utils/format.ts`
 - 权限：路由 `meta.perm` + 菜单 + 按钮 `v-perm`，脚本里用 `useUserStore().can('xxx')`；权限点以后端 `core/permissions.py` 为准
 - 可从邮件 / 总览跳转的页面支持 URL query 预置筛选或打开详情（如告警中心 `?id=`），改路由时保持兼容（`/resources` → `/ledger` 的重定向不要删）
 - 业务规则（阈值、保留天数等）从接口读，不在前端硬编码
 - TypeScript `strict: true`；不要用 `any` 糊类型，接口类型放 `src/types/`
-- 目前没有 ESLint / Prettier / 单元测试（任务书 T12 引入）；在那之前保持与周边代码一致的风格：单引号、无分号、2 空格缩进，不做无关的格式化
+- 已有 Vitest 组合函数回归测试（`npm test`，Node 22.12+），ESLint / Prettier 仍待 T12；保持单引号、无分号、2 空格缩进，不做无关格式化
 
 ## 自检
 
 ```bash
-npm run typecheck && npm run build     # 必须通过；build 后关注 dist 体积（index ≈ 300 KB / gzip 100 KB，echarts 单独 chunk）
+npm test && npm run typecheck && npm run build  # 必须通过；ECharts 6 按需独立分包
 ```
 
 页面改动在 `make dev-api` + `make dev-web`（演示数据）下实际操作一遍：管理员和只读角色各看一次（按钮显隐、403 跳转）。

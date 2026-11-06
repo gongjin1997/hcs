@@ -22,6 +22,7 @@ from app.models import (
     Notification,
     NotifyRoute,
     Silence,
+    User,
     WorkerHeartbeat,
 )
 from app.models.base import utcnow
@@ -37,12 +38,25 @@ API = "/api/v1/notify"
 
 # ---------------------------------------------------------------- 通知配置维护
 def test_notify_contact_group_route_crud(client, admin):
-    bad = client.post(f"{API}/contacts", json={"name": "临时联系人", "email": "not-an-email"}, headers=admin)
+    person = {"username": "tmp-contact-person", "display_name": "临时联系人", "email": "tmp.contact@example.com",
+              "login_enabled": False}
+    bad = client.post("/api/v1/system/users", json={**person, "email": "not-an-email"}, headers=admin)
     assert bad.status_code == 400
-    dup = client.post(f"{API}/contacts", json={"name": "重复", "email": "zhangwei@example.com"}, headers=admin)
-    assert dup.status_code == 409 and "邮箱已存在" in dup.json()["message"]
-    cid = client.post(f"{API}/contacts", json={"name": "临时联系人", "email": "tmp.contact@example.com"},
-                      headers=admin).json()["data"]["id"]
+    dup = client.post("/api/v1/system/users", json={**person, "email": "zhangwei@example.com"}, headers=admin)
+    assert dup.status_code == 409 and "邮箱" in dup.json()["message"] and "用户管理" in dup.json()["message"]
+    created = client.post("/api/v1/system/users", json=person, headers=admin)
+    assert created.status_code == 200, created.text
+    user = created.json()["data"]
+    uid, cid = user["id"], user["contact_id"]
+    assert cid and user["login_enabled"] is False and user["role_id"] is None
+    contact = next(c for c in client.get(f"{API}/contacts", headers=admin).json()["data"] if c["id"] == cid)
+    assert contact["user_id"] == uid and contact["username"] == person["username"]
+    assert contact["name"] == person["display_name"] and contact["enabled"] is True
+    legacy = {"name": "绕过统一入口", "email": "legacy.contact@example.com"}
+    for method, path, payload in (("POST", "/contacts", legacy), ("PUT", f"/contacts/{cid}", legacy),
+                                   ("DELETE", f"/contacts/{cid}", None)):
+        moved = client.request(method, f"{API}{path}", json=payload, headers=admin)
+        assert moved.status_code == 409 and "用户管理" in moved.json()["message"]
 
     body = {"code": "tmp-group", "name": "临时联系组", "member_ids": [cid], "leader_ids": [cid]}
     gid = client.post(f"{API}/groups", json=body, headers=admin).json()["data"]["id"]
@@ -50,6 +64,9 @@ def test_notify_contact_group_route_crud(client, admin):
     assert client.post(f"{API}/groups", json={**body, "code": "Bad Code"}, headers=admin).status_code == 400
     assert client.post(f"{API}/groups", json={**body, "code": "tmp-empty", "member_ids": []},
                        headers=admin).status_code == 400
+    unregistered = client.post(f"{API}/groups", json={**body, "code": "tmp-unknown", "member_ids": [999999]},
+                                headers=admin)
+    assert unregistered.status_code == 400 and "用户管理" in unregistered.json()["message"]
     r = client.put(f"{API}/groups/{gid}", json={**body, "code": "tmp-renamed"}, headers=admin)
     assert r.status_code == 400 and "不能修改" in r.json()["message"]
 
@@ -66,10 +83,19 @@ def test_notify_contact_group_route_crud(client, admin):
     groups = {g["code"]: g for g in client.get(f"{API}/groups", headers=admin).json()["data"]}
     assert groups["tmp-group"]["routes"] == ["临时路由"] and groups["tmp-group"]["leaders"][0]["id"] == cid
 
-    # 仍被路由使用的联系组、某个组的唯一成员不能删除
+    # 仍被路由使用的联系组不能删除；人员由统一用户入口维护，联系人 ID 和联系组引用保持稳定。
     r = client.delete(f"{API}/groups/{gid}", headers=admin)
     assert r.status_code == 409 and r.json()["data"]["routes"] == ["临时路由"]
-    assert client.delete(f"{API}/contacts/{cid}", headers=admin).status_code == 409
+    updated = client.patch(f"/api/v1/system/users/{uid}", json={"display_name": "临时人员（更新）",
+                           "email": "tmp.contact.updated@example.com", "phone": "13800001000"}, headers=admin)
+    assert updated.status_code == 200 and updated.json()["data"]["contact_id"] == cid
+    assert updated.json()["data"]["groups"] == ["临时联系组"]
+    contact = next(c for c in client.get(f"{API}/contacts", headers=admin).json()["data"] if c["id"] == cid)
+    assert (contact["user_id"], contact["name"], contact["email"], contact["phone"], contact["enabled"]) == (
+        uid, "临时人员（更新）", "tmp.contact.updated@example.com", "13800001000", True)
+    group = next(g for g in client.get(f"{API}/groups", headers=admin).json()["data"] if g["id"] == gid)
+    assert group["member_ids"] == group["leader_ids"] == [cid]
+    assert group["members"][0]["name"] == "临时人员（更新）"
 
     # 修改路由 → 审计记录变更前后
     assert client.put(f"{API}/routes/{rid}", json={**route, "enabled": False}, headers=admin).status_code == 200
@@ -92,11 +118,16 @@ def test_notify_contact_group_route_crud(client, admin):
 
     assert client.delete(f"{API}/routes/{rid}", headers=admin).status_code == 200
     assert client.delete(f"{API}/groups/{gid}", headers=admin).status_code == 200
-    r = client.delete(f"{API}/contacts/{cid}", headers=admin)
-    assert r.status_code == 200 and r.json()["data"]["removed_from"] == []
-    actions = {x["action"] for x in client.get("/api/v1/system/audit-logs", params={"target_type": "contact"},
-                                               headers=admin).json()["data"]["items"]}
-    assert {"notify.contact.create", "notify.contact.delete"} <= actions
+    disabled = client.patch(f"/api/v1/system/users/{uid}", json={"enabled": False}, headers=admin)
+    assert disabled.status_code == 200 and disabled.json()["data"]["enabled"] is False
+    assert disabled.json()["data"]["contact_id"] == cid
+    contact = next(c for c in client.get(f"{API}/contacts", headers=admin).json()["data"] if c["id"] == cid)
+    assert contact["user_id"] == uid and contact["enabled"] is False and contact["groups"] == []
+    logs = client.get("/api/v1/system/audit-logs", params={"target_type": "user", "page_size": 200},
+                      headers=admin).json()["data"]["items"]
+    actions = {x["action"] for x in logs if x["target_id"] == str(uid)}
+    assert {"user.create", "user.update"} <= actions
+    assert next(x for x in logs if x["target_id"] == str(uid))["detail"]["changes"] == {"启用": [True, False]}
 
 
 def test_notify_manage_permissions(client):
@@ -104,9 +135,31 @@ def test_notify_manage_permissions(client):
     assert client.get(f"{API}/routes", headers=oncall).status_code == 200
     r = client.post(f"{API}/contacts", json={"name": "x", "email": "x1@example.com"}, headers=oncall)
     assert r.status_code == 403
-    lead = demo_login(client, "zhaolei")                 # 运维负责人（全部租户）：可以维护
-    cid = client.post(f"{API}/contacts", json={"name": "x", "email": "x2@example.com"}, headers=lead).json()["data"]["id"]
-    assert client.delete(f"{API}/contacts/{cid}", headers=lead).status_code == 200
+    person = {"username": "notify-only-person", "display_name": "通知人员", "email": "x2@example.com",
+              "login_enabled": False}
+    assert client.post("/api/v1/system/users", json=person, headers=oncall).status_code == 403
+    lead = demo_login(client, "zhaolei")                 # 通知管理员可维护联系组，但人员维护需要 user:manage。
+    permissions = client.get("/api/v1/auth/me", headers=lead).json()["data"]["permissions"]
+    assert "notify:manage" in permissions and "user:manage" not in permissions
+    assert client.post("/api/v1/system/users", json=person, headers=lead).status_code == 403
+    contact = next(c for c in client.get(f"{API}/contacts", headers=lead).json()["data"] if c["enabled"])
+    cid = contact["id"]
+    assert client.patch(f"/api/v1/system/users/{contact['user_id']}", json={"enabled": False},
+                        headers=lead).status_code == 403
+    legacy = {"name": person["display_name"], "email": person["email"]}
+    for method, path, payload in (("POST", "/contacts", legacy), ("PUT", f"/contacts/{cid}", legacy),
+                                   ("DELETE", f"/contacts/{cid}", None)):
+        moved = client.request(method, f"{API}{path}", json=payload, headers=lead)
+        assert moved.status_code == 409 and "用户管理" in moved.json()["message"]
+    unchanged = next(c for c in client.get(f"{API}/contacts", headers=lead).json()["data"] if c["id"] == cid)
+    assert unchanged == contact
+    body = {"code": "tmp-notify-permissions", "name": "通知权限测试组", "member_ids": [cid], "leader_ids": [cid]}
+    assert client.post(f"{API}/groups", json=body, headers=oncall).status_code == 403
+    created = client.post(f"{API}/groups", json=body, headers=lead)
+    assert created.status_code == 200, created.text
+    gid = created.json()["data"]["id"]
+    assert client.put(f"{API}/groups/{gid}", json={**body, "name": "已更新联系组"}, headers=lead).status_code == 200
+    assert client.delete(f"{API}/groups/{gid}", headers=lead).status_code == 200
     viewer = demo_login(client, "viewer")
     assert client.post(f"{API}/test-mail", json={"to": ["a@example.com"]}, headers=viewer).status_code == 403
 
@@ -130,7 +183,17 @@ def test_notify_simulate(client, admin, tenant_ids):
 def test_test_mail(client, admin, monkeypatch):
     sent = []
     monkeypatch.setattr("app.api.v1.notify.send", lambda msg: sent.append(msg))
-    r = client.post(f"{API}/test-mail", json={"to": ["ops@example.com", " dba@example.com "]}, headers=admin)
+    ids = []
+    for username, email in (("smtp-ops-user", "ops@example.com"), ("smtp-dba-user", "dba@example.com")):
+        response = client.post("/api/v1/system/users", json={
+            "username": username, "display_name": username, "email": email, "login_enabled": False}, headers=admin)
+        if response.status_code == 409:
+            person = next(u for u in client.get("/api/v1/system/users", headers=admin).json()["data"] if u["email"] == email)
+        else:
+            assert response.status_code == 200, response.text
+            person = response.json()["data"]
+        ids.append(person["id"])
+    r = client.post(f"{API}/test-mail", json={"user_ids": ids}, headers=admin)
     assert r.status_code == 200 and r.json()["data"]["sent_to"] == ["ops@example.com", "dba@example.com"]
     assert "测试邮件" in sent[0]["Subject"] and "ops@example.com" in sent[0]["To"]
     assert client.post(f"{API}/test-mail", json={"to": ["bad"]}, headers=admin).status_code == 400
@@ -151,7 +214,11 @@ def test_test_mail(client, admin, monkeypatch):
 
 # ---------------------------------------------------------------- 平台自身告警
 def _setup_route(db) -> None:
-    db.add(Contact(id=901, name="赵磊", email="zhaolei@example.com"))
+    user = User(username="platform-recipient", display_name="赵磊", email="zhaolei@example.com",
+                password_hash="!", login_enabled=False)
+    db.add(user)
+    db.flush()
+    db.add(Contact(id=901, user_id=user.id, name=user.display_name, email=user.email))
     db.add(ContactGroup(code="leaders", name="运维负责人", member_ids=[901], leader_ids=[901]))
     db.add(NotifyRoute(name="平台自身告警", priority=1, match={"services": ["platform"]}, group_code="leaders"))
     db.commit()
@@ -160,7 +227,7 @@ def _setup_route(db) -> None:
 def _run(db, status: str, minutes_ago: int, tenant_id: int, error: str | None = None,
          task: str = "mrs_job_status") -> InspectionRun:
     now = utcnow()
-    r = InspectionRun(task_code=task, tenant_id=tenant_id, status=status, error_summary=error,
+    r = InspectionRun(task_code=task, tenant_id=tenant_id, project_ref=101, status=status, error_summary=error,
                       started_at=now - timedelta(minutes=minutes_ago), finished_at=now - timedelta(minutes=minutes_ago))
     db.add(r)
     db.commit()
@@ -182,7 +249,7 @@ def test_platform_task_failures_and_auth(world, mem_db):
     _run(mem_db, "FAILED", 10, a, "[504] APIGW.0201: Backend timeout")
     [al] = _platform_alarms(mem_db, "R-PLAT-001")
     assert al.status == "FIRING" and al.service == "platform" and al.tenant_id == a and al.severity == "P2"
-    assert al.title.startswith("连续 3 次执行失败") and al.detail["tenant"] == world["tenant-a"].short_name
+    assert al.title.startswith("连续 3 次执行未成功") and al.detail["tenant"] == world["tenant-a"].short_name
     n = mem_db.scalar(select(Notification).where(Notification.alarm_id == al.id))
     assert n.kind == "FIRING" and n.recipients == ["zhaolei@example.com"]
     _run(mem_db, "FAILED", 5, a, "[504] APIGW.0201: Backend timeout")      # 继续失败：刷新同一条告警
@@ -191,11 +258,11 @@ def test_platform_task_failures_and_auth(world, mem_db):
     assert al.status == "RESOLVED" and al.resolved_at is not None
     assert mem_db.scalar(select(Notification).where(Notification.alarm_id == al.id, Notification.kind == "RESOLVED"))
 
-    # 认证失败（401 / 403）：首次即告警；该租户任一任务成功后恢复
+    # 认证 / 权限失败：首次即告警；同任务、同租户、同项目真实成功后恢复
     _run(mem_db, "FAILED", 3, a, "[401] IAM.0101: The username or password is wrong", task="dcs_status")
     [auth] = _platform_alarms(mem_db, "R-PLAT-002")
     assert auth.status == "FIRING" and auth.resource_name == "HCS 接口认证" and "认证失败" in auth.title
-    _run(mem_db, "SUCCESS", 1, a, task="ecs_status")
+    _run(mem_db, "SUCCESS", 1, a, task="dcs_status")
     assert auth.status == "RESOLVED"
 
     # 关闭平台自身告警后不再产生
@@ -208,6 +275,9 @@ def test_platform_task_failures_and_auth(world, mem_db):
 
 def test_platform_notify_failed_and_heartbeat(world, mem_db):
     _setup_route(mem_db)
+    mem_db.add(User(username="delivery-test", display_name="通知接收人", email="ops@example.com",
+                    password_hash="!", login_enabled=False, notify_enabled=True))
+    mem_db.commit()
     now = utcnow()
     alarm = AlarmEvent(fingerprint="fp-dcs-1", rule_id="R-DCS-001", tenant_id=world["tenant-a"].id, service="dcs",
                        resource_type="dcs_instance", resource_name="redis-prod-01", sub_object="", severity="P2",
@@ -252,8 +322,9 @@ def test_platform_status_api(client, admin, tenant_ids):
     assert d["version"] == "0.4.0" and {w["name"] for w in d["workers"]} == {"scheduler", "notifier"}
     assert {"sent_24h", "failed_24h", "pending", "retrying", "last_sent_at"} <= set(d["outbox"])
     mrs = next(t for t in d["tasks"] if t["code"] == "mrs_job_status")
-    a = next(p for p in mrs["tenants"] if p["tenant_id"] == tenant_ids["tenant-a"])
-    assert mrs["status"] == "FAILED" and a["fails"] == 3 and a["last_status"] == "FAILED"
+    a = next(p for p in mrs["tenants"] if p["tenant_id"] == tenant_ids["tenant-a"] and p["project_ref"] is None)
+    assert mrs["status"] == "FAILED" and a["fails"] >= d["task_fail_threshold"] and a["last_status"] == "FAILED"
+    assert a["project_ref"] is None and a["project_scope"] == "UNKNOWN"  # seed 历史不能推断到真实项目
     assert any(x["rule_id"] == "R-PLAT-001" for x in d["platform_alarms"])
     assert d["cleanup"]["status"] == "SUCCESS" and d["cleanup"]["stats"]
     assert d["active_silences"] >= 2 and d["metrics"]["path"] == "/metrics"

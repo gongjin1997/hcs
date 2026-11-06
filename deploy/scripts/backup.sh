@@ -3,6 +3,7 @@
 # 建议 crontab 每天执行：0 2 * * * cd /opt/hcs-inspector && scripts/backup.sh >> backups/backup.log 2>&1
 source "$(dirname "$0")/common.sh"
 need_docker; need_env
+[ -z "$(env_get INSPECTOR_DATABASE_URL)" ] || die "配置了显式数据库连接；请对该数据库执行备份，本脚本不会误备份内置 PostgreSQL"
 dir="$(env_get BACKUP_DIR ./backups)"; keep="$(env_get BACKUP_KEEP 14)"
 ts="$(date +%Y%m%d-%H%M%S)"; work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
 mkdir -p "$dir"
@@ -10,6 +11,7 @@ db="$(env_get POSTGRES_DB inspector)"; user="$(env_get POSTGRES_USER inspector)"
 c_info "导出数据库 $db"
 dc exec -T postgres pg_dump -U "$user" -d "$db" -Fc --no-owner > "$work/db.dump" || die "pg_dump 失败（postgres 是否在运行：make ps）"
 cp -p .env "$work/env"
+[ ! -f .code.env ] || cp -p .code.env "$work/code.env"
 tar -cf "$work/conf.tar" nginx certs docker-compose*.yml 2>/dev/null || true
 echo "version=$(env_get HCS_INSPECTOR_VERSION) time=$ts host=$(hostname)" > "$work/MANIFEST"
 umask 077

@@ -1,10 +1,20 @@
 <template>
   <div class="rule-page">
-    <PageHeader title="规则管理" desc="规则以 YAML 为基线随版本发布，页面修改即时落库并记录版本；表达式在安全沙箱中执行（仅允许比较、逻辑与白名单函数）">
-      <el-button :icon="Refresh" @click="load">刷新</el-button>
-    </PageHeader>
+    <PageHeader title="规则管理" :refresh="load" :refreshing="loading" />
 
+    <el-alert v-if="loadError" :title="rules.length ? `刷新失败：${loadError}，显示上次加载的规则` : loadError" type="error" show-icon :closable="false">
+      <el-button link type="primary" :loading="loading" @click="load">重试</el-button>
+    </el-alert>
+    <el-alert v-if="targetError" :title="`检查项加载失败：${targetError}`" type="warning" show-icon :closable="false">
+      <el-button link type="primary" :loading="loading" @click="load">重试</el-button>
+    </el-alert>
     <div class="hi-card">
+      <div class="table-heading mb-16">
+        <b>巡检规则<span class="text-3"> · {{ rules.length }} 条</span></b>
+        <div class="table-actions">
+          <el-button v-if="canWrite" type="primary" :icon="Plus" :disabled="!targets.length" :loading="loading" @click="openCreate">新建规则</el-button>
+        </div>
+      </div>
       <div class="filter-bar mb-16">
         <el-radio-group v-model="type">
           <el-radio-button value="">全部（{{ rules.length }}）</el-radio-button>
@@ -17,6 +27,7 @@
         <el-table-column label="规则" min-width="250">
           <template #default="{ row }">
             <div class="r-name">{{ row.name }}</div>
+            <el-tag v-if="!collectionAvailable(row as Rule)" size="small" type="info">未采集</el-tag>
             <div class="text-3"><span class="mono">{{ row.id }}</span> · {{ RESOURCE_TYPES[row.resource_type] }} · {{ row.check_item }}</div>
           </template>
         </el-table-column>
@@ -49,26 +60,30 @@
           <template #default="{ row }"><div>v{{ row.version }}</div><div class="text-3">{{ versionText(row as Rule) }}</div></template>
         </el-table-column>
         <el-table-column label="启用" width="72">
-          <template #default="{ row }"><el-switch :model-value="row.enabled" :disabled="!canWrite" size="small" @change="(v: string | number | boolean) => toggle(row as Rule, Boolean(v))" /></template>
+          <template #default="{ row }"><el-switch :model-value="row.enabled" :disabled="!canWrite || (!row.enabled && !collectionAvailable(row as Rule))" :loading="toggling.has(row.id)" size="small" @change="(v: string | number | boolean) => toggle(row as Rule, Boolean(v))" /></template>
         </el-table-column>
         <el-table-column label="操作" width="128" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="openEditor(row as Rule)">{{ canWrite ? '编辑' : '查看' }}</el-button>
-            <el-button link type="primary" @click="openEditor(row as Rule, true)">试运行</el-button>
+            <el-button link type="primary" :disabled="!collectionAvailable(row as Rule)" @click="openEditor(row as Rule, true)">试运行</el-button>
           </template>
         </el-table-column>
+        <template #empty><el-empty :description="loadError ? '规则未加载' : keyword.trim() || type ? '没有匹配规则' : '暂无规则'" :image-size="64" /></template>
       </el-table>
     </div>
 
-    <RuleEditorDialog v-model="editor.visible" :rule="editor.rule" :focus-dry-run="editor.dryRun" @saved="load" />
+    <RuleEditorDialog v-model="editor.visible" :rule="editor.rule" :targets="targets" :initial-resource-type="type" :focus-dry-run="editor.dryRun" @saved="saved" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { Refresh, Search } from '@element-plus/icons-vue'
+import { Plus, Search } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { computed, onMounted, reactive, ref } from 'vue'
-import { listRules, saveRule } from '@/api'
+import { saveRule } from '@/api/rules'
+import { get } from '@/api/request'
+import { useRuleCatalog } from './useRuleCatalog'
+import type { RuleTarget } from '@/types/rules'
 import PageHeader from '@/components/PageHeader.vue'
 import { useUserStore } from '@/stores/user'
 import type { Rule } from '@/types'
@@ -77,16 +92,17 @@ import { fmtTime, humanize } from '@/utils/format'
 import RuleEditorDialog from './RuleEditorDialog.vue'
 
 const canWrite = computed(() => useUserStore().can('rule:edit')) // 规则修改需要 rule:edit 权限
-const rules = ref<Rule[]>([])
-const loading = ref(false)
+const { rules, targets, loading, loadError, targetError, load } = useRuleCatalog({
+  rules: signal => get<Rule[]>('/rules', undefined, { signal, silent: true }),
+  targets: signal => get<RuleTarget[]>('/rules/targets', undefined, { signal, silent: true }),
+})
+const toggling = ref(new Set<string>())
+const collectionAvailable = (rule: Rule) => targets.value.find(target => target.resource_type === rule.resource_type
+  && target.check_item === rule.check_item)?.collection_available !== false
 const type = ref('')
 const keyword = ref('')
 const editor = reactive({ visible: false, rule: null as Rule | null, dryRun: false })
 
-async function load() {
-  loading.value = true
-  try { rules.value = await listRules() } finally { loading.value = false }
-}
 onMounted(load)
 
 const countOf = (t: string) => rules.value.filter((r) => r.resource_type === t).length
@@ -100,16 +116,32 @@ const filtered = computed(() => {
     .sort((a, b) => TYPE_ORDER.indexOf(a.resource_type) - TYPE_ORDER.indexOf(b.resource_type) || a.id.localeCompare(b.id))
 })
 const versionText = (r: Rule) =>
-  !r.updated_by || r.updated_by === 'system' ? 'YAML 基线' : `${r.updated_by} · ${fmtTime(r.updated_at, 'MM-DD HH:mm')}`
+  !r.updated_by || r.updated_by === 'system' ? '内置规则' : `${r.updated_by} · ${fmtTime(r.updated_at, 'MM-DD HH:mm')}`
 const recoverText = (r: Rule) => (r.recover.below !== undefined ? `恢复：低于 ${r.recover.below}${r.expr.unit ?? ''}` : r.recover.when ? `恢复：${r.recover.when}` : '恢复：条件不再满足')
 
 async function toggle(r: Rule, enabled: boolean) {
-  await saveRule(r.id, {
-    name: r.name, kind: r.kind, scope: r.scope, expr: r.expr, for_count: r.for_count, recover: r.recover,
-    repeat_interval_sec: r.repeat_interval_sec, runbook: r.runbook, enabled,
-  })
-  ElMessage.success(`${enabled ? '已启用' : '已停用'}：${r.name}`)
-  load()
+  if (!canWrite.value || toggling.value.has(r.id)) return
+  toggling.value.add(r.id)
+  try {
+    await saveRule(r.id, {
+      name: r.name, kind: r.kind, scope: r.scope, expr: r.expr, for_count: r.for_count, recover: r.recover,
+      repeat_interval_sec: r.repeat_interval_sec, runbook: r.runbook, enabled, version: r.version,
+    })
+    ElMessage.success(`${enabled ? '已启用' : '已停用'}：${r.name}`)
+    await load()
+  } catch {
+    await load()
+  } finally { toggling.value.delete(r.id) }
+}
+function saved() {
+  if (!editor.rule) { type.value = ''; keyword.value = '' }
+  void load()
+}
+function openCreate() {
+  if (!canWrite.value) return
+  editor.rule = null
+  editor.dryRun = false
+  editor.visible = true
 }
 function openEditor(r: Rule, dryRun = false) {
   editor.rule = r
@@ -119,7 +151,9 @@ function openEditor(r: Rule, dryRun = false) {
 </script>
 
 <style scoped lang="scss">
-.kw { width: 240px !important; }
+.rule-page { min-width: 0; display: flex; flex-direction: column; gap: 14px; }
+.hi-card { min-width: 0; }
+.kw { max-width: 100%; width: 240px !important; }
 .r-name { font-weight: 600; }
 .levels, .state { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .field { color: var(--hi-text-2); margin-right: 2px; }

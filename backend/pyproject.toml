@@ -38,6 +38,7 @@ app = ["templates/mail/*.j2", "rules/*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["pg: PostgreSQL 专属方言与并发回归测试"]
 addopts = "-q"
 filterwarnings = [
     "ignore:Using `httpx` with `starlette.testclient` is deprecated",

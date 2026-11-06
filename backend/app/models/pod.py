@@ -1,3 +1,5 @@
+import hashlib
+import json
 from datetime import datetime
 
 from sqlalchemy import Boolean, Float, Index, Integer, String, Text
@@ -6,6 +8,19 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.core.db import Base, JsonType, UtcDateTime
 
 from .base import utcnow
+
+SCOPE_META = "_pod_scope_0007"
+
+
+def pod_state_key(tenant_id: int | None, project_ref: int | None, cluster_id: str, namespace: str, pod: str) -> str:
+    """仅用于数据库主键；公开定位仍使用 cluster_id/namespace/pod。"""
+    value = json.dumps([tenant_id, project_ref, cluster_id, namespace, pod], ensure_ascii=True, separators=(",", ":"))
+    return "pod:" + hashlib.sha256(value.encode()).hexdigest()
+
+
+def pod_event_key(tenant_id: int | None, project_ref: int | None, cluster_id: str, dedup: str) -> str:
+    value = json.dumps([tenant_id, project_ref, cluster_id, dedup], ensure_ascii=True, separators=(",", ":"))
+    return "event:" + hashlib.sha256(value.encode()).hexdigest()
 
 
 class PodEvent(Base):
@@ -19,9 +34,12 @@ class PodEvent(Base):
         Index("idx_pod_event_tenant_time", "tenant_id", "last_time"),
         Index("idx_pod_event_pod", "cluster_id", "namespace", "pod"),
         Index("idx_pod_event_type_time", "event_type", "last_time"),
+        Index("idx_pod_event_scope_dedup", "tenant_id", "project_ref", "cluster_id", "dedup_key"),
+        Index("idx_pod_event_scope_pod", "tenant_id", "project_ref", "cluster_id", "namespace", "pod"),
     )
     id: Mapped[int] = mapped_column(primary_key=True)
     tenant_id: Mapped[int | None] = mapped_column(Integer)
+    project_ref: Mapped[int | None] = mapped_column(Integer)
     cluster_id: Mapped[str] = mapped_column(String(64))
     cluster_name: Mapped[str] = mapped_column(String(128))
     namespace: Mapped[str] = mapped_column(String(128))
@@ -42,7 +60,7 @@ class PodEvent(Base):
     ongoing: Mapped[bool] = mapped_column(Boolean, default=False)
     peak: Mapped[float | None] = mapped_column(Float)         # 背压探针的峰值（例如 860 ms/s）
     detail: Mapped[dict] = mapped_column(JsonType, default=dict)
-    dedup_key: Mapped[str] = mapped_column(String(160), index=True)   # k8s:{event uid} / bp:{pod} / crash:{pod}/{container}
+    dedup_key: Mapped[str] = mapped_column(String(160), index=True)   # scope hash，原始去重键保存在 detail 元数据中
     created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=utcnow)
 
 
@@ -50,9 +68,11 @@ class PodState(Base):
     """Pod 最新状态快照：用于比对重启次数、跟踪持续型事件，也是“Pod 时间线”抽屉的基本信息。"""
 
     __tablename__ = "pod_state"
-    __table_args__ = (Index("idx_pod_state_tenant", "tenant_id", "cluster_id"),)
-    key: Mapped[str] = mapped_column(String(320), primary_key=True)   # {cluster_id}/{namespace}/{pod}
+    __table_args__ = (Index("idx_pod_state_tenant", "tenant_id", "cluster_id"),
+                      Index("idx_pod_state_scope_pod", "tenant_id", "project_ref", "cluster_id", "namespace", "pod"))
+    key: Mapped[str] = mapped_column(String(320), primary_key=True)   # pod_state_key，包含 tenant/project 作用域
     tenant_id: Mapped[int | None] = mapped_column(Integer)
+    project_ref: Mapped[int | None] = mapped_column(Integer)
     cluster_id: Mapped[str] = mapped_column(String(64))
     cluster_name: Mapped[str] = mapped_column(String(128))
     namespace: Mapped[str] = mapped_column(String(128))

@@ -5,6 +5,7 @@
       used_memory_mb / max_memory_mb * 100
 """
 import ast
+import math
 import operator as op
 from collections.abc import Callable
 from functools import lru_cache
@@ -54,22 +55,36 @@ def names(src: str) -> set[str]:
     return {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} - funcs
 
 
+def _finite(value: Any) -> Any:
+    # 比较会将 NaN/Infinity 转成 bool，不能只检查最终表达式的返回类型。
+    if isinstance(value, float) and not math.isfinite(value):
+        raise MissingFact("数值不是有限数")
+    return value
+
+
 def evaluate(src: str, facts: dict[str, Any]) -> Any:
     try:
-        return _eval(compile_expr(src).body, facts)
+        result = _eval(compile_expr(src).body, facts)
+        if isinstance(result, float) and not math.isfinite(result):
+            raise MissingFact("数值不是有限数")
+        return result
     except TypeError as e:            # 例如 None >= 90
         raise ExprError(f"类型不匹配：{e}") from e
     except ZeroDivisionError as e:
         raise MissingFact("除数为 0") from e
+    except ExprError:
+        raise
+    except (ValueError, OverflowError) as e:
+        raise ExprError(f"数值或函数参数无效：{e}") from e
 
 
 def _eval(node: ast.AST, facts: dict[str, Any]) -> Any:
     if isinstance(node, ast.Constant):
-        return node.value
+        return _finite(node.value)
     if isinstance(node, ast.Name):
         if facts.get(node.id) is None:
             raise MissingFact(f"缺少数据：{node.id}")
-        return facts[node.id]
+        return _finite(facts[node.id])
     if isinstance(node, ast.BoolOp):          # and 遇假即停、or 遇真即停，返回值语义与 Python 一致
         is_and = isinstance(node.op, ast.And)
         result: Any = is_and
@@ -82,7 +97,10 @@ def _eval(node: ast.AST, facts: dict[str, Any]) -> Any:
         operand = _eval(node.operand, facts)
         return (not operand) if isinstance(node.op, ast.Not) else -operand
     if isinstance(node, ast.BinOp):
-        return _BIN[type(node.op)](_eval(node.left, facts), _eval(node.right, facts))
+        left, right = _eval(node.left, facts), _eval(node.right, facts)
+        if type(left) not in (int, float) or type(right) not in (int, float):
+            raise ExprError("算术运算只支持数值")
+        return _finite(_BIN[type(node.op)](left, right))
     if isinstance(node, ast.Compare):
         left = _eval(node.left, facts)
         for cmp_op, comp in zip(node.ops, node.comparators, strict=True):
@@ -92,7 +110,7 @@ def _eval(node: ast.AST, facts: dict[str, Any]) -> Any:
             left = right
         return True
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-        return _FUNCS[node.func.id](*[_eval(a, facts) for a in node.args])
+        return _finite(_FUNCS[node.func.id](*[_eval(a, facts) for a in node.args]))
     if isinstance(node, ast.Tuple | ast.List):
         return tuple(_eval(e, facts) for e in node.elts)
     if isinstance(node, ast.IfExp):

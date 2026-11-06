@@ -1,18 +1,20 @@
 <template>
   <div v-loading="loading" class="probe-panel">
-    <div class="intro">
-      <el-icon><InfoFilled /></el-icon>
-      <div>
-        <b>背压探针</b>：K8s 本身没有“背压”事件，平台通过 CCE K8s API 的 <span class="mono">pods/{pod}:{port}/proxy{path}</span> 读取 Pod 暴露的 Prometheus 指标
-        （如 Flink <span class="mono">backPressuredTimeMsPerSecond</span>、Kafka 消费 lag），按 selector 选中的 Pod 聚合后与阈值比较；
-        持续超过 N 分钟生成「背压」事件并触发规则 <span class="mono">R-CCE-POD-004</span>，低于阈值 M 分钟后自动结束。另外，应用自己上报的 K8s 事件只要 reason / message 含 backpressure、背压、反压 等关键字（INSPECTOR_POD_BACKPRESSURE_PATTERN），也会直接记为背压。
-      </div>
-      <el-button v-perm="'podevent:config'" type="primary" :icon="Plus" @click="open()">新增探针</el-button>
+    <div class="table-heading mb-12">
+      <b>背压探针</b>
+      <div class="table-actions"><el-button v-perm="'podevent:config'" type="primary" :icon="Plus" @click="open()">新增探针</el-button></div>
     </div>
+    <el-collapse class="mb-12">
+      <el-collapse-item title="探针说明" name="help">
+        <p>通过 CCE K8s API 读取 Pod 的 Prometheus 指标，按标签筛选并聚合后与阈值比较。持续超阈值时生成背压事件，达到恢复时长后结束。</p>
+        <p>K8s 没有原生背压事件；应用上报的事件包含背压关键字时，也会计入。事件过期不能确认恢复。</p>
+        <p>探针仅 GET 读取以 /metrics 结尾的指标路径，应用方须确认该处理器没有写入副作用；需单独授权 get pods/proxy。</p>
+      </el-collapse-item>
+    </el-collapse>
     <el-table :data="probes" row-key="id">
       <el-table-column label="探针" min-width="180">
         <template #default="{ row }"><b>{{ row.name }}</b><div class="flex gap-6"><TenantTag :id="row.tenant_id" :name="row.tenant_name" />
-          <span class="text-3">{{ clusterName(row.cluster_id) }} / {{ row.namespace }}</span></div></template>
+          <span class="text-3">{{ clusterName(row.cluster_id, row.tenant_id) }} / {{ row.namespace }}</span></div></template>
       </el-table-column>
       <el-table-column label="采集目标" min-width="200">
         <template #default="{ row }"><div class="mono sm">{{ row.selector || '（命名空间内全部 Pod）' }}</div><div class="mono text-3 sm">:{{ row.port }}{{ row.path }}</div></template>
@@ -25,15 +27,7 @@
       </el-table-column>
       <el-table-column label="最近一次" min-width="170">
         <template #default="{ row }">
-          <template v-if="row.last_result?.at">
-            <div class="sm"><b :class="{ hit: row.last_result.hit }">{{ row.last_result.hit }}</b> / {{ row.last_result.pods }} 个 Pod 超阈值
-              <span v-if="row.last_result.max != null" class="text-3"> · 最大 {{ row.last_result.max }}{{ row.unit }}</span></div>
-            <div class="text-3 sm">{{ fromNow(row.last_result.at) }}</div>
-            <el-tooltip v-if="row.last_result.errors?.length" :content="row.last_result.errors.join('；')" placement="top">
-              <el-tag type="danger" size="small" effect="plain">{{ row.last_result.errors.length }} 个错误</el-tag>
-            </el-tooltip>
-          </template>
-          <span v-else class="text-3">{{ row.enabled ? '等待下一轮采集' : '未执行（已停用）' }}</span>
+          <PodProbeResult :result="row.last_result" :unit="row.unit" :enabled="row.enabled" />
         </template>
       </el-table-column>
       <el-table-column label="启用" width="70">
@@ -49,18 +43,18 @@
       <template #empty><el-empty description="还没有背压探针" :image-size="70" /></template>
     </el-table>
 
-    <el-dialog v-model="dlg.visible" :title="dlg.id ? '编辑背压探针' : '新增背压探针'" width="760px" top="6vh">
+    <el-dialog v-model="dlg.visible" :title="dlg.id ? '编辑背压探针' : '新增背压探针'" width="min(760px, calc(100vw - 24px))" top="6vh">
       <el-form ref="formRef" :model="dlg.form" :rules="rules" label-position="top">
         <el-row :gutter="14">
-          <el-col :span="10"><el-form-item label="名称" prop="name"><el-input v-model="dlg.form.name" placeholder="如 Flink 背压（TaskManager）" /></el-form-item></el-col>
-          <el-col :span="6">
+          <el-col :xs="24" :sm="10"><el-form-item label="名称" prop="name"><el-input v-model="dlg.form.name" placeholder="如 Flink 背压（TaskManager）" /></el-form-item></el-col>
+          <el-col :xs="24" :sm="6">
             <el-form-item label="租户" prop="tenant_id">
               <el-select v-model="dlg.form.tenant_id" :disabled="!!dlg.id" @change="dlg.form.cluster_id = '*'">
                 <el-option v-for="t in app.tenants" :key="t.id" :value="t.id" :label="t.short_name" />
               </el-select>
             </el-form-item>
           </el-col>
-          <el-col :span="8">
+          <el-col :xs="24" :sm="8">
             <el-form-item label="集群">
               <el-select v-model="dlg.form.cluster_id">
                 <el-option value="*" label="该租户全部 CCE 集群" />
@@ -70,34 +64,34 @@
           </el-col>
         </el-row>
         <el-row :gutter="14">
-          <el-col :span="6">
+          <el-col :xs="24" :sm="6">
             <el-form-item label="命名空间" prop="namespace">
               <el-select v-model="dlg.form.namespace" filterable allow-create default-first-option placeholder="如 flink">
                 <el-option v-for="n in nsOptions" :key="n" :value="n" :label="n" />
               </el-select>
             </el-form-item>
           </el-col>
-          <el-col :span="8"><el-form-item label="Pod 标签选择器"><el-input v-model="dlg.form.selector" class="mono-input" placeholder="component=taskmanager" /></el-form-item></el-col>
-          <el-col :span="4"><el-form-item label="端口"><el-input-number v-model="dlg.form.port" :min="1" :max="65535" controls-position="right" class="w-full" /></el-form-item></el-col>
-          <el-col :span="6"><el-form-item label="路径"><el-input v-model="dlg.form.path" class="mono-input" placeholder="/metrics" /></el-form-item></el-col>
+          <el-col :xs="24" :sm="8"><el-form-item label="Pod 标签选择器"><el-input v-model="dlg.form.selector" class="mono-input" placeholder="component=taskmanager" /></el-form-item></el-col>
+          <el-col :xs="24" :sm="4"><el-form-item label="端口"><el-input-number v-model="dlg.form.port" :min="1" :max="65535" controls-position="right" class="w-full" /></el-form-item></el-col>
+          <el-col :xs="24" :sm="6"><el-form-item label="路径"><el-input v-model="dlg.form.path" class="mono-input" placeholder="/metrics" /></el-form-item></el-col>
         </el-row>
         <el-row :gutter="14">
-          <el-col :span="14"><el-form-item label="指标名（Prometheus 格式）" prop="metric"><el-input v-model="dlg.form.metric" class="mono-input" placeholder="flink_taskmanager_job_task_backPressuredTimeMsPerSecond" /></el-form-item></el-col>
-          <el-col :span="10"><el-form-item label="标签过滤（可选）"><el-input v-model="dlg.form.label_filter" class="mono-input" placeholder="job_name=rt_order_sync" /></el-form-item></el-col>
+          <el-col :xs="24" :sm="14"><el-form-item label="指标名（Prometheus 格式）" prop="metric"><el-input v-model="dlg.form.metric" class="mono-input" placeholder="flink_taskmanager_job_task_backPressuredTimeMsPerSecond" /></el-form-item></el-col>
+          <el-col :xs="24" :sm="10"><el-form-item label="标签过滤（可选）"><el-input v-model="dlg.form.label_filter" class="mono-input" placeholder="job_name=rt_order_sync" /></el-form-item></el-col>
         </el-row>
         <el-row :gutter="14">
-          <el-col :span="5">
+          <el-col :xs="24" :sm="5">
             <el-form-item label="聚合">
               <el-select v-model="dlg.form.agg"><el-option value="max" label="max 最大" /><el-option value="avg" label="avg 平均" /><el-option value="sum" label="sum 求和" /></el-select>
             </el-form-item>
           </el-col>
-          <el-col :span="4">
+          <el-col :xs="24" :sm="4">
             <el-form-item label="比较"><el-select v-model="dlg.form.op"><el-option v-for="o in ['>=', '>', '<=', '<']" :key="o" :value="o" :label="o" /></el-select></el-form-item>
           </el-col>
-          <el-col :span="5"><el-form-item label="阈值" prop="threshold"><el-input-number v-model="dlg.form.threshold" controls-position="right" class="w-full" /></el-form-item></el-col>
-          <el-col :span="4"><el-form-item label="单位"><el-input v-model="dlg.form.unit" placeholder=" ms/s" /></el-form-item></el-col>
-          <el-col :span="3"><el-form-item label="持续(分)"><el-input-number v-model="dlg.form.for_minutes" :min="1" :max="120" controls-position="right" class="w-full" /></el-form-item></el-col>
-          <el-col :span="3"><el-form-item label="恢复(分)"><el-input-number v-model="dlg.form.recover_minutes" :min="1" :max="240" controls-position="right" class="w-full" /></el-form-item></el-col>
+          <el-col :xs="24" :sm="5"><el-form-item label="阈值" prop="threshold"><el-input-number v-model="dlg.form.threshold" controls-position="right" class="w-full" /></el-form-item></el-col>
+          <el-col :xs="24" :sm="4"><el-form-item label="单位"><el-input v-model="dlg.form.unit" placeholder=" ms/s" /></el-form-item></el-col>
+          <el-col :xs="24" :sm="3"><el-form-item label="持续(分)"><el-input-number v-model="dlg.form.for_minutes" :min="1" :max="120" controls-position="right" class="w-full" /></el-form-item></el-col>
+          <el-col :xs="24" :sm="3"><el-form-item label="恢复(分)"><el-input-number v-model="dlg.form.recover_minutes" :min="1" :max="240" controls-position="right" class="w-full" /></el-form-item></el-col>
         </el-row>
         <div class="preview">
           <span class="text-3">判定：</span>
@@ -115,7 +109,7 @@
 </template>
 
 <script setup lang="ts">
-import { InfoFilled, Plus } from '@element-plus/icons-vue'
+import { Plus } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { createProbe, deleteProbe, listProbes, updateProbe } from '@/api'
@@ -124,6 +118,8 @@ import { useAppStore } from '@/stores/app'
 import { useUserStore } from '@/stores/user'
 import type { PodEventOptions, Probe, ProbeIn } from '@/types'
 import { fromNow } from '@/utils/format'
+import { groupPodClusters, podNamespaces } from './cluster-options'
+import PodProbeResult from './PodProbeResult.vue'
 
 const props = defineProps<{ options: PodEventOptions | null }>()
 const emit = defineEmits<{ (e: 'count', n: number): void }>()
@@ -143,8 +139,8 @@ async function load() {
 onMounted(load)
 defineExpose({ reload: load })
 
-const clusterName = (id: string) => (id === '*' ? '全部集群' : props.options?.clusters.find((c) => c.cluster_id === id)?.cluster_name ?? id.slice(0, 8))
-const clustersOf = (tenantId: number) => props.options?.clusters.filter((c) => c.tenant_id === tenantId) ?? []
+const clustersOf = (tenantId: number) => groupPodClusters(props.options?.clusters.filter(c => c.tenant_id === tenantId) ?? [])
+const clusterName = (id: string, tenantId: number) => id === '*' ? '全部集群' : clustersOf(tenantId).find(c => c.cluster_id === id)?.cluster_name ?? id.slice(0, 8)
 
 const formRef = ref<FormInstance>()
 const blank = (): ProbeIn => ({
@@ -155,9 +151,7 @@ const dlg = reactive({ visible: false, saving: false, id: null as number | null,
 const nsOptions = computed(() => {
   const o = props.options
   if (!o) return []
-  if (dlg.form.cluster_id !== '*') return o.namespaces_by_cluster[dlg.form.cluster_id] ?? []
-  const ids = clustersOf(dlg.form.tenant_id).map((c) => c.cluster_id)
-  return [...new Set(ids.flatMap((id) => o.namespaces_by_cluster[id] ?? []))].sort()
+  return podNamespaces(o, dlg.form.tenant_id, dlg.form.cluster_id)
 })
 const rules: FormRules = {
   name: [{ required: true, message: '请填写名称' }],
@@ -176,7 +170,9 @@ function open(p?: Probe) {
   setTimeout(() => formRef.value?.clearValidate())
 }
 async function save() {
+  if (!canConfig.value || dlg.saving) return
   if (!(await formRef.value?.validate().catch(() => false))) return
+  if (dlg.saving) return
   dlg.saving = true
   try {
     if (dlg.id) await updateProbe(dlg.id, dlg.form)

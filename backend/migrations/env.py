@@ -9,7 +9,7 @@ from app.core.db import Base
 
 config = context.config
 if config.config_file_name:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 # 数据库地址：默认取 INSPECTOR_DATABASE_URL；测试 / 脚本可通过 Config.attributes["database_url"] 指定（% 需转义）
 config.set_main_option("sqlalchemy.url",
                        (config.attributes.get("database_url") or get_settings().database_url).replace("%", "%%"))

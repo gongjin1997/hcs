@@ -35,7 +35,7 @@
         </div>
       </div>
 
-      <div v-if="done" class="m-result"><el-icon :size="22"><CircleCheckFilled /></el-icon>认领成功，处理人已记录，控制台实时同步</div>
+      <div v-if="done" class="m-result"><el-icon :size="22"><CircleCheckFilled /></el-icon>已认领，后续不再重复通知和升级</div>
 
       <div class="m-actions">
         <template v-if="info.action === 'ack' && a.status === 'FIRING'">
@@ -46,43 +46,52 @@
         <div v-else-if="info.action !== 'ack'" class="m-tip">“静默”操作需登录控制台填写原因后完成</div>
         <a class="m-btn ghost" :href="`/alarms?id=${a.id}`">在控制台查看详情</a>
       </div>
-      <p class="m-foot">链接已签名（HMAC），仅可用于本告警的指定操作</p>
+      <p class="m-foot">此链接只能用于处理本条告警</p>
     </template>
   </div>
 </template>
 
 <script setup lang="ts">
 import { CircleCheckFilled, Loading, WarningFilled } from '@element-plus/icons-vue'
-import { computed, onMounted, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { mailActionDo, mailActionInfo } from '@/api'
 import { ApiError } from '@/api/request'
+import { useLatestRequest } from '@/composables/useLatestRequest'
 import type { Alarm } from '@/types'
 import { ALARM_STATUS, RESOURCE_TYPES, SERVICES, SEVERITY } from '@/utils/dict'
 import { durationOf, fmtTime } from '@/utils/format'
 
 const route = useRoute()
-const token = String(route.params.token)
 const info = ref<{ alarm: Alarm; action: string; recipient: string }>()
-const loading = ref(true)
+const infoRequest = useLatestRequest()
+const ackRequest = useLatestRequest()
+const loading = infoRequest.loading
 const error = ref('')
-const acting = ref(false)
+const acting = ackRequest.loading
 const done = ref(false)
 const a = computed(() => info.value!.alarm)
 const color = computed(() => (info.value ? (a.value.status === 'RESOLVED' ? '#2E7D32' : SEVERITY[a.value.severity].color) : '#1d63f0'))
 
-onMounted(async () => {
-  try { info.value = await mailActionInfo(token) } catch (e) {
+watch(() => String(route.params.token), async token => {
+  infoRequest.invalidate()
+  ackRequest.invalidate()
+  info.value = undefined
+  done.value = false
+  error.value = ''
+  try { await infoRequest.run(() => mailActionInfo(token), value => { info.value = value }) } catch (e) {
     error.value = e instanceof ApiError ? e.message : '链接无效或已过期'
-  } finally { loading.value = false }
-})
+  }
+}, { immediate: true, flush: 'sync' })
 async function doAck() {
-  acting.value = true
+  if (acting.value || !info.value || info.value.action !== 'ack' || a.value.status !== 'FIRING') return
+  const token = String(route.params.token)
   try {
-    const alarm = await mailActionDo(token)
-    info.value = { ...info.value!, alarm }
-    done.value = true
-  } finally { acting.value = false }
+    await ackRequest.run(() => mailActionDo(token), alarm => {
+      info.value = { ...info.value!, alarm }
+      done.value = true
+    })
+  } catch { /* 请求层显示失败原因，保留按钮以便重试。 */ }
 }
 </script>
 

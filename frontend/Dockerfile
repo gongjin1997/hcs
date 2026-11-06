@@ -1,5 +1,5 @@
 # ---- HCS 巡检平台前端镜像：构建静态资源 → nginx ----
-FROM node:22-alpine AS build
+FROM --platform=$BUILDPLATFORM node:22-alpine AS build
 # 内网构建可指定 npm 镜像：docker build --build-arg NPM_REGISTRY=https://mirrors.example.com/npm/
 ARG NPM_REGISTRY=https://registry.npmjs.org
 WORKDIR /web

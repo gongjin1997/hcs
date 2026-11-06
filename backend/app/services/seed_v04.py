@@ -86,14 +86,13 @@ def _route(db: Session) -> None:
 # ---------------------------------------------------------------- 系统设置
 def _settings(db: Session, users: dict[str, User], now: datetime) -> None:
     biz = sorted({x for x in db.scalars(select(Resource.business).where(Resource.business.is_not(None))) if x})
-    owners = sorted({x for x in db.scalars(select(Resource.owner).where(Resource.owner.is_not(None))) if x})
     report = settings_service.get_report(db)
     items: list[tuple[str, dict, int]] = [
         ("report", {"cron": report.cron, "enabled": report.enabled,
                     "mail_to": ["ops-report@example.com", "zhaolei@example.com"]}, 14),
         ("platform_alarm", {"mail_to": ["zhaolei@example.com"]}, 14),
         ("ledger_dict", {"business": [{"name": n, "remark": BIZ_REMARK.get(n)} for n in biz],
-                         "owners": [{"name": n} for n in owners], "enforce": False}, 11),
+                         "enforce": False}, 11),
     ]
     for key, data, days in items:
         _, diff = settings_service.save(db, key, data, operator="赵磊")

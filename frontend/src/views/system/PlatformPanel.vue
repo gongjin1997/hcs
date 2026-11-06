@@ -3,7 +3,7 @@
     <template v-if="st">
       <el-row :gutter="16">
         <!-- 后台进程心跳 -->
-        <el-col :span="8">
+        <el-col :xs="24" :lg="8">
           <div class="box">
             <div class="box-title"><el-icon><Cpu /></el-icon>后台进程<span class="text-3">心跳超时 {{ st.heartbeat_timeout_min }} 分钟判定异常</span></div>
             <div v-for="w in st.workers" :key="w.name" class="worker" :class="w.status.toLowerCase()">
@@ -21,7 +21,7 @@
           </div>
         </el-col>
         <!-- 通知投递 -->
-        <el-col :span="8">
+        <el-col :xs="24" :lg="8">
           <div class="box">
             <div class="box-title"><el-icon><Message /></el-icon>通知投递<span class="text-3">近 24 小时</span></div>
             <div class="nums">
@@ -33,18 +33,18 @@
             </div>
             <div class="kv-line"><span>最近发送</span><b>{{ st.outbox.last_sent_at ? fromNow(st.outbox.last_sent_at) : '-' }}</b></div>
             <div class="kv-line"><span>最早待发</span><b :class="{ 'text-warn': st.outbox.oldest_pending_at }">{{ st.outbox.oldest_pending_at ? fromNow(st.outbox.oldest_pending_at) : '无积压' }}</b></div>
-            <div class="kv-line"><span>生效中的静默</span><b class="num">{{ st.active_silences }}</b><el-link class="ml-auto" type="primary" :underline="false" @click="router.push('/silences')">查看</el-link></div>
+            <div class="kv-line"><span>生效中的静默</span><b class="num">{{ st.active_silences }}</b><el-link class="ml-auto" type="primary" underline="never" @click="router.push('/silences')">查看</el-link></div>
           </div>
         </el-col>
         <!-- 运行环境 -->
-        <el-col :span="8">
+        <el-col :xs="24" :lg="8">
           <div class="box">
             <div class="box-title"><el-icon><Monitor /></el-icon>运行环境</div>
             <div class="kv-line"><span>版本</span><b>v{{ st.version }}</b><el-tag size="small" effect="plain" class="ml-auto">{{ st.env }}</el-tag></div>
             <div class="kv-line"><span>时区</span><b>{{ st.timezone }}</b></div>
             <div class="kv-line"><span>数据库</span><b>{{ st.database ?? '-' }}</b></div>
             <div class="kv-line"><span>Redis</span>
-              <b v-if="!st.redis.configured" class="text-3">未配置（单实例部署可不配）</b>
+              <b v-if="!st.redis.configured" class="text-3">未配置（生产环境需配置）</b>
               <b v-else :class="st.redis.ok ? 'text-ok' : 'text-danger'">{{ st.redis.ok ? '连接正常' : '连接失败' }}</b>
             </div>
             <div class="kv-line"><span>Prometheus 指标</span><b class="mono">{{ st.metrics.path }}</b>
@@ -60,7 +60,7 @@
         <div class="box-title">
           <el-icon><WarningFilled /></el-icon>平台自身告警
           <span class="text-3">{{ st.platform_alarm.enabled ? `任务连续失败 ≥ ${st.task_fail_threshold} 次、认证失败、通知发送失败、进程心跳超时时产生（${st.platform_alarm.severity}）` : '已关闭（系统设置 → 平台自身告警）' }}</span>
-          <el-link v-if="canSetting" class="ml-auto" type="primary" :underline="false" @click="emit('goto', 'settings')">设置</el-link>
+          <el-link v-if="canSetting" class="ml-auto" type="primary" underline="never" @click="emit('goto', 'settings')">设置</el-link>
         </div>
         <el-table v-if="st.platform_alarms.length" :data="st.platform_alarms" size="small" @row-click="(r: Alarm) => router.push({ path: '/alarms', query: { id: String(r.id) } })" class="clickable">
           <el-table-column width="80"><template #default="{ row }"><SeverityTag :level="row.severity" short /></template></el-table-column>
@@ -70,23 +70,26 @@
           <el-table-column label="状态" width="90"><template #default="{ row }"><StatusTag :status="row.status" /></template></el-table-column>
           <el-table-column label="首次发生" width="130"><template #default="{ row }">{{ fmtTime(row.first_seen, 'MM-DD HH:mm') }}</template></el-table-column>
         </el-table>
-        <div v-else class="all-ok"><el-icon><CircleCheckFilled /></el-icon>平台运行正常，没有活动的平台自身告警</div>
+        <div v-else class="all-ok"><el-icon><CircleCheckFilled /></el-icon>暂无活动的平台告警</div>
       </div>
 
       <!-- 任务健康 -->
       <div class="box mt-16">
-        <div class="box-title"><el-icon><Timer /></el-icon>任务健康<span class="text-3">按租户统计连续失败次数；单个租户失败不影响其他租户</span></div>
+        <div class="box-title"><el-icon><Timer /></el-icon>任务健康<span class="text-3">任务 / 租户 / 项目独立；失败、超时、部分成功计入未成功，跳过不清零</span></div>
         <el-table :data="st.tasks" size="small">
           <el-table-column label="任务" min-width="200"><template #default="{ row }"><b>{{ row.name }}</b><span v-if="!row.enabled" class="text-3">（已停用）</span></template></el-table-column>
-          <el-table-column label="状态" width="100"><template #default="{ row }"><el-tag size="small" :type="TASK_HEALTH[row.status]?.type">{{ TASK_HEALTH[row.status]?.label ?? row.status }}</el-tag></template></el-table-column>
-          <el-table-column label="各租户" min-width="520">
+          <el-table-column label="状态" width="100"><template #default="{ row }"><el-tag size="small" :type="TASK_HEALTH[row.status]?.type ?? 'info'">{{ healthLabel(row.status) }}</el-tag></template></el-table-column>
+          <el-table-column label="各租户 / 项目" min-width="520">
             <template #default="{ row }">
               <div class="tenants">
-                <span v-for="t in row.tenants" :key="t.tenant_id ?? 0" class="tt" :class="{ bad: t.fails }">
+                <span v-for="t in row.tenants" :key="`${t.tenant_id ?? 'global'}:${t.project_ref ?? 'unknown'}`" class="tt" :class="{ bad: t.fails }">
                   <TenantTag v-if="t.tenant_id" :id="t.tenant_id" :name="t.tenant_name ?? undefined" /><span v-else class="text-3">全局</span>
+                  <span class="text-3">{{ t.project_label ?? '历史未知项目（未记录）' }}</span>
                   <el-tag size="small" effect="plain" :type="TASK_STATUS[t.last_status]?.type ?? 'info'">{{ TASK_STATUS[t.last_status]?.label ?? t.last_status }}</el-tag>
                   <span class="text-3">{{ fromNow(t.last_at) }}</span>
-                  <span v-if="t.fails" class="fails">连续失败 {{ t.fails }} 次<template v-if="t.last_success_at">，上次成功 {{ fromNow(t.last_success_at) }}</template></span>
+                  <span v-if="t.last_status === 'SKIPPED' && t.effective_status" class="text-3">上次执行 {{ TASK_STATUS[t.effective_status]?.label ?? t.effective_status }}</span>
+                  <span v-if="t.fails" class="fails">连续未成功 {{ t.fails }} 次</span>
+                  <span class="text-3">{{ t.last_success_at ? `上次真实成功 ${fromNow(t.last_success_at)}` : '无真实成功记录' }}</span>
                 </span>
                 <span v-if="!row.tenants.length" class="text-3">未运行</span>
               </div>
@@ -100,7 +103,7 @@
         <div class="box-title">
           <el-icon><Delete /></el-icon>数据清理
           <span class="text-3">按“系统设置 → 数据保留”每天低峰执行（任务 data_cleanup）</span>
-          <el-link v-if="canSetting" class="ml-auto" type="primary" :underline="false" @click="emit('goto', 'settings')">保留期设置</el-link>
+          <el-link v-if="canSetting" class="ml-auto" type="primary" underline="never" @click="emit('goto', 'settings')">保留期设置</el-link>
         </div>
         <template v-if="st.cleanup">
           <div class="cleanup-head">
@@ -127,7 +130,7 @@ import SeverityTag from '@/components/SeverityTag.vue'
 import StatusTag from '@/components/StatusTag.vue'
 import TenantTag from '@/components/TenantTag.vue'
 import { useUserStore } from '@/stores/user'
-import type { Alarm, PlatformStatus } from '@/types'
+import type { Alarm, PlatformStatus, TaskHealthTenant } from '@/types'
 import { CLEANUP_TABLE, TASK_HEALTH, TASK_STATUS, WORKER_STATUS } from '@/utils/dict'
 import { fmtTime, fromNow } from '@/utils/format'
 
@@ -136,7 +139,13 @@ const router = useRouter()
 const user = useUserStore()
 const canSetting = computed(() => user.can('setting:manage'))
 const loading = ref(false)
-const st = ref<PlatformStatus | null>(null)
+type ProjectHealth = TaskHealthTenant & { project_ref?: number | null; project_label?: string; effective_status?: string | null }
+type ProjectPlatformStatus = Omit<PlatformStatus, 'tasks'> & {
+  tasks: (Omit<PlatformStatus['tasks'][number], 'tenants' | 'status'> & { tenants: ProjectHealth[]; status: string })[]
+}
+const st = ref<ProjectPlatformStatus | null>(null)
+const healthLabel = (status: string) => ({ UNKNOWN: '未运行 / 未知', DISABLED: '已停用' })[status as 'UNKNOWN' | 'DISABLED']
+  ?? TASK_HEALTH[status]?.label ?? status
 
 async function load() {
   loading.value = true
@@ -172,4 +181,7 @@ defineExpose({ reload: load })
   .chip { padding: 2px 10px; border-radius: 12px; font-size: 12px; background: var(--el-color-primary-light-9); color: var(--hi-text-2);
     b { margin-left: 4px; color: var(--el-color-primary); }
     &.zero { background: var(--hi-bg-soft); b { color: var(--hi-text-3); } } } }
+@media (max-width: 767px) {
+  :deep(.el-row) { row-gap: 16px; }
+}
 </style>

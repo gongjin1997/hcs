@@ -11,16 +11,22 @@ x-demo-env: &demo-env
   INSPECTOR_SMTP_PASSWORD: ""
   INSPECTOR_SMTP_STARTTLS: "false"
 
+x-demo-logging: &demo-logging
+  driver: json-file
+  options: {max-size: "50m", max-file: "5"}
+
 services:
   mock-hcs:
     image: ${IMAGE_PREFIX:-hcs-inspector}-backend:${HCS_INSPECTOR_VERSION:-0.4.0}
     command: ["uvicorn", "mock_hcs.app:app", "--host", "0.0.0.0", "--port", "9000"]
     healthcheck: {disable: true}
     restart: unless-stopped
+    logging: *demo-logging
   mailpit:
     image: ${MAILPIT_IMAGE:-axllent/mailpit:latest}
     ports: ["${MAILPIT_PORT:-8025}:8025"]
     restart: unless-stopped
+    logging: *demo-logging
   migrate:          # 演示库只做迁移，演示数据由 API 首次启动写入（bootstrap 建了 admin 会让演示数据跳过）
     command: ["alembic", "upgrade", "head"]
     environment: *demo-env

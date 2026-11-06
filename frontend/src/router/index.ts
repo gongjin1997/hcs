@@ -4,10 +4,12 @@ import BasicLayout from '@/layouts/BasicLayout.vue'
 import { useAppStore } from '@/stores/app'
 import { useUserStore } from '@/stores/user'
 import { SYSTEM_PERMS } from './perms'
+import { JOB_MENU_PATH, JOB_NAVIGATION } from '@/config/job-navigation'
+import { workspaceMeta } from '@/config/workspace-navigation'
 
 declare module 'vue-router' {
   /** perm：访问页面需要的权限点（数组 = 满足任一）；public：无需登录 */
-  interface RouteMeta { title?: string; perm?: string | string[]; public?: boolean }
+  interface RouteMeta { title?: string; perm?: string | string[]; public?: boolean; activeMenu?: string }
 }
 
 export { SYSTEM_PERMS } from './perms'
@@ -22,14 +24,23 @@ const routes: RouteRecordRaw[] = [
     redirect: '/dashboard',
     children: [
       { path: 'dashboard', component: () => import('@/views/dashboard/DashboardView.vue'), meta: { title: '运行总览', perm: 'dashboard:view' } },
-      { path: 'alarms', component: () => import('@/views/alarms/AlarmListView.vue'), meta: { title: '告警中心', perm: 'alarm:view' } },
+      { path: 'monitoring', component: () => import('@/views/monitoring/MonitoringOverview.vue'), meta: workspaceMeta('/monitoring') },
+      { path: 'alarms', component: () => import('@/views/alarms/AlarmListView.vue'), meta: workspaceMeta('/alarms') },
+      { path: 'ecs', component: () => import('@/views/ecs/EcsView.vue'), meta: workspaceMeta('/ecs') },
+      { path: 'dcs', component: () => import('@/views/dcs/DcsMemoryView.vue'), meta: workspaceMeta('/dcs') },
+      { path: 'gaussdb', component: () => import('@/views/gaussdb/GaussView.vue'), meta: workspaceMeta('/gaussdb') },
       { path: 'pod-events', component: () => import('@/views/pods/PodEventsView.vue'), meta: { title: '容器事件', perm: 'podevent:view' } },
       { path: 'ledger', component: () => import('@/views/ledger/LedgerView.vue'), meta: { title: '资源台账', perm: 'ledger:view' } },
       { path: 'resources', redirect: (to) => ({ path: '/ledger', query: to.query }) },   // 兼容旧链接（邮件 / 收藏夹）
-      { path: 'rules', component: () => import('@/views/rules/RuleListView.vue'), meta: { title: '规则管理', perm: 'rule:view' } },
-      { path: 'notify', component: () => import('@/views/notify/NotifyView.vue'), meta: { title: '通知管理', perm: 'notify:view' } },
-      { path: 'silences', component: () => import('@/views/silences/SilenceView.vue'), meta: { title: '维护与静默', perm: 'alarm:view' } },
+      { path: 'rules', component: () => import('@/views/rules/RuleListView.vue'), meta: workspaceMeta('/rules') },
+      { path: 'guides', component: () => import('@/views/guides/GuidesView.vue'), meta: { title: '资源与指标指南' } },
+      { path: 'notify', component: () => import('@/views/notify/NotifyView.vue'), meta: workspaceMeta('/notify') },
+      { path: 'silences', component: () => import('@/views/silences/SilenceView.vue'), meta: workspaceMeta('/silences') },
       { path: 'reports', component: () => import('@/views/reports/ReportView.vue'), meta: { title: '报表中心', perm: 'report:view' } },
+      { path: 'job-reports', redirect: to => ({ path: JOB_MENU_PATH, query: to.query, hash: to.hash }) },
+      ...JOB_NAVIGATION.map(({ path, panel, meta }) => ({
+        path: path.slice(1), component: () => import('@/views/job-reports/JobReportPanel.vue'), props: { panel }, meta,
+      })),
       { path: 'system', component: () => import('@/views/system/SystemView.vue'), meta: { title: '系统管理', perm: SYSTEM_PERMS } },
       { path: '403', component: () => import('@/views/misc/ErrorView.vue'), props: { code: 403 }, meta: { title: '无权限' } },
     ],

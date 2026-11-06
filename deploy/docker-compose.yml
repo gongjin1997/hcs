@@ -1,4 +1,4 @@
-# HCS-Inspector 生产部署（单机 docker compose）。在 deploy 目录执行：make install（首次）/ make upgrade（升级）
+# HCS-Inspector 生产部署（单机独立 docker-compose）。在 deploy 目录执行：make install（首次）/ make upgrade（升级）
 # 配置全部在同目录 .env（scripts/gen-env.sh 生成）；COMPOSE_FILE 决定是否叠加 https / demo 覆盖文件
 name: ${COMPOSE_PROJECT_NAME:-hcs-inspector}
 
@@ -11,8 +11,8 @@ x-backend: &backend
   image: ${IMAGE_PREFIX:-hcs-inspector}-backend:${HCS_INSPECTOR_VERSION:-0.4.0}
   env_file: [.env]
   environment:
-    INSPECTOR_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-inspector}:${POSTGRES_PASSWORD:?请先执行 scripts/gen-env.sh 生成 .env}@postgres:5432/${POSTGRES_DB:-inspector}
-    INSPECTOR_REDIS_URL: redis://redis:6379/0
+    INSPECTOR_DATABASE_URL: ${INSPECTOR_DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-inspector}:${POSTGRES_PASSWORD:?请先执行 scripts/gen-env.sh 生成 .env}@postgres:5432/${POSTGRES_DB:-inspector}}
+    INSPECTOR_REDIS_URL: ${INSPECTOR_REDIS_URL:-redis://redis:6379/0}
     TZ: ${TZ:-Asia/Shanghai}
   volumes:
     - exports:/app/data

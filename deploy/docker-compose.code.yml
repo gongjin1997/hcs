@@ -1,0 +1,18 @@
+# 业务代码独立于运行时镜像；后续仅更新小代码包，无需重传镜像或在目标机安装 Node/Python。
+x-code: &code
+  environment:
+    PYTHONPATH: /app/python:/app
+  volumes:
+    - ${HCS_CODE_DIR:?请先执行部署脚本}/backend/app:/app/app:ro
+    - ${HCS_CODE_DIR:?请先执行部署脚本}/backend/migrations:/app/migrations:ro
+    - ${HCS_CODE_DIR:?请先执行部署脚本}/backend/alembic.ini:/app/alembic.ini:ro
+    - ${HCS_CODE_DIR:?请先执行部署脚本}/python:/app/python:ro
+
+services:
+  migrate: *code
+  api: *code
+  scheduler: *code
+  notifier: *code
+  web:
+    volumes:
+      - ${HCS_CODE_DIR:?请先执行部署脚本}/web:/usr/share/nginx/html:ro

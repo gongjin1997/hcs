@@ -63,7 +63,7 @@ def targets(db: Session, tenant_ids: list[int] | None = None) -> list[Target]:
 def resolve_targets(db: Session, tenant_ids: list[int] | None = None) -> list[Target]:
     """有租户配置时返回范围内的租户目标；一个租户都没配置时返回环境变量兜底目标。"""
     ts = targets(db, tenant_ids)
-    if ts or db.scalar(select(HcsAccount.id).limit(1)) is not None:
+    if tenant_ids is not None or ts or db.scalar(select(HcsAccount.id).limit(1)) is not None:
         return ts
     return [legacy_target()]
 

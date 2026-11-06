@@ -1,6 +1,6 @@
-# HCS-Inspector 部署目录（单机 docker compose）
+# HCS-Inspector 部署目录（独立 docker-compose）
 
-本目录就是生产部署所需的全部文件：拷到目标机（例如 `/opt/hcs-inspector`），在本目录执行 `make` 命令完成安装、升级、备份、排障。
+完整 ARM64 离线交付目录为构建机 `/data/hcs/deploy/`。复制到内网目标机后执行 `bash install.sh`，默认安装到 `/data/hcs-inspector`；源码仓库的本目录还包含构建、联调文件，不要直接作为离线包传输。
 完整步骤见 `docs/部署运维手册.md`，局域网对接真实 HCS 见 `docs/联调手册.md`。
 
 ## 环境要求
@@ -8,16 +8,20 @@
 | 项 | 要求 |
 | --- | --- |
 | 主机 | 1 台 Linux 虚拟机，4 核 8 GB 起，数据盘 100 GB（`DATA_DIR` 所在分区） |
-| 软件 | Docker 20.10+、docker compose v2 插件（`docker compose version`）、GNU make、openssl |
+| 软件 | Docker 20.10+、独立 `docker-compose` 1.29+、Bash 和常规 Linux 工具；目标机不要求 make / Python / Node |
 | 网络 | 本机 → 各租户 IAM / 服务 Endpoint（HTTPS 443）、CCE 集群 API、Prometheus（如有）、SMTP；运维办公网 → 本机 80 / 443 |
 | 时间 | 开启 NTP 同步（AK/SK 签名和 Token 过期判断依赖本机时钟） |
 
-## 三步安装
+## 一键安装（正式环境）
+
+ARM64 离线包解压后执行 `bash install.sh`，默认安装到 `/data/hcs-inspector`。新生产环境的采集、巡检任务默认关闭；已有部署在原目录执行 `bash deploy.sh`，保留 `.env`、主密钥、数据库、租户和开关。后续只上传代码包，在部署目录执行 `bash deploy.sh update 代码包.tar.gz`，不重传镜像。详见 `docs/ARM64离线部署.md`。
+
+需要在启动前自定义参数时，也可以先生成 `.env`：
 
 ```bash
-make gen-env        # 1. 由 .env.example 生成 .env（随机生成数据库口令、JWT / 邮件链接密钥、凭据主密钥、admin 初始口令）
+bash scripts/gen-env.sh # 1. 在部署目录生成 .env（随机生成数据库口令、JWT / 邮件链接密钥、凭据主密钥、admin 初始口令）
 vi .env             # 2. 修改「必改」项：INSPECTOR_BASE_URL、SMTP_*；HCS 内部 CA 放 certs/ 并配置 INSPECTOR_HCS_CA_FILE
-make install        # 3. 导入 / 构建镜像 → 迁移 + 初始化 → 启动 → 健康检查（可重复执行）
+bash deploy.sh      # 3. 导入镜像 → 迁移 + 初始化 → 启动 → 健康检查（可重复执行）
 ```
 
 安装完成后用 `admin` 和 `.env` 中的 `INSPECTOR_INIT_ADMIN_PASSWORD` 登录，**立即修改口令并清空该行**；然后在「系统管理 → 租户接入」录入租户，
@@ -60,6 +64,4 @@ deploy/
 
 ## 离线局点
 
-在能访问外网的构建机（源码仓库 `deploy/` 目录）执行 `make bundle`，生成 `dist/hcs-inspector-<版本>-offline.tar.gz`
-（镜像 tar + 本目录 + 文档）。拷到目标机解压，进入目录后同样执行 `make gen-env && vi .env && make install`；
-`install` / `upgrade` 会自动校验 `images/SHA256SUMS` 并 `docker load`。
+在能访问外网的源码构建机执行 `bash deploy/scripts/offline-bundle.sh`，生成 `deploy/dist/hcs-inspector-<版本>-arm64-offline.tar.gz`。四类镜像全部为 ARM64，含校验文件和一键脚本，不含真实 `.env`、证书、数据及演示服务。目标机解压后执行 `bash install.sh`，默认安装到 `/data/hcs-inspector`，启动时禁止联网拉取镜像。已有部署应在原目录更新程序，保留原 `.env`、数据、项目名和自定义配置。

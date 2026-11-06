@@ -4,10 +4,15 @@
       <!-- 顶栏 -->
       <header class="bs-header">
         <div class="h-left">
-          <span class="env" :style="{ background: app.currentTenant?.color ?? '#1d63f0' }">{{ app.currentTenant ? '租户' : '多租户' }}</span><span>{{ app.tenantLabel }}</span>
-          <span class="live" :class="{ on: connected }"><i />{{ connected ? '实时推送' : '重连中' }}</span>
+          <el-select :model-value="app.tenantId ?? 0" class="tenant-select" aria-label="切换大屏租户"
+                     filterable placeholder="选择租户" no-match-text="无匹配租户"
+                     popper-class="bigscreen-tenant-options" :disabled="app.tenants.length < 2" @change="onTenant">
+            <el-option :value="0" :label="app.tenants.length === 1 ? app.tenants[0].name : '全部租户'" />
+            <el-option v-for="tenant in app.tenants" :key="tenant.id" :value="tenant.id" :label="tenant.name" />
+          </el-select>
+          <span v-if="user.can('alarm:view')" class="live" :class="{ on: connected }"><i />{{ connected ? '实时推送' : '重连中' }}</span>
         </div>
-        <div class="h-title"><h1>HCS 云服务运行态势</h1><p>ECS · CCE · DataArts · MRS · GaussDB · DCS</p></div>
+        <div class="h-title"><h1>HCS 云服务运行态势</h1></div>
         <div class="h-right"><b class="num">{{ clock.time }}</b><span>{{ clock.date }}</span><el-icon class="exit" title="返回控制台" @click="$router.push('/dashboard')"><Close /></el-icon></div>
       </header>
 
@@ -30,9 +35,9 @@
                 <span class="s-name">{{ g.name }}</span>
                 <span class="s-meta">资源 {{ g.resources }} · 异常 <b :class="{ red: g.abnormal }">{{ g.abnormal }}</b></span>
                 <span class="sevs"><template v-for="s in SEVERITIES" :key="s"><em v-if="g.alarms[s]" :style="{ background: SEVERITY[s].color }">{{ s }}·{{ g.alarms[s] }}</em></template></span>
-                <b class="num score" :style="{ color: scoreColor(g.score) }">{{ g.score }}</b>
+                <b class="num score" :style="{ color: scoreColor(g.score) }">{{ g.score ?? '—' }}</b>
               </div>
-              <div class="bar"><i :style="{ width: `${g.score}%`, background: `linear-gradient(90deg, ${scoreColor(g.score)}33, ${scoreColor(g.score)})` }" /></div>
+              <div class="bar"><i :style="{ width: `${g.score ?? 0}%`, background: `linear-gradient(90deg, ${scoreColor(g.score)}33, ${scoreColor(g.score)})` }" /></div>
             </div>
           </div>
           <div class="panel flex-panel">
@@ -41,8 +46,8 @@
               <i class="dot" :class="t.last_status?.toLowerCase()" />
               <span class="t-name">{{ t.name }}</span>
               <span class="t-meta">{{ fromNow(t.last_run_at) }} · {{ t.duration_sec ?? '-' }}s</span>
-              <span v-if="t.service === 'ledger'" class="t-abn muted">同步 {{ t.resource_total }}</span>
-              <span v-else class="t-abn" :class="{ red: t.abnormal_total }">{{ t.abnormal_total }}/{{ t.resource_total }}</span>
+              <span v-if="t.service === 'ledger'" class="t-abn muted">同步 {{ t.resource_total ?? '—' }}</span>
+              <span v-else class="t-abn" :class="{ red: t.abnormal_total }">{{ t.abnormal_total ?? '—' }}/{{ t.resource_total ?? '—' }}</span>
             </div>
           </div>
         </section>
@@ -71,9 +76,9 @@
             <div class="p-title">租户健康</div>
             <div v-for="t in data.tenants" :key="t.id" class="tenant" :style="{ '--c': t.color }">
               <i class="t-dot" /><span class="t-name">{{ t.short_name }}</span>
-              <span class="t-meta">ECS {{ ecsActive(t) }}/{{ ecsTotal(t) }} · {{ METRICS_SOURCE[t.metrics_source]?.short ?? t.metrics_source }}</span>
+              <span class="t-meta">ECS {{ ecsActive(t) }}/{{ ecsTotal(t) }} · {{ METRICS_SOURCE[effectiveMetricsSource(t.metrics_source, t.metrics_effective)]?.short ?? t.metrics_source }}</span>
               <span class="sevs"><template v-for="s in SEVERITIES" :key="s"><em v-if="t.alarms[s]" :style="{ background: SEVERITY[s].color }">{{ s }}·{{ t.alarms[s] }}</em></template></span>
-              <b class="num" :style="{ color: scoreColor(t.score) }">{{ t.score }}</b>
+              <b class="num" :style="{ color: scoreColor(t.score) }">{{ t.score ?? '—' }}</b>
             </div>
           </div>
           <div class="panel">
@@ -92,6 +97,10 @@
           </div>
         </section>
       </main>
+      <div v-else class="screen-state" role="status">
+        <span>{{ loadError || '加载中…' }}</span>
+        <el-button v-if="loadError" @click="load">重试</el-button>
+      </div>
     </div>
   </div>
 </template>
@@ -99,13 +108,15 @@
 <script setup lang="ts">
 import { Close } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { fetchSummary } from '@/api'
 import EChart from '@/components/EChart.vue'
 import { useAlarmStream } from '@/composables/useAlarmStream'
+import { useLatestRequest } from '@/composables/useLatestRequest'
 import { useAppStore } from '@/stores/app'
+import { useUserStore } from '@/stores/user'
 import type { Alarm, CapacityKey, Summary, TenantHealth } from '@/types'
-import { ALARM_STATUS, METRICS_SOURCE, RESOURCE_TYPES, SEVERITIES, SEVERITY, scoreColor, usageColor } from '@/utils/dict'
+import { ALARM_STATUS, METRICS_SOURCE, RESOURCE_TYPES, SEVERITIES, SEVERITY, effectiveMetricsSource, scoreColor, usageColor } from '@/utils/dict'
 import { fromNow } from '@/utils/format'
 
 // 设计稿 1920×1080，等比缩放适配任意分辨率（拼接屏 / 投屏）
@@ -116,28 +127,53 @@ const scale = ref(1)
 const fit = () => { scale.value = Math.min(window.innerWidth / W, window.innerHeight / H) }
 
 const app = useAppStore()
+const user = useUserStore()
 const data = ref<Summary>()
+const summaryRequest = useLatestRequest()
+const loadError = ref('')
 /** 大屏空间有限：失败 / 异常的任务优先，最多展示 4 个（台账同步的 abnormal_total 表示“变更数”，不参与异常排序） */
-const abn = (t: { service: string; abnormal_total: number }) => (t.service === 'ledger' ? 0 : t.abnormal_total ?? 0)
+const abn = (t: { service: string; abnormal_total: number | null }) => (t.service === 'ledger' ? 0 : t.abnormal_total ?? 0)
+const taskPriority = (status: string | null) => status === 'FAILED' || status === 'TIMEOUT' ? 3 : status === 'PARTIAL' ? 2 : 0
 const topTasks = computed(() => [...(data.value?.tasks ?? [])].sort((a, b) =>
-  Number(b.last_status === 'FAILED') - Number(a.last_status === 'FAILED') || abn(b) - abn(a)).slice(0, 4))
+  taskPriority(b.last_status) - taskPriority(a.last_status) || abn(b) - abn(a)).slice(0, 4))
 const feed = ref<{ key: string; alarm: Alarm }[]>([])
 const clock = reactive({ time: '', date: '' })
 let timers: number[] = []
 
 async function load() {
-  data.value = await fetchSummary()
-  if (!feed.value.length) feed.value = data.value.top_alarms.slice(0, 8).map((a) => ({ key: `init-${a.id}`, alarm: a }))
+  const scope = app.tenantSeq
+  try {
+    await summaryRequest.run(() => fetchSummary(), summary => {
+      data.value = summary
+      loadError.value = ''
+      if (!feed.value.length) feed.value = summary.top_alarms.slice(0, 8).map(alarm => ({ key: `init-${alarm.id}`, alarm }))
+    })
+  } catch (error) {
+    if (scope === app.tenantSeq) loadError.value = error instanceof Error ? error.message : '加载失败'
+  }
+}
+function onTenant(id: number) {
+  if (id !== 0 && !app.tenants.some(tenant => tenant.id === id)) return
+  app.setTenant(id || null)
 }
 const tick = () => { const n = dayjs(); clock.time = n.format('HH:mm:ss'); clock.date = n.format('YYYY-MM-DD dddd') }
 
 // 实时推送：新告警插入列表顶部（保留 8 条）并刷新统计
-const { connected } = useAlarmStream((e) => {
+const { connected, reopen } = useAlarmStream((e) => {
   if (['FIRE', 'UPGRADE', 'RESOLVE'].includes(e.type)) {
     feed.value = [{ key: `${e.type}-${e.alarm.id}-${Date.now()}`, alarm: e.alarm }, ...feed.value.filter((f) => f.alarm.id !== e.alarm.id)].slice(0, 8)
   }
   load()
-})
+}, () => user.can('alarm:view'))
+
+watch(() => app.tenantSeq, () => {
+  summaryRequest.invalidate()
+  data.value = undefined
+  feed.value = []
+  loadError.value = ''
+  reopen()
+  void load()
+}, { flush: 'sync' })
 
 onMounted(() => {
   fit(); tick(); load()
@@ -161,26 +197,27 @@ const kpis = computed(() => {
     { label: 'P1 紧急', value: k.p1, sub: '需立即处理', color: '#ff4d4f' },
     { label: '待认领', value: k.firing, sub: '告警中', color: '#ffa940' },
     { label: 'ECS 运行', value: `${ecsBy('ACTIVE')}/${data.value!.ecs.total}`, sub: `关机 ${ecsBy('SHUTOFF')} · 故障 ${ecsBy('ERROR')}`, color: '#4096ff' },
-    { label: '容器重启 24h', value: p.restarts_24h, sub: `OOM ${p.oom_24h} · 背压 ${p.backpressure}`, color: '#b37feb' },
+    { label: '容器重启 24h', value: p.restarts_24h ?? '—', sub: `OOM ${p.oom_24h ?? '—'} · 背压 ${p.backpressure}`, color: '#b37feb' },
     { label: 'MTTA', value: k.mtta_min ?? '-', sub: '分钟', color: '#36cfc9' },
   ]
 })
 
 const gaugeOption = computed(() => {
-  const v = data.value?.health_score ?? 0
-  const c = scoreColor(v)
+  const score = data.value?.health_score
+  const v = score ?? 0
+  const c = scoreColor(score)
   return {
     series: [
       { type: 'gauge', startAngle: 225, endAngle: -45, radius: '96%', center: ['50%', '58%'], min: 0, max: 100, splitNumber: 10,
         axisLine: { lineStyle: { width: 16, color: [[1, 'rgba(64,150,255,0.12)']] } },
-        progress: { show: true, width: 16, itemStyle: { color: { type: 'linear', x: 0, y: 0, x2: 1, y2: 0, colorStops: [{ offset: 0, color: '#1d63f0' }, { offset: 1, color: c }] } } },
+        progress: { show: score != null, width: 16, itemStyle: { color: { type: 'linear', x: 0, y: 0, x2: 1, y2: 0, colorStops: [{ offset: 0, color: '#1d63f0' }, { offset: 1, color: c }] } } },
         // 刻度画在色环内侧，避免 190px 高度下被裁切
         axisTick: { distance: 4, length: 4, lineStyle: { color: 'rgba(143,163,191,0.45)' } },
         splitLine: { distance: 4, length: 8, lineStyle: { color: 'rgba(143,163,191,0.7)', width: 2 } },
         axisLabel: { show: false }, pointer: { show: false },
         title: { offsetCenter: [0, '46%'], color: '#8fa3bf', fontSize: 15 },
-        detail: { offsetCenter: [0, '2%'], fontSize: 52, fontWeight: 700, color: '#fff', fontFamily: 'DIN Alternate, Bahnschrift, Roboto' },
-        data: [{ value: v, name: v >= 90 ? '运行良好' : v >= 75 ? '需要关注' : v >= 60 ? '存在风险' : '严重异常' }] },
+        detail: { offsetCenter: [0, '2%'], fontSize: 52, fontWeight: 700, color: '#fff', fontFamily: 'DIN Alternate, Bahnschrift, Roboto', formatter: score == null ? '—' : '{value}' },
+        data: [{ value: v, name: score == null ? '暂无有效巡检数据' : v >= 90 ? '运行良好' : v >= 75 ? '需要关注' : v >= 60 ? '存在风险' : '严重异常' }] },
     ],
   }
 })
@@ -190,7 +227,7 @@ const trendOption = computed(() => {
   return {
     tooltip: { trigger: 'axis', backgroundColor: 'rgba(10,24,48,0.92)', borderColor: '#1d63f0', textStyle: { color: '#e6f0ff' } },
     legend: { right: 10, top: 0, textStyle: { color: '#8fa3bf', fontSize: 13 }, icon: 'roundRect', itemWidth: 12, itemHeight: 6 },
-    grid: { left: 10, right: 16, top: 36, bottom: 4, containLabel: true },
+    grid: { left: 10, right: 16, top: 36, bottom: 4, outerBoundsMode: 'same', outerBoundsContain: 'all' },
     xAxis: { type: 'category', boundaryGap: false, data: t?.hours ?? [], ...AXIS },
     yAxis: { type: 'value', minInterval: 1, ...AXIS, axisLine: { show: false }, ...SPLIT },
     series: SEVERITIES.map((s) => ({
@@ -205,8 +242,8 @@ const trendOption = computed(() => {
 const capOption = (key: CapacityKey) => {
   const rows = [...(data.value?.capacity[key] ?? [])].reverse()
   return {
-    grid: { left: 8, right: 56, top: 6, bottom: 0, containLabel: true },
-    xAxis: { type: 'value', max: 100, show: false },
+    grid: { left: 8, right: 56, top: 6, bottom: 0, outerBoundsMode: 'same', outerBoundsContain: 'all' },
+    xAxis: { type: 'value', max: Math.max(100, ...rows.map(r => Math.ceil(r.value))), show: false },
     yAxis: { type: 'category', data: rows.map((r) => r.name), ...AXIS, axisLine: { show: false }, axisLabel: { color: '#c5d3e8', fontSize: 13 } },
     series: [{
       type: 'bar', barWidth: 12, showBackground: true, backgroundStyle: { color: 'rgba(64,150,255,0.08)', borderRadius: 6 },
@@ -249,9 +286,14 @@ const pieOption = computed(() => {
       &.on { color: #52c41a; i { background: #52c41a; box-shadow: 0 0 10px #52c41a; } } } }
   .h-title { text-align: center;
     h1 { margin: 0; font-size: 40px; letter-spacing: 8px; font-weight: 700; background: linear-gradient(180deg, #fff, #8ec5ff); -webkit-background-clip: text; background-clip: text; color: transparent; }
-    p { margin: 4px 0 0; font-size: 14px; letter-spacing: 4px; color: #5d7699; } }
+  }
   .h-right { display: flex; justify-content: flex-end; align-items: baseline; gap: 14px; color: #8fa3bf; font-size: 16px;
     b { font-size: 34px; color: #fff; letter-spacing: 2px; } .exit { cursor: pointer; align-self: center; font-size: 20px; &:hover { color: #fff; } } }
+}
+.screen-state { flex: 1; display: flex; align-items: center; justify-content: center; gap: 16px; color: #a9bfdc; font-size: 20px; }
+.tenant-select { width: 300px; --el-fill-color-blank: #0c203d; --el-text-color-regular: #e6f0ff;
+  --el-text-color-placeholder: #a1b5ce; --el-border-color: #31557a; --el-border-color-hover: #5ba2e5;
+  :deep(.el-select__wrapper) { min-height: 40px; font-size: 16px; }
 }
 .bs-main { flex: 1; min-height: 0; display: grid; grid-template-columns: 470px 1fr 470px; gap: 20px; padding: 20px 32px 28px; }
 .col { display: flex; flex-direction: column; gap: 20px; min-height: 0; }
@@ -303,4 +345,11 @@ const pieOption = computed(() => {
       .st.firing { color: #ff7875; } .st.acked { color: #ffc53d; } .st.resolved { color: #73d13d; } } } }
 .feed-enter-active { transition: all 0.5s ease; }
 .feed-enter-from { opacity: 0; transform: translateX(30px); background: rgba(217, 48, 38, 0.3); }
+</style>
+
+<style lang="scss">
+.bigscreen-tenant-options {
+  --el-bg-color-overlay: #0c203d; --el-fill-color-light: #183b60;
+  --el-text-color-regular: #e6f0ff; --el-border-color-light: #31557a; --el-color-primary: #74baff;
+}
 </style>

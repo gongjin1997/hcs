@@ -21,20 +21,33 @@ class Role(TimestampMixin, Base):
 
 
 class User(TimestampMixin, Base):
-    """平台账号：功能权限看角色，数据权限看租户范围（tenant_ids 为空 = 全部租户）。"""
+    """统一人员：角色决定登录权限；tenant_ids=None 为全部租户，[] 为未分配范围。"""
 
     __tablename__ = "sys_user"
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str] = mapped_column(String(64), unique=True)
     display_name: Mapped[str] = mapped_column(String(64))
     email: Mapped[str | None] = mapped_column(String(128))
+    phone: Mapped[str | None] = mapped_column(String(32))
+    login_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    notify_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
     password_hash: Mapped[str] = mapped_column(String(255))
+    token_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     role_id: Mapped[int | None] = mapped_column(Integer, index=True)
     tenant_ids: Mapped[list | None] = mapped_column(JsonType, nullable=True)    # None = 全部租户
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     failed_attempts: Mapped[int] = mapped_column(Integer, default=0)    # 连续输错次数，达到上限临时锁定
     locked_until: Mapped[datetime | None] = mapped_column(UtcDateTime())
     last_login_at: Mapped[datetime | None] = mapped_column(UtcDateTime())
+
+
+class RevokedToken(Base):
+    """会话撤销持久化：跨 API 进程和重启生效，不依赖 Redis 可用性。"""
+
+    __tablename__ = "revoked_token"
+    jti: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    expires_at: Mapped[datetime] = mapped_column(UtcDateTime(), index=True)
 
 
 class AuditLog(Base):

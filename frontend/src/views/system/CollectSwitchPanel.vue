@@ -1,7 +1,7 @@
 <template>
   <div v-loading="loading" class="switch-panel">
     <el-alert type="info" :closable="false" show-icon class="mb-12">
-      <template #title>按资源类型启停采集：例如租户没有开通 DCS，就在该租户下关闭“DCS 缓存实例”，不再调用 DCS 接口，也不会产生 DCS 告警</template>
+      <template #title>按租户和资源类型启停采集</template>
       <div class="rules">
         <span><b>关闭后</b>：台账同步跳过该类资源（已有台账保留，不会标记为“已释放”）；对应巡检任务对该租户不再执行；该类资源的活动告警自动关闭并留处理记录。</span>
         <span><b>重新开启</b>：下一次台账同步 / 巡检自动恢复。租户设置优先于全局默认；“跟随全局”= 使用全局开关。</span>
@@ -63,6 +63,7 @@
               <el-option value="on" label="开启" />
               <el-option value="off" label="关闭" />
             </el-select>
+            <el-button v-if="row.code === 'ecs_server' && user.canAny('ledger:view', 'task:view')" link type="primary" size="small" @click="openEcsPolicy(t.id, t.short_name || t.name)">ECS 采集策略</el-button>
             <div class="eff">
               <span class="dot" />{{ effOf(row as SwitchType, t.id) ? '采集中' : '已关闭' }}
               <span class="text-3">· 资源 {{ row.tenants[t.id]?.resources ?? 0 }}</span>
@@ -74,6 +75,8 @@
       <template #empty><div class="empty-dash">没有匹配的资源类型</div></template>
     </el-table>
     <div v-if="!canManage" class="text-3 mt-12">当前角色只能查看；修改采集开关需要“采集开关（按资源类型启停）”权限。</div>
+
+    <EcsPolicyDialog v-model="ecsPolicy.visible" :tenant-id="ecsPolicy.tenantId" :tenant-name="ecsPolicy.tenantName" />
 
     <!-- 保存前确认影响 -->
     <el-dialog v-model="confirm.visible" title="确认保存采集开关" width="600px" append-to-body>
@@ -88,7 +91,7 @@
           <div class="tags"><el-tag v-for="x in confirm.impact.start" :key="x" type="success" effect="plain">{{ x }}</el-tag></div>
           <div class="text-3">下一次台账同步 / 巡检开始采集；可在“巡检任务”里立即执行</div>
         </div>
-        <div v-if="!confirm.impact.stop.length && !confirm.impact.start.length" class="text-3">本次修改不改变实际生效状态（例如从“跟随全局（开）”改为“开启”），只记录设置。</div>
+        <div v-if="!confirm.impact.stop.length && !confirm.impact.start.length" class="text-3">本次仅更新设置，不改变当前采集状态。</div>
       </div>
       <template #footer>
         <el-button @click="confirm.visible = false">取消</el-button>
@@ -104,6 +107,7 @@ import { ElMessage } from 'element-plus'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { getCollectSwitches, listTasks, saveCollectSwitches, switchImpact } from '@/api'
 import { useUserStore } from '@/stores/user'
+import EcsPolicyDialog from '@/views/ecs/EcsPolicyDialog.vue'
 import type { CollectSwitches, SwitchImpact, SwitchItem, SwitchType } from '@/types'
 
 const emit = defineEmits<{ changed: [] }>()
@@ -112,6 +116,8 @@ const canManage = computed(() => user.can('collect:manage'))
 const loading = ref(false)
 const saving = ref(false)
 const data = ref<CollectSwitches | null>(null)
+const ecsPolicy = reactive({ visible: false, tenantId: null as number | null, tenantName: '' })
+function openEcsPolicy(tenantId: number, tenantName: string) { Object.assign(ecsPolicy, { visible: true, tenantId, tenantName }) }
 const taskNames = ref<Record<string, string>>({})
 const category = ref('all')
 const keyword = ref('')
@@ -119,7 +125,8 @@ const onlyOff = ref(false)
 /** 暂存的修改：key = `${type}|${tenantId}`（tenantId 0 = 全局）；值 null = 跟随全局 */
 const staged = reactive(new Map<string, boolean | null>())
 
-async function load() {
+async function load(force = false) {
+  if (!force && (saving.value || confirm.visible)) return
   loading.value = true
   try {
     data.value = await getCollectSwitches()
@@ -130,7 +137,7 @@ async function load() {
   } finally { loading.value = false }
 }
 onMounted(load)
-defineExpose({ reload: load })
+defineExpose({ reload: load, busy: computed(() => saving.value || confirm.visible) })
 
 const categoryOptions = computed(() => [{ value: 'all', label: '全部' },
   ...(data.value?.categories ?? []).map((c) => ({ value: c.code, label: c.name }))])
@@ -153,13 +160,14 @@ const isDirty = (type: string, tid: number) => staged.has(key(type, tid))
 const dirtyCount = computed(() => staged.size)
 
 function stage(type: string, tid: number, v: boolean | null) {
+  if (!canManage.value || saving.value || confirm.visible) return
   const t = data.value!.types.find((x) => x.code === type)!
   const orig = tid === 0 ? t.global : t.tenants[tid]?.setting ?? null
   const k = key(type, tid)
   if (v === orig) staged.delete(k)
   else staged.set(k, v)
 }
-const discard = () => staged.clear()
+const discard = () => { if (!saving.value && !confirm.visible) staged.clear() }
 
 // ---- 过滤与合并单元格 ----
 const rows = computed(() => {
@@ -191,25 +199,36 @@ const offSummary = computed(() => {
 })
 
 // ---- 保存：先预估影响，确认后保存 ----
-const confirm = reactive({ visible: false, impact: null as SwitchImpact | null })
+const confirm = reactive({ visible: false, impact: null as SwitchImpact | null, items: [] as SwitchItem[] })
 const items = (): SwitchItem[] => [...staged.entries()].map(([k, v]) => {
   const [resource_type, tid] = k.split('|')
   return { resource_type, tenant_id: Number(tid), enabled: v }
 })
 async function onSave() {
+  if (!canManage.value || saving.value || !staged.size) return
+  const batch = items()
   saving.value = true
   try {
-    confirm.impact = await switchImpact(items())
+    const impact = await switchImpact(batch)
+    if (JSON.stringify(items()) !== JSON.stringify(batch)) return ElMessage.warning('采集开关已变更，请重新预估影响')
+    confirm.items = batch
+    confirm.impact = impact
     confirm.visible = true
   } finally { saving.value = false }
 }
 async function doSave() {
+  if (!canManage.value || saving.value || !confirm.visible) return
+  if (JSON.stringify(items()) !== JSON.stringify(confirm.items)) {
+    confirm.visible = false
+    return ElMessage.warning('采集开关已变更，请重新预估影响')
+  }
+  const batch = confirm.items.map(item => ({ ...item }))
   saving.value = true
   try {
-    const r = await saveCollectSwitches(items())
+    const r = await saveCollectSwitches(batch)
     ElMessage.success(`已保存 ${r.changed.length} 项${r.closed_alarms ? `，自动关闭 ${r.closed_alarms} 条活动告警` : ''}；调度进程下一轮生效`)
     confirm.visible = false
-    await load()
+    await load(true)
     emit('changed')
   } finally { saving.value = false }
 }

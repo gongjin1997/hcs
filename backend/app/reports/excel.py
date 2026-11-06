@@ -42,7 +42,8 @@ def _runtime_sheets(wb, data: dict) -> None:
     if ecs:
         ws = wb.create_sheet("ECS 状态")
         write_table(ws, ["指标", "数值"],
-                    [["ECS 总数", ecs["total"]], ["运行中", ecs["active"]], ["关机", ecs["shutoff"]], ["故障", ecs["error"]],
+                    [["生成时 ECS 总数", ecs["total"]], ["生成时运行中", ecs["active"]],
+                     ["生成时关机", ecs["shutoff"]], ["生成时故障", ecs["error"]],
                      ["本期状态变更次数", ecs["status_changes"]], ["本期重启次数", ecs["reboots"]]], [22, 12])
         write_table(ws, ["重启较多的云服务器", "重启次数"], [[x["name"], x["count"]] for x in ecs["top_reboot"]],
                     start_row=10)
@@ -86,9 +87,11 @@ def report_workbook(db: Session, data: dict) -> bytes:
                     [[r["name"], r["rule_id"], r["count"]] for r in data["top_rules"]],
                     start_row=len(data["top_resources"]) + 4)
         ws.column_dimensions["A"].width = 32
-        write_table(wb.create_sheet("巡检任务"), ["任务", "执行次数", "成功", "部分成功", "失败", "成功率(%)", "平均耗时(秒)"],
-                    [[t["name"], t["runs"], t["success"], t["partial"], t["failed"], t["success_rate"], t["avg_sec"]]
-                     for t in data["tasks"]], [22, 10, 8, 10, 8, 12, 14])
+        write_table(wb.create_sheet("巡检任务"),
+                    ["任务", "运行记录", "成功", "部分成功", "失败", "跳过", "运行中", "已完成成功率(%)", "平均耗时(秒)"],
+                    [[t["name"], t["runs"], t["success"], t["partial"], t["failed"], t.get("skipped", 0),
+                      t.get("running", 0), t["success_rate"], t["avg_sec"]]
+                     for t in data["tasks"]], [22, 10, 8, 10, 8, 8, 8, 18, 14])
         write_table(wb.create_sheet("容量水位"), ["资源", "资源类型", "指标", "当前值(%)"],
                     [[c["name"], c["type_name"], c["metric"], c["value"]] for c in data["capacity"]], [26, 16, 14, 12])
         _runtime_sheets(wb, data)

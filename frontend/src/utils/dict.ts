@@ -25,7 +25,7 @@ export const HEALTH: Record<string, { label: string; color: string }> = {
 }
 export const SERVICES: Record<string, string> = {
   dataarts: 'DataArts Studio', mrs: 'MRS', gaussdb: 'GaussDB', dcs: 'DCS', ecs: 'ECS', evs: 'EVS', vpc: 'VPC', elb: 'ELB',
-  rds: 'RDS', dms: 'DMS Kafka', cce: 'CCE', dws: 'DWS', css: 'CSS', ledger: '全部服务', platform: '巡检平台',
+  rds: 'RDS', dms: 'DMS Kafka', cce: 'CCE', dws: 'DWS', css: 'CSS', aom: 'AOM（已停用）', ces: 'CES（旧配置）', ledger: '全部服务', platform: '巡检平台',
 }
 /** 资源类型名称（与后端 services/catalog.py RESOURCE_TYPES 一致；台账页以 /resources/types 接口为准） */
 export const RESOURCE_TYPES: Record<string, string> = {
@@ -67,10 +67,11 @@ export const REPORT_KIND: Record<string, { label: string; desc: string; color: s
 export const TASK_STATUS: Record<string, { label: string; type: TagType }> = {
   SUCCESS: { label: '成功', type: 'success' }, PARTIAL: { label: '部分成功', type: 'warning' },
   FAILED: { label: '失败', type: 'danger' }, TIMEOUT: { label: '超时', type: 'danger' }, RUNNING: { label: '运行中', type: 'primary' },
+  SKIPPED: { label: '已跳过（未执行）', type: 'info' },
 }
 export const NOTIFY_STATUS: Record<string, { label: string; type: TagType }> = {
   SENT: { label: '已发送', type: 'success' }, PENDING: { label: '待发送', type: 'primary' },
-  RETRYING: { label: '重试中', type: 'warning' }, FAILED: { label: '失败', type: 'danger' }, MERGED: { label: '已合并', type: 'info' },
+  RETRYING: { label: '重试中', type: 'warning' }, FAILED: { label: '失败', type: 'danger' }, MERGED: { label: '未单独发送', type: 'info' },
 }
 export const NOTIFY_KIND: Record<string, string> = {
   FIRING: '告警', UPGRADE: '级别升级', REPEAT: '重复', ESCALATE: '未处理升级', RESOLVED: '恢复', DIGEST: '汇总', REPORT: '报表',
@@ -78,6 +79,8 @@ export const NOTIFY_KIND: Record<string, string> = {
 export const LOG_ACTION: Record<string, { label: string; color: string }> = {
   FIRE: { label: '触发告警', color: '#D93026' }, UPGRADE: { label: '级别升级', color: '#F57C00' },
   DOWNGRADE: { label: '级别降低', color: '#1976D2' }, NOTIFY: { label: '发送通知', color: '#1d63f0' },
+  NOTIFY_SKIP: { label: '跳过通知', color: '#8C8C8C' }, NOTIFY_FAIL: { label: '通知失败', color: '#D93026' },
+  NOTIFY_RETRY: { label: '等待重试', color: '#F57C00' },
   ACK: { label: '认领', color: '#F9A825' }, SILENCE: { label: '静默 / 抑制', color: '#8C8C8C' },
   RESOLVE: { label: '自动恢复', color: '#2E7D32' }, REOPEN: { label: '重新打开', color: '#D93026' },
   CLOSE: { label: '关闭', color: '#8C8C8C' }, COMMENT: { label: '备注', color: '#4e5969' },
@@ -99,7 +102,7 @@ export function rawStatusType(s?: string | null): TagType {
   return 'info'
 }
 
-export const scoreColor = (v: number) => (v >= 90 ? '#2E7D32' : v >= 75 ? '#1d63f0' : v >= 60 ? '#F57C00' : '#D93026')
+export const scoreColor = (v: number | null | undefined) => (v == null || !Number.isFinite(v) ? '#86909c' : v >= 90 ? '#2E7D32' : v >= 75 ? '#1d63f0' : v >= 60 ? '#F57C00' : '#D93026')
 export const usageColor = (v: number) => (v >= 90 ? '#D93026' : v >= 80 ? '#F57C00' : v >= 70 ? '#F9A825' : '#1d63f0')
 
 // 规则试运行的示例事实（按资源类型）
@@ -137,12 +140,19 @@ export const AUTH_TYPE: Record<string, { label: string; short: string; desc: str
   AKSK: { label: 'AK/SK 签名', short: 'AK/SK', desc: '每个请求用 SK 做 SDK-HMAC-SHA256 签名，无需 Token；适合不允许创建 IAM 密码用户的租户', color: '#0e9f8f' },
 }
 export const METRICS_SOURCE: Record<string, { label: string; short: string; color: string; desc: string }> = {
-  AUTO: { label: '自动探测', short: '自动', color: '#4e5969', desc: '先探测云监控 CES，不可用时降级为 Prometheus，都没有则只巡检状态' },
-  CES: { label: '云监控 CES', short: 'CES', color: '#1d63f0', desc: 'HCS 8.5.1 云监控（可选组件），按 namespace / metric_name 批量查询' },
-  PROMETHEUS: { label: 'Prometheus', short: 'Prometheus', color: '#e6522c', desc: '租户自建 Prometheus（node_exporter 等），PromQL 查询' },
-  NONE: { label: '不采集指标', short: '仅状态', color: '#8c8c8c', desc: '只巡检资源状态（运行 / 关机 / 故障），不判断 CPU / 内存 / 磁盘' },
+  AUTO: { label: '自动选择', short: '自动', color: '#4e5969', desc: '使用已配置的 Prometheus；未配置时仅保留服务原生指标' },
+  AOM: { label: 'AOM（已停用）', short: '已停用', color: '#8c8c8c', desc: '旧配置已停用，不作为当前指标来源' },
+  CES: { label: 'CES（旧配置）', short: 'CES', color: '#8c8c8c', desc: '仅兼容已有 CES 配置' },
+  PROMETHEUS: { label: 'Prometheus', short: 'Prometheus', color: '#e6522c', desc: '使用已配置的 Prometheus 地址查询支持的指标' },
+  NONE: { label: '仅服务原生', short: '服务原生', color: '#8c8c8c', desc: '不接入外部监控，保留服务接口可提供的指标与资源状态' },
 }
-export const CAPABILITY: Record<string, string> = { ces: '云监控 CES', prometheus: 'Prometheus', cce_api: 'CCE K8s API' }
+/** 旧 AOM 来源不能作为当前来源，也不能隐式切换到 Prometheus。 */
+export function effectiveMetricsSource(configured: string | null | undefined, effective?: string | null): string {
+  if (configured === 'AOM' || effective === 'AOM') return 'NONE'
+  return effective ?? configured ?? 'NONE'
+}
+export const historicalMetricsSourceLabel = (source: string) => source === 'AOM' ? 'AOM（已停用，历史）' : source
+export const CAPABILITY: Record<string, string> = { prometheus: 'Prometheus', cce_api: 'CCE K8s API' }
 export const CHECK_KIND: Record<string, string> = { auth: '认证', service: '服务接口', capability: '能力探测' }
 /** ECS 状态分组颜色（总览 / 报表）：运行中 / 关机 / 故障 / 其他 */
 export const ECS_STATUS_COLOR: Record<string, string> = { ACTIVE: '#2E7D32', SHUTOFF: '#8C8C8C', ERROR: '#D93026', OTHER: '#F9A825' }

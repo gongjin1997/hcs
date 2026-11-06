@@ -6,9 +6,10 @@ state：    expr = {"when": "status == 'ERROR'", "severity": "P1", "critical_sev
            recover = {"when": "status == 'RUNNING'"}（缺省为“条件不再满足”）
 """
 from dataclasses import dataclass, field
+from math import isfinite
 from typing import Any
 
-from .expr import ExprError, evaluate
+from .expr import ExprError, MissingFact, evaluate
 
 SEVERITY_RANK = {"P1": 1, "P2": 2, "P3": 3, "P4": 4}
 _OPS = {">=": lambda a, b: a >= b, ">": lambda a, b: a > b, "<=": lambda a, b: a <= b, "<": lambda a, b: a < b}
@@ -22,7 +23,7 @@ class _SafeDict(dict):
 
 def render_title(tpl: str, facts: dict, **extra: Any) -> str:
     """标题模板渲染：{字段} 取观测值，缺失的字段显示为 “-”。"""
-    return tpl.format_map(_SafeDict({**facts, **extra}))
+    return tpl.format_map(_SafeDict({**facts, **extra}))[:255]
 
 
 @dataclass
@@ -63,18 +64,22 @@ class Rule:
 
     def _fmt(self, v: Any) -> str:
         unit = self.expr.get("unit", "")
-        return f"{round(v, 1) if isinstance(v, float) else v}{unit}"
+        return f"{round(v, 1) if isinstance(v, float) else v}{unit}"[:64]
 
     def _title(self, facts: dict, **extra: Any) -> str:
         return render_title(self.expr.get("title") or self.name, facts, **extra)
 
     def _match_threshold(self, facts: dict) -> Match | None:
         value = evaluate(self.expr["value"], facts)
+        if type(value) not in (int, float):
+            raise MissingFact("阈值指标不是数值")
+        if isinstance(value, float) and not isfinite(value):
+            raise MissingFact("阈值指标不是有限数")
         levels = sorted(self.expr.get("levels", []), key=lambda lv: SEVERITY_RANK[lv["severity"]])
         for lv in levels:  # 从最高级别开始，命中即返回
             if _OPS[lv.get("op", ">=")](value, lv["threshold"]):
                 cur = self._fmt(value)
-                thr = f"{_OP_TEXT[lv.get('op', '>=')]}{self._fmt(lv['threshold'])}"
+                thr = f"{_OP_TEXT[lv.get('op', '>=')]}{self._fmt(lv['threshold'])}"[:64]
                 return Match(lv["severity"], value, cur, thr, self._title(facts, value=cur, threshold=thr))
         return None
 
@@ -84,8 +89,9 @@ class Rule:
         sev = self.expr["severity"]
         if facts.get("critical") and self.expr.get("critical_severity"):
             sev = self.expr["critical_severity"]
-        cur = str(facts.get(self.expr.get("value_field", "status"), "")) or None
-        return Match(sev, cur, cur, self.expr.get("threshold_text"), self._title(facts, value=cur))
+        cur = str(facts.get(self.expr.get("value_field", "status"), ""))[:64] or None
+        threshold = self.expr.get("threshold_text")
+        return Match(sev, cur, cur, threshold[:64] if threshold else None, self._title(facts, value=cur))
 
     # ---- 恢复判定（滞回：恢复阈值低于触发阈值，避免在阈值附近反复告警/恢复）----
     def recovered(self, facts: dict) -> bool:

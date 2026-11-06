@@ -1,16 +1,14 @@
-"""监控指标来源。HCS 8.5.1 局点不一定部署了云监控（CES），平台按租户选择指标来源，并自动探测、自动降级：
+"""外部指标选源：AOM 全局停用，AUTO 仅选择已配置 Prometheus。
 
-- CES：HCS 云监控（SYS.ECS / SYS.DCS / SYS.GAUSSDBV5 ...）。ECS 的内存、磁盘使用率需要云服务器安装 CES Agent（AGT.ECS）
-- PROMETHEUS：租户侧已有的 Prometheus（node_exporter），CES 不可用时提供 ECS 的 CPU / 内存 / 磁盘 / 开机时间
-- NONE：只做状态类巡检（实例状态、DCS 内存、GaussDB 节点等来自各服务自身 API 的数据不受影响）
-
-租户 metrics_source = AUTO（默认）：除非已探测到“CES 不可用”，否则调用 CES；连通性测试会探测 CES，
-巡检时 CES 返回 404 / 501 或域名无法解析也会把租户标记为“CES 不可用”，之后改用 Prometheus（已配置时）或只巡检状态。
+旧 AOM 地址、映射和能力记录仅保留兼容，不参与选源、检测和采样。
+CES 仍须全局与租户双重显式启用；各产品原生只读接口独立运行。
 """
 from collections.abc import Callable
 from typing import TYPE_CHECKING, TypeVar
 
+from app.core.config import get_settings
 from app.hcs import HcsError
+from app.hcs.readonly import ces_access
 from app.models.base import utcnow
 
 if TYPE_CHECKING:
@@ -18,8 +16,9 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 
-SOURCES = {"AUTO": "自动探测", "CES": "云监控 CES", "PROMETHEUS": "Prometheus", "NONE": "不采集指标"}
-CAPABILITIES = {"ces": "云监控 CES", "prometheus": "Prometheus", "cce_api": "CCE K8s API"}
+SOURCES = {"AUTO": "自动选择", "CES": "云监控 CES（兼容）",
+           "PROMETHEUS": "Prometheus", "NONE": "仅服务原生字段"}
+CAPABILITIES = {"ces": "云监控 CES（兼容）", "prometheus": "Prometheus", "cce_api": "CCE K8s API"}
 _DNS_ERRORS = ("Name or service not known", "nodename nor servname", "getaddrinfo", "No address associated")
 
 
@@ -28,8 +27,14 @@ def _caps(tenant: object) -> dict:
 
 
 def available(tenant: object, name: str) -> bool | None:
-    """能力探测结果：True / False；None 表示还没探测过。"""
-    return (_caps(tenant).get(name) or {}).get("available")
+    """AOM 始终不可用，旧能力记录不能重新启用它。"""
+    if name == "aom":
+        return False
+    entry = _caps(tenant).get(name)
+    if not isinstance(entry, dict):
+        return None
+    value = entry.get("available")
+    return value if isinstance(value, bool) else None
 
 
 def mode(tenant: object) -> str:
@@ -37,29 +42,37 @@ def mode(tenant: object) -> str:
 
 
 def use_ces(tenant: object) -> bool:
-    m = mode(tenant)
-    if m == "CES":
-        return True
-    return m == "AUTO" and available(tenant, "ces") is not False
+    """仅旧部署显式启用且租户显式选择 CES 时允许请求；AUTO 永远不走 CES。"""
+    return bool(get_settings().hcs_ces_enabled) and mode(tenant) == "CES"
 
 
-def use_prometheus(tenant: object) -> bool:
-    if tenant is None or not getattr(tenant, "prometheus_url", None):
+def aom_configured(tenant: object, *, client: object | None = None) -> bool:
+    """旧调用兼容：即使保存了地址，本版本也不支持 AOM。"""
+    return False
+
+
+def use_aom(tenant: object, *, client: object | None = None) -> bool:
+    """旧调用兼容，所有资源均禁止使用 AOM。"""
+    return False
+
+
+def use_prometheus(tenant: object, *, client: object | None = None) -> bool:
+    if tenant is None or not str(getattr(tenant, "prometheus_url", None) or "").strip():
         return False
     m = mode(tenant)
-    return m == "PROMETHEUS" or (m == "AUTO" and available(tenant, "ces") is False)
+    return m in ("PROMETHEUS", "AUTO")
 
 
-def effective(tenant: object) -> str:
-    """当前生效的指标来源：CES / PROMETHEUS / NONE（页面展示、巡检记录用）。"""
+def effective(tenant: object, *, client: object | None = None) -> str:
+    """旧显式 AOM 返回 NONE，不擅自切换其他数据源；原生字段不受影响。"""
     if use_ces(tenant):
         return "CES"
-    return "PROMETHEUS" if use_prometheus(tenant) else "NONE"
+    return "PROMETHEUS" if use_prometheus(tenant, client=client) else "NONE"
 
 
 def mark(tenant: object, name: str, ok: bool, reason: str = "", **extra: object) -> None:
     """记录能力探测结果（只在结果变化或首次探测时写入，避免每轮巡检都更新租户记录）。"""
-    if tenant is None:
+    if tenant is None or name == "aom":
         return
     caps = _caps(tenant)
     old = caps.get(name) or {}
@@ -82,7 +95,8 @@ def guarded_ces(ctx: "RunContext", fn: "Callable[[], T]", empty: "T") -> "T":
     if not use_ces(ctx.tenant):
         return empty
     try:
-        result = fn()
+        with ces_access(getattr(ctx, "client", None), True):
+            result = fn()
     except HcsError as e:
         if service_missing(e):
             mark(ctx.tenant, "ces", False, f"巡检调用 CES 返回 {e.status or '网络错误'}：{e.message[:120]}")
@@ -92,3 +106,8 @@ def guarded_ces(ctx: "RunContext", fn: "Callable[[], T]", empty: "T") -> "T":
     if available(ctx.tenant, "ces") is not True:
         mark(ctx.tenant, "ces", True, "巡检调用成功")
     return result
+
+
+def guarded_aom(ctx: "RunContext", fn: "Callable[[], T]", empty: "T") -> "T":
+    """旧调用兼容：不执行函数，不请求或读取 AOM 缓存。"""
+    return empty

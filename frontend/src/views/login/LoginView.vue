@@ -7,7 +7,7 @@
         <svg viewBox="0 0 32 32" width="40" height="40"><rect width="32" height="32" rx="9" fill="#1d63f0" />
           <path d="M16 6l8 3v6c0 5-3.4 9.3-8 11-4.6-1.7-8-6-8-11V9z" fill="none" stroke="#fff" stroke-width="2" />
           <path d="M12 16l3 3 5-6" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
-        <div><h1>HCS 云服务巡检平台</h1><p>多租户巡检告警 · 容器事件 · 资源台账 · 运维报表</p></div>
+        <div><h1>HCS 云服务巡检平台</h1></div>
       </div>
 
       <el-form ref="formRef" :model="form" :rules="rules" size="large" class="form" @keyup.enter="submit">
@@ -19,19 +19,17 @@
         </el-form-item>
         <div class="row">
           <el-checkbox v-model="form.remember">7 天内免登录</el-checkbox>
-          <el-tooltip content="请联系平台管理员在「系统管理 → 用户管理」重置" placement="top"><span class="forgot">忘记密码？</span></el-tooltip>
+          <el-tooltip content="请联系管理员重置密码" placement="top"><span class="forgot">忘记密码？</span></el-tooltip>
         </div>
         <el-alert v-if="error" :title="error" type="error" show-icon :closable="false" class="err" />
         <el-button type="primary" class="submit" :loading="loading" @click="submit">登录</el-button>
       </el-form>
 
       <div v-if="demo.length" class="demo">
-        <span class="k">演示账号（点击填入）</span>
+        <span class="k">演示账号</span>
         <span v-for="a in demo" :key="a.username" class="acc" @click="fillDemo(a)"><b>{{ a.username }} / {{ a.password }}</b><em>{{ a.role }}</em></span>
       </div>
-      <div class="foot">运维组内部使用 · 账号由管理员开通</div>
     </div>
-    <footer>© 2026 HCS-Inspector · v{{ APP_VERSION }} · 适配 HCS 8.5.1</footer>
   </div>
 </template>
 
@@ -58,20 +56,21 @@ const route = useRoute()
 const router = useRouter()
 
 async function submit() {
+  if (loading.value) return
   if (!(await formRef.value?.validate().catch(() => false))) return
+  if (loading.value) return
   loading.value = true
   error.value = ''
   try {
     await user.login(form.username.trim(), form.password, form.remember)
     localStorage.setItem(LAST_USER, form.username.trim())
-    router.replace((route.query.redirect as string) || '/dashboard')
+    await router.replace((route.query.redirect as string) || '/dashboard')
   } catch (e) {
     error.value = (e as Error).message
   } finally {
     loading.value = false
   }
 }
-const APP_VERSION = __APP_VERSION__
 </script>
 
 <style scoped lang="scss">
@@ -82,11 +81,11 @@ const APP_VERSION = __APP_VERSION__
   &::after { content: ''; position: absolute; inset: 0; opacity: 0.5;
     background-image: linear-gradient(rgba(29, 99, 240, 0.06) 1px, transparent 1px), linear-gradient(90deg, rgba(29, 99, 240, 0.06) 1px, transparent 1px);
     background-size: 36px 36px; mask-image: radial-gradient(circle at 50% 45%, #000 0%, transparent 70%); } }
-.card { position: relative; width: 400px; padding: 36px 36px 22px; background: #fff; border: 1px solid var(--hi-border); border-radius: 14px;
+.card { position: relative; width: min(400px, calc(100vw - 32px)); padding: 36px 36px 22px; background: #fff; border: 1px solid var(--hi-border); border-radius: 14px;
   box-shadow: 0 16px 48px rgba(16, 24, 40, 0.08); }
 .brand { display: flex; align-items: center; gap: 14px; margin-bottom: 28px;
   h1 { margin: 0; font-size: 20px; font-weight: 700; color: var(--hi-text-1); letter-spacing: 0.5px; }
-  p { margin: 4px 0 0; font-size: 13px; color: var(--hi-text-3); letter-spacing: 1px; } }
+  }
 .form { .row { display: flex; justify-content: space-between; align-items: center; margin: -6px 0 18px; }
   .forgot { font-size: 13px; color: var(--hi-text-3); cursor: help; &:hover { color: var(--el-color-primary); } }
   .err { margin-bottom: 14px; }
@@ -96,6 +95,4 @@ const APP_VERSION = __APP_VERSION__
   .k { flex-basis: 100%; text-align: center; color: var(--hi-text-3); }
   .acc { cursor: pointer; white-space: nowrap; &:hover b { color: var(--el-color-primary); } }
   b { font-family: var(--hi-font-mono); font-weight: 600; } em { font-style: normal; margin-left: 4px; color: var(--hi-text-3); } }
-.foot { margin-top: 16px; text-align: center; font-size: 12px; color: var(--hi-text-3); }
-footer { position: relative; margin-top: 28px; font-size: 12px; color: var(--hi-text-3); }
 </style>

@@ -5,25 +5,29 @@ ECS 状态巡检、容器事件采集、规则评估、告警状态机都执行�
 运行记录、操作审计、报表）由 seed_history.py 补充。
 
 演示租户：
-- 租户A · 核心生产：用户名密码换 Token；有云监控 CES；DataArts / MRS / GaussDB / 2 个 CCE 集群
-- 租户B · 互联网业务：AK/SK 签名；局点没有 CES（自动探测后改用租户 Prometheus）；1 个 CCE 集群
+- 租户A · 核心生产：IAM Token 缓存；本地演示 Prometheus；DataArts / MRS / GaussDB / 2 个 CCE 集群
+- 租户B · 互联网业务：AK/SK 签名；可选租户 Prometheus；1 个 CCE 集群
 
 演示账号（口令仅用于演示环境）：见 DEMO_USERS。lina 只能看租户A，wangfang 只能看租户B，chenjing 已停用。
 """
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
+from functools import partial
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.collectors.base import RunContext
+from app.core.config import get_settings
 from app.core.crypto import encrypt
 from app.core.security import hash_password
 from app.ledger.sync import sync_ledger
+from app.metrics.ecs_readings import EcsReading, EcsReadingsResult, ecs_source
 from app.models import (
     AlarmEvent,
     AlarmEventLog,
-    Contact,
     ContactGroup,
     HcsAccount,
     HcsProject,
@@ -120,9 +124,11 @@ def _tenants(db: Session) -> dict[str, HcsAccount]:
             acc = HcsAccount(code=t["code"], name=t["name"], short_name=t["short_name"], color=t["color"],
                              iam_endpoint=IAM_ENDPOINT, domain_name=t["domain_name"], domain_id=t["domain_id"],
                              auth_type=t["auth_type"], username=t.get("username"), access_key=t.get("access_key"),
-                             secret_cipher=encrypt(secret), endpoints={}, enabled=True,
+                             secret_cipher=encrypt(secret),
+                             endpoints={}, enabled=True,
                              report_mail_to=list(t["report_mail_to"]), metrics_source=t["metrics_source"],
-                             prometheus_url=t["prometheus_url"], capabilities={}, remark=t["remark"], last_check={})
+                             prometheus_url=t["prometheus_url"] or f"{MOCK}/prom/{t['code']}",
+                             capabilities={}, remark=t["remark"], last_check={})
             db.add(acc)
             db.flush()
             db.add(HcsProject(account_id=acc.id, region_id=mt.REGION, project_id=t["project_id"],
@@ -148,10 +154,19 @@ def _users(db: Session, tenants: dict[str, HcsAccount], now) -> dict[str, User]:
 
 def _notify(db: Session, tenants: dict[str, HcsAccount]) -> None:
     ids: dict[str, int] = {}
-    for name, email, phone in CONTACTS:
-        c = Contact(name=name, email=email, phone=phone, enabled=True)
-        db.add(c)
-        db.flush()
+    from app.services.identity import sync_contact
+
+    for i, (name, email, phone) in enumerate(CONTACTS, 1):
+        user = db.scalar(select(User).where(User.email == email))
+        if user is None:
+            user = User(username=f"directory_{i}", display_name=name, email=email, phone=phone,
+                        password_hash="!", login_enabled=False, notify_enabled=True, tenant_ids=None)
+            db.add(user)
+            db.flush()
+        elif not user.phone:
+            user.phone = phone
+        c = sync_contact(db, user)
+        assert c is not None
         ids[name] = c.id
     for code, name, members, leaders in GROUPS:
         db.add(ContactGroup(code=code, name=name, member_ids=[ids[m] for m in members],
@@ -224,7 +239,60 @@ def _probes(db: Session, tenants: dict[str, HcsAccount], now) -> PodProbe:
 def _run(db: Session, http: TestClient, targets: list[Target], code: str, times: int = 1) -> None:
     for _ in range(times):
         for tg in targets:
-            run_task(db, code, client=tg.client(http=http, mock_url=MOCK), target=tg)
+            run_task(db, code, client=tg.client(http=http, mock_url=MOCK), target=tg, trigger="MANUAL")
+
+
+def _demo_ecs_readings(ctx: RunContext, ids: list[str], ip_index: dict[str, str], *, metrics: list[str],
+                       config: dict | None = None, observed_at: datetime) -> EcsReadingsResult:
+    """Explicit past demo observations; never available to production/cloud clients.
+
+    Demo threshold examples require distinct physical observations, not repeated
+    evaluations of the same instant sample. Values come only from the local
+    synthetic dataset. The real metrics collector still owns validation, history,
+    snapshots and selection, and the status pipeline still owns every alarm.
+    """
+    if get_settings().env == "prod" or getattr(ctx.client, "mock_url", None) != MOCK or ctx.account not in mt.BY_CODE:
+        raise ValueError("Synthetic ECS readings require a non-production local demo client")
+    source = ecs_source(ctx.tenant, config, client=ctx.client)
+    readings: dict[str, list[EcsReading]] = {}
+    for usage in mock_oa.ecs_usage(mt.BY_CODE[ctx.account]["ds"]).values():
+        sid = usage["id"]
+        if sid not in ids or source == "NONE":
+            continue
+        if source == "PROMETHEUS" and (not usage["agent"] or ip_index.get(usage["ip"]) != sid):
+            continue
+        for metric in metrics:
+            dimensions = {"instance_id": sid}
+            if metric == "cpu_util":
+                value = usage["cpu"]
+            elif metric == "mem_util":
+                if source == "CES" and not usage["agent"]:
+                    continue
+                value = usage["mem"]
+            elif metric == "disk_util":
+                if source == "CES" and not usage["agent"]:
+                    continue
+                mount, value = min(usage["disks"].items(), key=lambda item: (-item[1], item[0]))
+                dimensions["mountpoint" if source == "PROMETHEUS" else "mount_point"] = mount
+            elif metric == "boot_time" and source == "PROMETHEUS":
+                value = usage["boot"]
+            else:
+                continue
+            readings.setdefault(sid, []).append(EcsReading(metric=metric, value=float(value), observed_at=observed_at,
+                source=source, unit="s" if metric == "boot_time" else "%", dimensions=dimensions, period_sec=60))
+    return EcsReadingsResult(readings, source, {"status": "ready" if readings else "no_data",
+        "demo_synthetic": True, "observed_at": observed_at.isoformat()})
+
+
+def _ecs_rounds(db: Session, http: TestClient, targets: list[Target], now: datetime) -> None:
+    """Three independent past samples, each persisted before its rule evaluation."""
+    for minutes in (3, 2, 1):
+        observe = partial(_demo_ecs_readings, observed_at=now-timedelta(minutes=minutes))
+        # Scope the demo override strictly to collection; restore the actual
+        # adapter before status evaluation and all subsequent runtime tasks.
+        with patch("app.collectors.ecs_metrics.collect_readings", observe):
+            _run(db, http, targets, "ecs_metrics")
+        _run(db, http, targets, "ecs_status")
 
 
 def _backdate_probe(db: Session, probe: PodProbe, minutes: int, now) -> None:
@@ -248,7 +316,7 @@ def _recent_restarts(db: Session, tenant: HcsAccount, workload: str, now) -> Non
     for back, ago in ((2, 8), (1, 5)):
         n = rc - back
         at = now - timedelta(minutes=ago)
-        db.add(PodEvent(tenant_id=tenant.id, cluster_id=st.cluster_id, cluster_name=st.cluster_name,
+        db.add(PodEvent(tenant_id=tenant.id, project_ref=st.project_ref, cluster_id=st.cluster_id, cluster_name=st.cluster_name,
                         namespace=st.namespace, workload_kind=st.workload_kind, workload=st.workload, pod=st.pod,
                         container=c["name"], node=st.node, event_type="RESTART", level="WARNING", reason="Error",
                         message=f"容器 {c['name']} 重启（累计 {n} 次），上次退出：Error，exitCode=137",
@@ -311,13 +379,32 @@ def seed_demo(db: Session) -> bool:
     ensure_tasks(db)
     sync_default_rules(db)
     tenants = _tenants(db)
+    # 演示指标仅来自本地合成 Prometheus 数据，不注册任何 AOM 地址或任务映射。
     users = _users(db, tenants, now)
     _notify(db, tenants)
+    from app.services.identity import sync_contact
+    for user in users.values():
+        sync_contact(db, user)
+    # 演示报表地址同样先登记为不可登录人员；正式运行不按邮箱自动建人。
+    delivery_emails = {"ops-report@example.com"}
+    for tenant in tenants.values():
+        delivery_emails.update(tenant.report_mail_to or [])
+    for i, email in enumerate(sorted(delivery_emails), 1):
+        person = db.scalar(select(User).where(User.email == email))
+        if person is None:
+            person = User(username=f"demo_recipient_{i}", display_name=email.split("@", 1)[0][:64], email=email,
+                          password_hash="!", login_enabled=False, notify_enabled=True, tenant_ids=None)
+            db.add(person)
+            db.flush()
+        sync_contact(db, person)
+    for tenant in tenants.values():
+        tenant.report_user_ids = list(db.scalars(select(User.id).where(User.email.in_(tenant.report_mail_to or []))))
     db.commit()
 
     http = TestClient(mock_app, base_url=MOCK)
-    for acc in tenants.values():                       # 连通性测试 + 能力探测：租户B 探测到“没有 CES”
-        check_tenant(db, acc, http=http, mock_url=MOCK)
+    for acc in tenants.values():                       # 仅本地演示传输，临时声明该合成数据集的 Prometheus。
+        with patch.dict(mt.BY_CODE[acc.code], {"prometheus_url": acc.prometheus_url}):
+            check_tenant(db, acc, http=http, mock_url=MOCK)
     targets = resolve_targets(db, [a.id for a in tenants.values()])
     for tg in targets:
         sync_ledger(db, client=tg.client(http=http, mock_url=MOCK), target=tg)
@@ -327,7 +414,7 @@ def seed_demo(db: Session) -> bool:
     _ecs_timeline(db, tenants, now)
     probe = _probes(db, tenants, now)
 
-    _run(db, http, targets, "ecs_status", 3)
+    _ecs_rounds(db, http, targets, now)
     for code, times in (("dgc_realtime_status", 2), ("dgc_batch_instance", 1), ("mrs_cluster_status", 2),
                         ("mrs_job_status", 1), ("gaussdb_status", 3), ("dcs_status", 3)):
         _run(db, http, targets, code, times)
@@ -341,5 +428,10 @@ def seed_demo(db: Session) -> bool:
 
     hist.seed_history(db, tenants, users, start, utcnow())
     seed_v04(db, tenants, users)
+    for resource in db.scalars(select(Resource).where(Resource.owner.is_not(None))):
+        matches = list(db.scalars(select(User).where(User.display_name == resource.owner)))
+        if len(matches) == 1:
+            resource.owner_user_id = matches[0].id
+    db.commit()
     log.info("demo data seeded: tenants=%s, profiles=%s", list(tenants), list(PROFILES))
     return True

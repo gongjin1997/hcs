@@ -1,10 +1,11 @@
 <template>
-  <el-drawer :model-value="modelValue" size="760px" class="pod-drawer" @update:model-value="(v: boolean) => emit('update:modelValue', v)" @open="load">
+  <el-drawer :model-value="modelValue" size="min(760px, 100vw)" class="pod-drawer" @update:model-value="(v: boolean) => emit('update:modelValue', v)">
     <template #header>
       <div class="d-head">
         <div class="d-title"><el-icon><Box /></el-icon><b class="mono">{{ podName }}</b>
-          <el-tag v-if="st" :type="POD_PHASE[st.phase]?.type ?? 'info'" size="small">{{ POD_PHASE[st.phase]?.label ?? st.phase }}</el-tag>
-          <el-tag v-if="st && !st.ready && !st.deleted" type="danger" size="small" effect="plain">未就绪</el-tag>
+          <el-tag v-if="st" :type="isCurrent ? POD_PHASE[st.phase]?.type ?? 'info' : 'info'" size="small">{{ isCurrent ? '' : '历史 ' }}{{ POD_PHASE[st.phase]?.label ?? st.phase }}</el-tag>
+          <el-tag v-if="st && !st.deleted" :type="isCurrent ? 'success' : 'info'" size="small" effect="plain">{{ snapshotLabel }}</el-tag>
+          <el-tag v-if="isCurrent && st && !st.ready && st.phase !== 'Succeeded'" type="danger" size="small" effect="plain">未就绪</el-tag>
           <el-tag v-if="st?.deleted" type="info" size="small" effect="plain">已删除</el-tag>
         </div>
         <div class="text-3 d-sub">
@@ -22,29 +23,32 @@
           <el-radio-button :value="1">24 小时</el-radio-button><el-radio-button :value="3">3 天</el-radio-button><el-radio-button :value="7">7 天</el-radio-button>
         </el-radio-group>
         <span class="flex-1" />
-        <span class="text-3">窗口内重启 <b class="num" :class="{ warn: (data?.restarts_in_window ?? 0) > 0 }">{{ data?.restarts_in_window ?? 0 }}</b> 次</span>
+        <span class="text-3">窗口内已采集重启 <b class="num" :class="{ warn: (data?.restarts_in_window ?? 0) > 0 }">{{ data?.restarts_in_window ?? '未知' }}</b> 次</span>
       </div>
 
       <template v-if="st">
+        <el-alert v-if="!isCurrent" type="info" :closable="false" show-icon class="mb-16"
+                  :title="`${snapshotLabel}，以下为历史快照；最近观测 ${snapshotAge}`" />
         <el-descriptions :column="3" size="small" border class="mb-16">
           <el-descriptions-item label="节点">{{ st.node || '-' }}</el-descriptions-item>
           <el-descriptions-item label="Pod IP"><span class="mono">{{ st.pod_ip ?? '-' }}</span></el-descriptions-item>
           <el-descriptions-item label="累计重启"><b :class="{ warn: st.restarts > 0 }">{{ st.restarts }}</b> 次</el-descriptions-item>
           <el-descriptions-item label="启动时间">{{ fmtTime(st.started_at, 'YYYY-MM-DD HH:mm') }}</el-descriptions-item>
           <el-descriptions-item label="状态原因">{{ st.status_reason ?? '-' }}</el-descriptions-item>
-          <el-descriptions-item label="最近采集">{{ fromNow(st.last_seen) }}</el-descriptions-item>
+          <el-descriptions-item label="最近观测">{{ snapshotAge }}<div class="text-3">{{ fmtTime(st.freshness?.last_observed_at ?? st.last_seen, 'YYYY-MM-DD HH:mm:ss') }}</div></el-descriptions-item>
           <el-descriptions-item label="标签" :span="3">
             <span v-for="(v, k) in st.labels" :key="k" class="label mono">{{ k }}={{ v }}</span>
           </el-descriptions-item>
         </el-descriptions>
 
-        <div class="sub-title">容器</div>
+        <div class="sub-title">{{ isCurrent ? '容器' : '容器（历史快照）' }}</div>
         <el-table :data="st.containers" size="small" border class="mb-16">
           <el-table-column label="容器" min-width="130"><template #default="{ row }"><b>{{ row.name }}</b><div class="text-3 mono img" :title="row.image">{{ shortImage(row.image) }}</div></template></el-table-column>
           <el-table-column label="状态" width="120">
             <template #default="{ row }">
-              <span class="cstate" :class="row.state"><i />{{ STATE[row.state] ?? row.state }}</span>
+              <span class="cstate" :class="isCurrent ? row.state : 'snapshot'"><i />{{ isCurrent ? '' : '历史 ' }}{{ STATE[row.state] ?? row.state }}</span>
               <div v-if="row.reason" class="text-3">{{ row.reason }}</div>
+              <div v-if="row.state === 'terminated'" class="text-3">exit {{ row.exit_code ?? '-' }} · {{ fmtTime(row.finished_at) }}</div>
             </template>
           </el-table-column>
           <el-table-column label="重启" width="64" align="center"><template #default="{ row }"><b :class="{ warn: row.restart_count > 0 }">{{ row.restart_count }}</b></template></el-table-column>
@@ -60,7 +64,9 @@
       </template>
       <el-alert v-else-if="!loading" type="info" :closable="false" show-icon title="未采集到该 Pod 的当前状态（可能已被删除或不在采集范围内），以下为历史事件" class="mb-16" />
 
-      <div class="sub-title">事件时间线 <span class="text-3">（{{ data?.events.length ?? 0 }} 条，同类事件按 Pod + 原因合并计数）</span></div>
+      <el-alert v-if="data?.truncated" type="warning" :closable="false" show-icon class="mb-16"
+                :title="`共 ${data.total} 条，仅展示最近 500 条；重启次数按完整窗口统计`" />
+      <div class="sub-title">事件时间线 <span class="text-3">（{{ data?.events.length ?? 0 }} 条；K8s Event 按 UID 去重，次数为累计上报）</span></div>
       <el-timeline v-if="data?.events.length" class="tl">
         <el-timeline-item v-for="e in data.events" :key="e.id" :timestamp="fmtTime(e.first_time)" placement="top" :color="e.color" :hollow="!e.ongoing">
           <div class="ev">
@@ -68,7 +74,7 @@
               <span class="ev-type" :style="{ '--c': e.color }">{{ e.type_name }}</span>
               <span class="mono text-3">{{ e.reason }}</span>
               <span v-if="e.count > 1" class="cnt">×{{ e.count }}</span>
-              <el-tag v-if="e.ongoing" type="danger" size="small" effect="light" round>进行中</el-tag>
+              <PodSignalBadge :event="e" />
               <span class="flex-1" />
               <span class="text-3">{{ POD_SOURCE[e.source] ?? e.source }}</span>
             </div>
@@ -89,32 +95,44 @@
 
 <script setup lang="ts">
 import { Box } from '@element-plus/icons-vue'
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { podTimeline } from '@/api'
 import TenantTag from '@/components/TenantTag.vue'
+import { useLatestRequest } from '@/composables/useLatestRequest'
 import type { PodTimeline } from '@/types'
 import { POD_PHASE, POD_SOURCE } from '@/utils/dict'
-import { fmtTime, fromNow, humanize } from '@/utils/format'
+import { fmtTime, humanize } from '@/utils/format'
+import PodSignalBadge from './PodSignalBadge.vue'
 
 /** podKey = 集群 ID / 命名空间 / Pod 名 */
-const props = defineProps<{ modelValue: boolean; podKey: string; clusterName?: string }>()
+const props = defineProps<{ modelValue: boolean; podKey: string; clusterName?: string; eventId?: number }>()
 const emit = defineEmits<{ (e: 'update:modelValue', v: boolean): void }>()
-const data = ref<PodTimeline | null>(null)
-const loading = ref(false)
+const data = ref<(PodTimeline & { total?: number; truncated?: boolean }) | null>(null)
+const detailRequest = useLatestRequest()
+const loading = detailRequest.loading
 const days = ref(7)
 const st = computed(() => data.value?.state ?? null)
+const isCurrent = computed(() => !st.value?.deleted && st.value?.freshness?.status === 'FRESH')
+const snapshotLabel = computed(() => st.value?.deleted ? '已删除' :
+  st.value?.freshness?.status === 'FRESH' ? '当前' : st.value?.freshness?.status === 'STALE' ? '快照已过期' : '快照状态未知')
+const snapshotAge = computed(() => st.value?.freshness?.age_sec == null ? '时间未知' : `${humanize(st.value.freshness.age_sec)}前`)
 const parts = computed(() => props.podKey.split('/'))
 const podName = computed(() => parts.value[2] ?? props.podKey)
 const nsOf = computed(() => parts.value[1] ?? '')
 const clusterOf = computed(() => props.clusterName ?? parts.value[0] ?? '')
 const STATE: Record<string, string> = { running: '运行中', waiting: '等待中', terminated: '已终止' }
-const shortImage = (img: string) => img.split('/').slice(-2).join('/')
+const shortImage = (img: string | null | undefined) => img?.split('/').slice(-2).join('/') ?? '-'
 
 async function load() {
-  if (!props.podKey) return
-  loading.value = true
-  try { data.value = await podTimeline(props.podKey, days.value) } finally { loading.value = false }
+  const key = props.podKey, range = days.value, eventId = props.eventId
+  if (!props.modelValue || !key) return false
+  return detailRequest.run(() => podTimeline(key, range, eventId), detail => { data.value = detail })
 }
+watch(() => [props.modelValue, props.podKey, props.eventId] as const, ([visible, key]) => {
+  detailRequest.invalidate()
+  data.value = null
+  if (visible && key) void load().catch(() => undefined)
+}, { immediate: true })
 </script>
 
 <style scoped lang="scss">
@@ -122,7 +140,7 @@ async function load() {
   .d-title { display: flex; align-items: center; gap: 8px; font-size: 15px; color: var(--hi-text-1); b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } }
   .d-sub { display: flex; align-items: center; gap: 10px; font-size: 12px; } }
 .d-body { padding: 0 4px; }
-.days { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.days { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 14px; }
 .flex-1 { flex: 1; }
 .mb-16 { margin-bottom: 16px; }
 .sub-title { margin: 0 0 8px; font-weight: 600; font-size: 13px; color: var(--hi-text-2); .text-3 { font-weight: 400; font-size: 12px; } }

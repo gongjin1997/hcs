@@ -5,7 +5,7 @@ from sqlalchemy import select
 
 from app.core.config import Settings
 from app.hcs import build_client
-from app.models import AlarmEvent, Contact, ContactGroup, InspectionRun, Notification, NotifyRoute, Resource
+from app.models import AlarmEvent, Contact, ContactGroup, InspectionRun, Notification, NotifyRoute, Resource, User
 from app.notify.dispatcher import dispatch_pending
 from app.rules.loader import sync_default_rules
 from app.services.pipeline import run_task
@@ -18,12 +18,18 @@ SETTINGS = Settings(hcs_scheme="http", hcs_iam_url="http://mock", hcs_password="
 
 
 def _client():
-    return build_client(SETTINGS, http=TestClient(mock_app, base_url="http://mock"))
+    client = build_client(SETTINGS, http=TestClient(mock_app, base_url="http://mock"))
+    client.mock_url = "http://mock"  # 明确该合成传输的 MRS elapsed_time 契约为毫秒。
+    return client
 
 
 def _setup(db):
     sync_default_rules(db)
-    db.add(Contact(id=1, name="张伟", email="zhangwei@example.com"))
+    person = User(username="pipeline-recipient", display_name="张伟", email="zhangwei@example.com",
+                  password_hash="!", login_enabled=False, notify_enabled=True)
+    db.add(person)
+    db.flush()
+    db.add(Contact(id=1, user_id=person.id, name="张伟", email="zhangwei@example.com"))
     db.add(ContactGroup(code="ops", name="值班组", member_ids=[1], leader_ids=[]))
     db.add(NotifyRoute(name="兜底路由", priority=999, match={}, group_code="ops"))
     db.commit()
@@ -48,7 +54,7 @@ def test_dcs_pipeline_fire_and_notify(mem_db, monkeypatch):
     sent: list[EmailMessage] = []
     assert dispatch_pending(mem_db, sender=sent.append) == 3
     subjects = {m["Subject"] for m in sent}
-    assert "【P2-重要】【PROD】【DCS】redis-prod-01 内存使用率 92.3%（≥90%）" in subjects
+    assert "【P2-重要】【DCS】redis-prod-01 内存使用率 92.3%（≥90%）" in subjects
     p1 = next(m for m in sent if "redis-mq-01" in m["Subject"])
     assert p1["X-Priority"] == "1" and p1["Message-ID"].startswith("<alarm-")
     assert all(n.status == "SENT" for n in mem_db.scalars(select(Notification)))

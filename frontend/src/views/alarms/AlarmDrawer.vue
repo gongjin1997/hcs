@@ -1,5 +1,5 @@
 <template>
-  <el-drawer :model-value="modelValue !== null" size="780px" :with-header="false" class="alarm-drawer" @close="close">
+  <el-drawer :model-value="modelValue !== null" size="min(780px, 100vw)" :with-header="false" class="alarm-drawer" @close="close">
     <div v-loading="loading" class="wrap">
       <template v-if="a">
         <!-- 头部：级别色带 + 标题 + 主操作 -->
@@ -14,6 +14,8 @@
           <h3>{{ a.title }}</h3>
           <div class="meta">
             <span>资源 <b>{{ a.resource_name }}</b><template v-if="a.sub_object"> / {{ a.sub_object }}</template></span>
+            <router-link v-if="monitoringLink" :to="monitoringLink">查看监控</router-link>
+            <span v-if="monitoringLink" class="text-3">当前查询，非告警时刻快照</span>
             <span>{{ SERVICES[a.service] }} · {{ RESOURCE_TYPES[a.resource_type] }}</span>
             <span>持续 <b>{{ durationOf(a.first_seen, a.resolved_at) }}</b></span>
             <span>累计触发 <b class="num">{{ a.count }}</b> 次</span>
@@ -91,13 +93,18 @@
             <el-empty v-else description="该规则暂未配置处置手册，可在“规则管理”中补充" :image-size="80" />
           </el-tab-pane>
           <el-tab-pane :label="`通知记录（${a.notifications.length}）`" name="notify">
+            <p class="text-3 tip">已发送表示邮件服务器已受理，不代表收件人已收到。失败与跳过原因见记录；每次重试见处理时间线。</p>
             <el-table :data="a.notifications" size="small">
               <el-table-column label="类型" width="90"><template #default="{ row }">{{ NOTIFY_KIND[row.kind] ?? row.kind }}</template></el-table-column>
               <el-table-column label="主题" min-width="260" show-overflow-tooltip prop="subject" />
               <el-table-column label="收件人" min-width="160" show-overflow-tooltip><template #default="{ row }">{{ row.recipients.join('，') }}</template></el-table-column>
-              <el-table-column label="状态" width="90"><template #default="{ row }">
-                <el-tag :type="NOTIFY_STATUS[row.status]?.type ?? 'info'" size="small">{{ NOTIFY_STATUS[row.status]?.label ?? row.status }}</el-tag></template></el-table-column>
-              <el-table-column label="发送时间" width="140"><template #default="{ row }">{{ fmtTime(row.sent_at) }}</template></el-table-column>
+              <el-table-column label="投递结果" min-width="200"><template #default="{ row }">
+                <el-tag :type="NOTIFY_STATUS[row.status]?.type ?? 'info'" size="small">{{ NOTIFY_STATUS[row.status]?.label ?? row.status }}</el-tag>
+                <div v-if="row.error" class="notification-error">{{ row.error }}</div>
+                <div v-if="row.retry" class="text-3">失败 {{ row.retry }} 次</div>
+                <div v-if="row.next_retry_at" class="text-3">下次重试 {{ fmtTime(row.next_retry_at) }}</div>
+              </template></el-table-column>
+              <el-table-column label="提交服务器" width="140"><template #default="{ row }">{{ fmtTime(row.sent_at) }}</template></el-table-column>
             </el-table>
           </el-tab-pane>
         </el-tabs>
@@ -124,7 +131,7 @@
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-link type="primary" class="adv" :underline="false" @click="openAdvanced">更多设置（级别、每周重复…）</el-link>
+        <el-link type="primary" class="adv" underline="never" @click="openAdvanced">更多设置（级别、每周重复…）</el-link>
         <el-button @click="quick.visible = false">取消</el-button>
         <el-button type="primary" :loading="quick.saving" @click="doQuick">静默 {{ DURATIONS.find((d) => d.v === quick.minutes)?.label }}</el-button>
       </template>
@@ -160,10 +167,13 @@ import { ackAlarm, closeAlarm, getAlarm, previewMail, quickSilence } from '@/api
 import SeverityTag from '@/components/SeverityTag.vue'
 import StatusTag from '@/components/StatusTag.vue'
 import TenantTag from '@/components/TenantTag.vue'
+import { useLatestRequest } from '@/composables/useLatestRequest'
 import { useUserStore } from '@/stores/user'
+import { resourceMonitoringLocation } from '@/config/resource-navigation'
 import type { AlarmDetail, Silence, SilenceIn } from '@/types'
 import { ALARM_STATUS, LOG_ACTION, NOTIFY_KIND, NOTIFY_STATUS, RESOURCE_TYPES, SERVICES, SEVERITY, SILENCE_KIND, SILENCE_STATUS } from '@/utils/dict'
 import { durationOf, fmtTime } from '@/utils/format'
+import { copyText } from '@/utils/clipboard'
 import SilenceDialog from '@/views/silences/SilenceDialog.vue'
 
 const props = defineProps<{ modelValue: number | null }>()
@@ -173,10 +183,15 @@ const router = useRouter()
 const canAck = computed(() => useUserStore().can('alarm:handle'))
 const canSilence = computed(() => useUserStore().can('silence:manage'))
 const a = ref<AlarmDetail>()
-const loading = ref(false)
+const monitoringLink = computed(() => resourceMonitoringLocation(a.value && {
+  id: a.value.resource_ref, tenant_id: a.value.tenant_id, resource_type: a.value.resource_type,
+}, useUserStore()))
+const detailRequest = useLatestRequest()
+const loading = detailRequest.loading
 const acting = ref<'' | 'ack' | 'close'>('')
 const tab = ref('timeline')
 const preview = reactive({ visible: false, kind: 'FIRING', data: null as Awaited<ReturnType<typeof previewMail>> | null })
+const previewRequest = useLatestRequest()
 
 const active = computed(() => !!a.value && ['FIRING', 'ACKED', 'SUPPRESSED'].includes(a.value.status))
 const logs = computed(() => [...(a.value?.logs ?? [])].reverse()) // 最新在上
@@ -185,37 +200,51 @@ const facts = computed(() => Object.entries((a.value?.detail.facts ?? {}) as Rec
 const statusLabel = (s: string | null) => (s ? ALARM_STATUS[s]?.label ?? s : '-')
 
 async function load(id: number) {
-  loading.value = true
-  try { a.value = await getAlarm(id) } finally { loading.value = false }
+  return detailRequest.run(() => getAlarm(id), detail => { a.value = detail })
 }
-watch(() => props.modelValue, (id) => { if (id !== null) { tab.value = 'timeline'; load(id) } }, { immediate: true })
+watch(() => props.modelValue, id => {
+  detailRequest.invalidate()
+  a.value = undefined
+  preview.visible = false
+  previewRequest.invalidate()
+  preview.data = null
+  if (id !== null) { tab.value = 'timeline'; void load(id).catch(() => undefined) }
+}, { immediate: true })
 
 const close = () => emit('update:modelValue', null)
 
 async function doAck() {
+  const id = a.value?.id
+  if (!id || acting.value) return
   acting.value = 'ack'
   try {
-    await ackAlarm(a.value!.id)
-    ElMessage.success('认领成功，已停止重复通知；升级计时暂停')
-    await load(a.value!.id)
+    await ackAlarm(id)
+    ElMessage.success('已认领，不再重复通知和升级')
+    if (props.modelValue === id) await load(id)
     emit('changed')
   } finally { acting.value = '' }
 }
 async function doClose() {
+  const id = a.value?.id
+  if (!id || acting.value || !canAck.value) return
+  acting.value = 'close'
+  try {
   const { value } = await ElMessageBox.prompt('关闭后告警不再参与去重与升级；若问题未解决，下次巡检会产生新告警。', '关闭告警', {
     inputPlaceholder: '关闭原因（必填），例如：误报 / 资源已下线', inputValidator: (v) => !!v?.trim() || '请填写关闭原因',
     confirmButtonText: '确认关闭', cancelButtonText: '取消', type: 'warning',
   })
-  acting.value = 'close'
-  try {
-    await closeAlarm(a.value!.id, value)
+    if (props.modelValue !== id) return
+    await closeAlarm(id, value)
     ElMessage.success('告警已关闭')
-    await load(a.value!.id)
+    if (props.modelValue === id) await load(id)
     emit('changed')
-  } finally { acting.value = '' }
+  } catch { /* 取消不执行，接口错误由请求层显示。 */ }
+  finally { acting.value = '' }
 }
 async function loadPreview() {
-  preview.data = await previewMail(a.value!.id, preview.kind)
+  const id = a.value?.id, kind = preview.kind
+  if (!id || !preview.visible) return false
+  return previewRequest.run(() => previewMail(id, kind), value => { preview.data = value })
 }
 async function openPreview() {
   preview.kind = a.value?.status === 'RESOLVED' ? 'RESOLVED' : 'FIRING'
@@ -230,21 +259,26 @@ const DURATIONS = [
 const quick = reactive({ visible: false, target: 'alarm' as 'alarm' | 'resource' | 'rule', minutes: 120, reason: '', saving: false })
 const quickUntil = computed(() => dayjs().add(quick.minutes, 'minute').format('MM-DD HH:mm'))
 function openQuick() {
+  if (!canSilence.value || quick.saving || !a.value) return
   Object.assign(quick, { visible: true, target: 'alarm', minutes: 120, reason: '' })
 }
 async function doQuick() {
+  const id = a.value?.id
+  if (!id || quick.saving || !canSilence.value) return
   quick.saving = true
   try {
-    const res = await quickSilence(a.value!.id, { minutes: quick.minutes, target: quick.target, reason: quick.reason.trim() })
+    const res = await quickSilence(id, { minutes: quick.minutes, target: quick.target, reason: quick.reason.trim() })
     ElMessage.success(`已静默至 ${fmtTime(res.silence.ends_at, 'MM-DD HH:mm')}${res.suppressed > 1 ? `，共抑制 ${res.suppressed} 条告警` : ''}`)
     quick.visible = false
-    await load(a.value!.id)
+    if (props.modelValue === id) await load(id)
     emit('changed')
   } finally { quick.saving = false }
 }
-const advanced = reactive({ visible: false, preset: null as Partial<SilenceIn> | null })
+const advanced = reactive({ visible: false, alarmId: null as number | null, preset: null as Partial<SilenceIn> | null })
 function openAdvanced() {
-  const x = a.value!
+  const x = a.value
+  if (!x || !canSilence.value || quick.saving) return
+  advanced.alarmId = x.id
   const tenant = x.tenant_id ? { tenant_ids: [x.tenant_id] } : {}
   const matchers = quick.target === 'resource' && x.resource_ref ? { ...tenant, resource_refs: [x.resource_ref] }
     : quick.target === 'rule' ? { ...tenant, rule_ids: [x.rule_id] } : { ...tenant, fingerprints: [x.fingerprint] }
@@ -252,8 +286,9 @@ function openAdvanced() {
   quick.visible = false
   advanced.visible = true
 }
+watch(() => props.modelValue, () => { quick.visible = false; advanced.visible = false }, { flush: 'sync' })
 async function onAdvancedSaved(_: Silence) {
-  await load(a.value!.id)
+  if (advanced.alarmId != null && props.modelValue === advanced.alarmId) await load(advanced.alarmId)
   emit('changed')
 }
 function goSilence(id: number) {
@@ -264,7 +299,7 @@ function goSilence(id: number) {
 async function copyLink() {
   const url = `${location.origin}/alarms?id=${a.value!.id}`
   try {
-    await navigator.clipboard.writeText(url)
+    if (!await copyText(url)) throw new Error('copy unavailable')
     ElMessage.success('告警链接已复制')
   } catch {
     ElMessage.info(url)
@@ -300,6 +335,7 @@ async function copyLink() {
   .flow { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--hi-text-2); padding: 0 8px; border-radius: 10px; background: var(--hi-bg-soft); } }
 .note { margin-top: 6px; padding: 8px 12px; font-size: 13px; color: var(--hi-text-2); background: var(--hi-bg-soft); border-radius: 6px; }
 .tip { margin: 0 0 10px; }
+.notification-error { margin-top: 6px; color: var(--hi-text-2); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
 .runbook { white-space: pre-wrap; line-height: 1.8; padding: 14px 16px; border-left: 3px solid var(--el-color-primary); background: var(--el-color-primary-light-9); border-radius: 0 6px 6px 0; }
 .mail-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .mail-meta { padding: 10px 14px; margin-bottom: 12px; border-radius: 6px; background: var(--hi-bg-soft); font-size: 13px; display: grid; gap: 6px;

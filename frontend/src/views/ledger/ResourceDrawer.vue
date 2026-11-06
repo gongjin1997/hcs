@@ -1,5 +1,5 @@
 <template>
-  <el-drawer :model-value="modelValue" size="780px" destroy-on-close class="res-drawer" @update:model-value="$emit('update:modelValue', $event)">
+  <el-drawer :model-value="modelValue" size="min(780px, 100vw)" destroy-on-close class="res-drawer" @update:model-value="$emit('update:modelValue', $event)">
     <template #header>
       <div v-if="r" class="d-head">
         <div class="t1">
@@ -26,25 +26,32 @@
             <div class="section-title">管理信息<span class="sub">由运维维护；修改记入变更记录（来源：人工维护）</span></div>
             <el-form class="mgmt" label-width="84px" :disabled="r.lifecycle === 'DELETED' || !canEdit">
               <el-row :gutter="16">
-                <el-col :span="12"><el-form-item label="负责人">
-                  <el-select v-model="edit.owner" filterable :allow-create="!enforce" clearable default-first-option :placeholder="enforce ? '从台账字典选择' : '未分配'">
-                    <el-option v-for="o in options.owner" :key="o" :label="o" :value="o" />
-                  </el-select></el-form-item></el-col>
-                <el-col :span="12"><el-form-item label="业务系统">
+                <el-col :xs="24" :sm="12"><el-form-item label="负责人">
+                  <el-select v-model="edit.owner_user_id" filterable clearable :value-on-clear="null" :disabled="ownerOptionsFailed || loading"
+                             :placeholder="historicalOwner && !ownerCleared ? historicalOwner : '选择用户管理中已启用的人员'">
+                    <el-option v-if="historicalOwner && r.owner_user_id != null" :key="r.owner_user_id" :label="historicalOwner" :value="r.owner_user_id" disabled />
+                    <el-option v-for="o in ownerOptions" :key="o.id" :label="`${o.display_name}（${o.username}）`" :value="o.id" />
+                  </el-select>
+                  <div v-if="historicalOwner && !ownerCleared" class="text-3 owner-tip">当前负责人：{{ historicalOwner }}；未重新选择时保留历史值。
+                    <el-button v-if="r.owner_user_id == null" link type="primary" @click="clearHistoricalOwner">清空历史负责人</el-button>
+                  </div>
+                  <div v-if="ownerOptionsFailed" class="text-danger owner-tip">人员选项加载失败，请重新打开详情后重试；其他管理字段仍可保存。</div>
+                  </el-form-item></el-col>
+                <el-col :xs="24" :sm="12"><el-form-item label="业务系统">
                   <el-select v-model="edit.business" filterable :allow-create="!enforce" clearable default-first-option :placeholder="enforce ? '从台账字典选择' : '未填写'">
                     <el-option v-for="o in options.business" :key="o" :label="o" :value="o" />
                   </el-select></el-form-item></el-col>
-                <el-col :span="12"><el-form-item label="环境">
+                <el-col :xs="24" :sm="12"><el-form-item label="环境">
                   <el-radio-group v-model="edit.env_type">
                     <el-radio-button v-for="(v, k) in ENV_TYPE" :key="k" :value="k">{{ v.label }}</el-radio-button>
                   </el-radio-group></el-form-item></el-col>
-                <el-col :span="12"><el-form-item label="核心资源">
+                <el-col :xs="24" :sm="12"><el-form-item label="核心资源">
                   <el-switch v-model="edit.critical" /><span class="text-3 hint">健康分权重 ×3，报表重点关注</span></el-form-item></el-col>
                 <el-col v-if="inspected" :span="12"><el-form-item label="纳入巡检">
                   <el-switch v-model="edit.monitored" /><span class="text-3 hint">关闭后不产生新告警</span></el-form-item></el-col>
                 <el-col v-if="hasExpectedRunning" :span="12"><el-form-item :label="isEcs ? '期望开机' : '期望运行'">
                   <el-switch v-model="edit.running" /><span class="text-3 hint">{{ isEcs ? (edit.running ? '关机即告警（R-ECS-002）' : '允许关机：关机不告警') : '期望停止时不告警' }}</span></el-form-item></el-col>
-                <el-col :span="24"><el-form-item label="备注">
+                <el-col :xs="24" :sm="24"><el-form-item label="备注">
                   <el-input v-model="edit.remark" type="textarea" :rows="2" maxlength="200" show-word-limit placeholder="用途、到期时间、待办事项等" /></el-form-item></el-col>
               </el-row>
               <div v-if="canEdit" class="mgmt-foot">
@@ -53,9 +60,10 @@
               </div>
             </el-form>
 
-            <div class="section-title">基本信息<span class="sub">每小时从 HCS 同步，不可手工修改</span></div>
+            <div class="section-title">基本信息<span class="sub">{{ isEcs ? '按租户 ECS 策略从 HCS 同步，不可手工修改' : '每小时从 HCS 同步，不可手工修改' }}</span></div>
             <div class="kv-grid">
               <div class="k">资源类型</div><div>{{ typeName(r.resource_type) }}</div>
+              <div class="k">分类</div><div>{{ r.classification || '其他' }}<span class="text-3"> · {{ r.classification_source ? '映射规则' : '默认分类' }}</span></div>
               <div class="k">所属服务</div><div>{{ SERVICES[r.service] ?? r.service }}</div>
               <div class="k">区域 / AZ</div><div>{{ r.region ?? '-' }} / {{ r.az ?? '-' }}</div>
               <div class="k">IP 地址</div><div class="mono">{{ r.ip ?? '-' }}</div>
@@ -76,8 +84,12 @@
               <template v-if="Object.keys(plainAttrs).length % 2"><div class="k" /><div /></template>
             </div>
 
+            <div v-if="monitoringLink" class="section-title">
+              <router-link :to="monitoringLink">查看监控</router-link>
+            </div>
+
             <template v-if="Object.keys(r.metrics).length">
-              <div class="section-title">最新指标<span class="sub">来自最近一次巡检</span></div>
+              <div class="section-title">{{ isEcs ? '台账指标快照' : '最新指标' }}<span class="sub">{{ isEcs ? '最新值及采样时间请查看指标趋势' : '来自最近一次巡检' }}</span></div>
               <div class="metrics">
                 <div v-for="(v, k) in r.metrics" :key="k" class="metric" :title="String(k)"><span>{{ METRIC_LABEL[k] ?? k }}</span>
                   <b class="num" :style="usageStyle(String(k), v)">{{ v ?? '-' }}</b></div>
@@ -130,6 +142,9 @@
             </el-timeline>
             <el-empty v-else description="纳入台账以来无变更" :image-size="60" />
           </el-tab-pane>
+          <el-tab-pane label="指标与使用指南" name="guide" lazy>
+            <ResourceGuidePanel :resource-type="r.resource_type" />
+          </el-tab-pane>
         </el-tabs>
       </template>
     </div>
@@ -140,25 +155,34 @@
 import { CopyDocument, Right } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { computed, reactive, ref, watch } from 'vue'
-import { getResource, patchResource } from '@/api'
+import { getResource, listUserOptions, patchResource } from '@/api'
 import HealthBadge from '@/components/HealthBadge.vue'
 import SeverityTag from '@/components/SeverityTag.vue'
 import StatusTag from '@/components/StatusTag.vue'
 import TenantTag from '@/components/TenantTag.vue'
+import { useLatestRequest } from '@/composables/useLatestRequest'
 import { useUserStore } from '@/stores/user'
-import type { Alarm, ResourceDetail, ResourcePatch } from '@/types'
+import { resourceMonitoringLocation } from '@/config/resource-navigation'
+import type { Alarm, ResourceDetail, ResourcePatch, UserOption } from '@/types'
 import { CHANGE_SOURCE, CHANGE_TYPE, ENV_TYPE, SERVICES, rawStatusType, statusText, typeName, usageColor } from '@/utils/dict'
 import { durationOf, fmtTime, fromNow } from '@/utils/format'
 import { ATTR_LABEL, METRIC_LABEL, fmtValue } from './columns'
+import { copyText } from '@/utils/clipboard'
+import ResourceGuidePanel from './ResourceGuidePanel.vue'
 
-const props = defineProps<{ modelValue: boolean; resourceId: number | null; inspectedTypes: string[]; options: { owner: string[]; business: string[] }; enforce?: boolean }>()
+const props = defineProps<{ modelValue: boolean; resourceId: number | null; inspectedTypes: string[]; options: { business: string[] }; enforce?: boolean }>()
 const emit = defineEmits<{ 'update:modelValue': [boolean]; saved: [] }>()
 
 const data = ref<ResourceDetail | null>(null)
-const loading = ref(false)
+const ownerOptions = ref<UserOption[]>([])
+const ownerOptionsFailed = ref(false)
+const ownerCleared = ref(false)
+const detailRequest = useLatestRequest()
+const loading = detailRequest.loading
 const saving = ref(false)
 const tab = ref('info')
 const r = computed(() => data.value?.resource)
+const monitoringLink = computed(() => resourceMonitoringLocation(r.value, useUserStore()))
 const inspected = computed(() => !!r.value && props.inspectedTypes.includes(r.value.resource_type))
 const isEcs = computed(() => r.value?.resource_type === 'ecs_server')
 const hasExpectedRunning = computed(() => ['dgc_realtime_job', 'dcs_instance', 'ecs_server'].includes(r.value?.resource_type ?? ''))
@@ -177,47 +201,77 @@ function statusVal(field: string, v: unknown) {
 const plainAttrs = computed(() => Object.fromEntries(Object.entries(r.value?.attrs ?? {}).filter(([, v]) => typeof v !== 'object' || Array.isArray(v))))
 const nodes = computed(() => (r.value?.attrs.nodes ?? []) as { name: string; status: string; role?: string }[])
 
-const edit = reactive({ owner: '', business: '', env_type: '', remark: '', critical: false, monitored: true, running: true })
+const historicalOwner = computed(() => {
+  const x = r.value
+  if (!x || (x.owner_user_id != null && ownerOptions.value.some(o => o.id === x.owner_user_id))) return ''
+  if (x.owner_user_id != null) return `${x.owner || `#${x.owner_user_id}`}（当前不可选）`
+  return x.owner ? `${x.owner}（历史未关联）` : ''
+})
+const edit = reactive({ owner_user_id: null as number | null, business: '', env_type: '', remark: '', critical: false, monitored: true, running: true })
 const origin = ref('')
-const snapshot = () => JSON.stringify(edit)
+const snapshot = () => JSON.stringify({ ...edit, ownerCleared: ownerCleared.value })
 const dirty = computed(() => snapshot() !== origin.value)
 function fill() {
   const x = r.value
   if (!x) return
-  Object.assign(edit, { owner: x.owner ?? '', business: x.business ?? '', env_type: x.env_type ?? '', remark: x.remark ?? '',
+  ownerCleared.value = false
+  Object.assign(edit, { owner_user_id: x.owner_user_id ?? null, business: x.business ?? '', env_type: x.env_type ?? '', remark: x.remark ?? '',
     critical: x.critical, monitored: x.monitored, running: x.expected_state.running !== false })
   origin.value = snapshot()
 }
+function clearHistoricalOwner() { if (canEdit.value) { edit.owner_user_id = null; ownerCleared.value = true } }
 
 async function load(id: number) {
-  loading.value = true
-  try {
-    data.value = await getResource(id)
+  return detailRequest.run(async () => {
+    const detail = await getResource(id)
+    let owners: UserOption[] = []
+    let failed = false
+    if (canEdit.value && props.modelValue && props.resourceId === id) {
+      try { owners = await listUserOptions(detail.resource.tenant_id) }
+      catch { failed = true }
+    }
+    return { detail, owners, failed }
+  }, ({ detail, owners, failed }) => {
+    data.value = detail
+    ownerOptions.value = owners.filter(o => o.enabled)
+    ownerOptionsFailed.value = failed
     fill()
-  } finally { loading.value = false }
+  })
 }
-watch(() => [props.modelValue, props.resourceId] as const, ([v, id]) => {
-  if (v && id) { tab.value = 'info'; load(id) }
+watch(() => [props.modelValue, props.resourceId] as const, ([visible, id]) => {
+  detailRequest.invalidate()
+  data.value = null
+  ownerOptions.value = []
+  ownerOptionsFailed.value = false
+  if (visible && id) { tab.value = 'info'; void load(id).catch(() => undefined) }
 }, { immediate: true })
 
 async function save() {
-  const x = r.value!
+  if (saving.value || loading.value || !canEdit.value || !r.value || !props.modelValue) return
+  const x = r.value
   const body: ResourcePatch = {
-    owner: edit.owner || null, business: edit.business || null, env_type: edit.env_type || null, remark: edit.remark || null,
+    business: edit.business || null, env_type: edit.env_type || null, remark: edit.remark || null,
     critical: edit.critical, monitored: edit.monitored,
+  }
+  // 不重发历史负责人：未关联 / 已停用 / 范围变化的旧值不能因编辑备注被清空。
+  if (ownerCleared.value || edit.owner_user_id !== (x.owner_user_id ?? null)) {
+    if (edit.owner_user_id != null && !ownerOptions.value.some(o => o.id === edit.owner_user_id)) {
+      return ElMessage.warning('请从当前租户已启用的人员中选择负责人')
+    }
+    body.owner_user_id = edit.owner_user_id
   }
   if (hasExpectedRunning.value) body.expected_state = { ...x.expected_state, running: edit.running }
   saving.value = true
   try {
     await patchResource(x.id, body)
     ElMessage.success('已保存')
-    await load(x.id)
+    if (props.modelValue && props.resourceId === x.id) await load(x.id)
     emit('saved')
   } finally { saving.value = false }
 }
 async function copy(text: string) {
-  await navigator.clipboard?.writeText(text).catch(() => undefined)
-  ElMessage.success('已复制资源 ID')
+  if (await copyText(text)) ElMessage.success('已复制资源 ID')
+  else ElMessage.warning('复制失败，请手动选择资源 ID')
 }
 </script>
 
@@ -229,6 +283,7 @@ async function copy(text: string) {
 .d-body { min-height: 300px; :deep(.el-tabs__header) { margin-bottom: 4px; } }
 .mgmt { padding: 16px 16px 4px; border: 1px solid var(--hi-border); border-radius: var(--hi-radius); background: var(--hi-bg-soft);
   .el-select { width: 100%; } .hint { margin-left: 8px; }
+  .owner-tip { width: 100%; font-size: 12px; line-height: 1.6; margin-top: 4px; }
   .mgmt-foot { padding: 0 0 12px 84px; } }
 .metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
   .metric { display: flex; justify-content: space-between; padding: 8px 12px; border: 1px solid var(--hi-border-light); border-radius: 6px; span { color: var(--hi-text-3); } } }

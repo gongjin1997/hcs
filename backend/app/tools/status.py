@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from app import __version__
 from app.core.config import get_settings
 from app.core.db import SessionLocal
-from app.models import AlarmEvent, HcsAccount, InspectionRun, InspectionTask, Notification, WorkerHeartbeat
+from app.models import AlarmEvent, HcsAccount, InspectionTask, Notification, WorkerHeartbeat
 from app.models.base import utcnow
 from app.services import platform_watch, settings_service
 
@@ -80,22 +80,14 @@ def collect(db: Session) -> dict[str, Any]:
                               .where(Notification.status.in_(("PENDING", "RETRYING"))).group_by(Notification.status)).all())
     tenants = {a.id: a.short_name or a.name for a in db.scalars(select(HcsAccount))}
     tasks = []
+    scopes = platform_watch.task_scopes(db)
     for t in db.scalars(select(InspectionTask).order_by(InspectionTask.code)):
-        runs = db.scalars(select(InspectionRun).where(InspectionRun.task_code == t.code, InspectionRun.status != "RUNNING")
-                          .order_by(InspectionRun.started_at.desc()).limit(40)).all()
-        per: dict[int | None, dict[str, Any]] = {}
-        for r in runs:
-            p = per.setdefault(r.tenant_id, {"tenant": tenants.get(r.tenant_id, "-") if r.tenant_id else "全局",
-                                             "last_status": r.status, "age_sec": int((now - r.started_at).total_seconds()),
-                                             "fails": 0, "_counting": True})
-            if p["_counting"] and r.status == "FAILED":
-                p["fails"] += 1
-            elif r.status != "FAILED":
-                p["_counting"] = False
-        rows = [{k: v for k, v in p.items() if not k.startswith("_")} for p in per.values()]
+        selected = [s for s in scopes if s["task_code"] == t.code]
+        rows = [{**{k: v for k, v in p.items() if k != "run"},
+                 "tenant": tenants.get(p["tenant_id"], f"租户#{p['tenant_id']}") if p["tenant_id"] else "平台",
+                 "age_sec": int((now - p["last_at"]).total_seconds())} for p in selected]
         tasks.append({"code": t.code, "name": t.name, "enabled": t.enabled, "tenants": rows,
-                      "status": "FAILED" if any(p["fails"] >= cfg.task_fail_threshold for p in rows)
-                      else ("WARN" if any(p["fails"] for p in rows) else "OK")})
+                      "status": platform_watch.task_health(selected, cfg.task_fail_threshold, enabled=t.enabled)})
     alarms = db.scalars(select(AlarmEvent).where(AlarmEvent.service == platform_watch.PLATFORM,
                                                  AlarmEvent.status.in_(ACTIVE)).order_by(AlarmEvent.first_seen.desc())).all()
     try:
@@ -123,8 +115,10 @@ def problems(st: dict[str, Any]) -> list[str]:
         out.append(f"数据库迁移未到最新（当前 {st['migration']['current']}，最新 {st['migration']['head']}）：make migrate")
     out += [f"{w['label']}心跳超时（{_ago(w['age_sec'])}）" for w in st["workers"] if w["status"] == "LATE"]
     out += [f"{w['label']}从未启动" for w in st["workers"] if w["status"] == "NEVER" and st["env"] == "prod"]
-    out += [f"任务 {t['name']} 连续失败（{'、'.join(p['tenant'] for p in t['tenants'] if p['fails'])}）"
-            for t in st["tasks"] if t["status"] == "FAILED"]
+    for task in st["tasks"]:
+        if task["status"] == "FAILED":
+            scopes = "、".join(p["tenant"] + "/" + p["project_label"] for p in task["tenants"] if p["fails"])
+            out.append(f"任务 {task['name']} 连续未成功（{scopes}）")
     if st["outbox"]["failed_24h"]:
         out.append(f"近 24 小时有 {st['outbox']['failed_24h']} 封通知最终发送失败（通知管理 → 发送记录）")
     return out
@@ -152,13 +146,15 @@ def render(st: dict[str, Any]) -> str:
         parts = []
         for p in t["tenants"]:
             fails = f"，连败 {p['fails']}" if p["fails"] else ""
-            parts.append(f"{p['tenant']}:{p['last_status']}（{_ago(p['age_sec'])}{fails}）")
+            parts.append(f"{p['tenant']}/{p['project_label']}:{p['last_status']}（{_ago(p['age_sec'])}{fails}）")
         per = "  ".join(parts) or "未运行"
         lines.append(f"  {mark.get(t['status'], '?')} {t['name'][:18]:<18} {'' if t['enabled'] else '[已停用] '}{per}")
     lines += ["", f"平台自身告警：{len(st['platform_alarms'])} 条活动"]
     lines += [f"  [{a['severity']}] {a['rule']} {a['resource'] or ''}：{a['title']}" for a in st["platform_alarms"]]
     bad = problems(st)
-    lines += ["", "结论：" + ("正常" if not bad else f"有 {len(bad)} 项异常")] + [f"  - {b}" for b in bad]
+    uncertain = sum(t["status"] in ("WARN", "UNKNOWN") for t in st["tasks"])
+    conclusion = f"有 {len(bad)} 项异常" if bad else f"有 {uncertain} 项任务需关注，未达到连续失败阈值" if uncertain else "正常"
+    lines += ["", "结论：" + conclusion] + [f"  - {b}" for b in bad]
     return "\n".join(lines)
 
 

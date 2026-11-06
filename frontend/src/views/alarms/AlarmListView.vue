@@ -1,9 +1,8 @@
 <template>
   <div class="alarm-page">
-    <PageHeader title="告警中心" desc="同一资源 + 同一检查项自动去重合并为一条告警；恢复后 30 分钟内再次触发将重新打开原告警">
-      <el-button :icon="Download" :loading="exporting" @click="exportCsv">导出 CSV</el-button>
-      <el-button :icon="Refresh" @click="reload">刷新</el-button>
-    </PageHeader>
+    <PageHeader title="告警中心" :refresh="reload" :refreshing="loading" />
+    <el-alert v-if="scope.error.value || routeError" :title="scope.error.value || routeError" type="error" :closable="false" show-icon />
+    <template v-if="!scope.error.value && !routeError">
 
     <!-- 统计条：点击快速筛选 -->
     <div class="chips">
@@ -30,23 +29,24 @@
         <el-button @click="onReset">重置</el-button>
       </div>
 
-      <div class="table-toolbar">
-        <div class="flex gap-12">
+      <div class="table-toolbar table-heading">
+        <div class="table-actions">
           <el-radio-group v-model="query.status_group" @change="search">
             <el-radio-button v-for="g in STATUS_GROUPS" :key="g.value" :value="g.value">{{ g.label }}</el-radio-button>
           </el-radio-group>
           <el-tooltip content="仅“告警中”的告警可勾选认领" placement="top">
-            <el-button v-if="canAck" type="primary" plain :icon="Select" :disabled="!selected.length" @click="onBatchAck">
+            <el-button v-if="canAck" type="primary" plain :icon="Select" :disabled="!selected.length" :loading="batchAcking" @click="onBatchAck">
               批量认领<template v-if="selected.length">（{{ selected.length }}）</template>
             </el-button>
           </el-tooltip>
         </div>
-        <div class="flex gap-12">
+        <div class="table-actions">
           <transition name="fade">
             <span v-if="pending && !autoRefresh" class="pending">有 {{ pending }} 条告警变化 <el-link type="primary" @click="reload">立即刷新</el-link></span>
           </transition>
           <el-switch v-model="autoRefresh" inline-prompt active-text="实时" inactive-text="手动" />
           <span class="text-3">共 {{ total }} 条</span>
+          <el-button :icon="Download" :loading="exporting" @click="exportExcel">导出 Excel</el-button>
         </div>
       </div>
 
@@ -92,7 +92,7 @@
             <el-button v-if="row.status === 'FIRING' && canAck" link type="warning" @click.stop="onAck(row as Alarm)">认领</el-button>
           </template>
         </el-table-column>
-        <template #empty><el-empty description="当前筛选条件下没有告警，一切正常 🎉" :image-size="88" /></template>
+        <template #empty><el-empty description="当前筛选条件下没有告警" :image-size="88" /></template>
       </el-table>
 
       <div class="pager">
@@ -102,15 +102,17 @@
     </div>
 
     <AlarmDrawer v-model="drawerId" @changed="reload" />
+    </template>
   </div>
 </template>
 
 <script setup lang="ts">
-import { Download, Refresh, Search, Select } from '@element-plus/icons-vue'
+import { Download, Search, Select } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onScopeDispose, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { type AlarmQuery, ackAlarm, batchAck, listAlarms } from '@/api'
+import { exportAlarms } from '@/api'
 import PageHeader from '@/components/PageHeader.vue'
 import SeverityTag from '@/components/SeverityTag.vue'
 import StatusTag from '@/components/StatusTag.vue'
@@ -118,9 +120,11 @@ import { useTable } from '@/composables/useTable'
 import TenantTag from '@/components/TenantTag.vue'
 import { useAppStore } from '@/stores/app'
 import { useUserStore } from '@/stores/user'
+import { useResourceRouteScope } from '@/composables/useResourceRouteScope'
+import { positiveIdParam } from '@/config/resource-navigation'
 import type { Alarm } from '@/types'
 import { ALARM_STATUS, RESOURCE_TYPES, SERVICES, SEVERITIES, SEVERITY } from '@/utils/dict'
-import { downloadCsv, durationOf, fmtTime, fromNow } from '@/utils/format'
+import { durationOf, fmtTime, fromNow } from '@/utils/format'
 import AlarmDrawer from './AlarmDrawer.vue'
 
 const STATUS_GROUPS = [
@@ -131,29 +135,47 @@ const STATUS_GROUPS = [
 const route = useRoute()
 const router = useRouter()
 const app = useAppStore()
+const user = useUserStore()
+const scope = useResourceRouteScope({ query: () => route.query, app, viewer: user, permission: 'alarm:view' })
+const routeError = computed(() => (route.query.resource_ref != null && positiveIdParam(route.query.resource_ref) === null)
+  || (route.query.id != null && positiveIdParam(route.query.id) === null) ? '资源或告警链接无效' : '')
 const canAck = computed(() => useUserStore().can('alarm:handle'))
 
 const initial: Required<Pick<AlarmQuery, 'status_group'>> & AlarmQuery = {
   status_group: 'active', severity: [], service: undefined, resource_type: undefined, resource_ref: undefined, keyword: '',
 }
-const { query, page, size, total, rows, loading, load, search, reset } = useTable<Alarm, AlarmQuery>(listAlarms, initial)
+const { query, page, size, total, rows, loading, load, search, reset } = useTable<Alarm, AlarmQuery>(async params => {
+  if (routeError.value) return { items: [], total: 0, page: params.page, page_size: params.page_size }
+  return await scope.request('list', config => listAlarms(params, config)) ?? { items: [], total: 0, page: params.page, page_size: params.page_size }
+}, initial)
 const selected = ref<Alarm[]>([])
 const drawerId = ref<number | null>(null)
 const autoRefresh = ref(true)
 const pending = ref(0)
 const exporting = ref(false)
+const batchAcking = ref(false)
+let disposed = false
+onScopeDispose(() => { disposed = true; clearTimeout(debounce) })
 
 // ---- URL 参数 → 查询条件（支持从总览、铃铛、通知弹窗、资源详情跳转）----
 function applyRouteQuery() {
   const q = route.query
-  if (typeof q.status_group === 'string') query.status_group = q.status_group
-  if (typeof q.severity === 'string') query.severity = q.severity.split(',')
-  if (typeof q.resource_type === 'string') query.resource_type = q.resource_type
-  if (typeof q.resource_ref === 'string') query.resource_ref = Number(q.resource_ref)
-  if (typeof q.id === 'string') drawerId.value = Number(q.id)
+  const resource = positiveIdParam(q.resource_ref), id = positiveIdParam(q.id)
+  query.status_group = typeof q.status_group === 'string' ? q.status_group : 'active'
+  query.severity = typeof q.severity === 'string' ? q.severity.split(',') : []
+  query.resource_type = typeof q.resource_type === 'string' ? q.resource_type : undefined
+  query.resource_ref = resource ?? undefined
+  drawerId.value = scope.error.value || routeError.value ? null : id
 }
 onMounted(() => { applyRouteQuery(); load(); app.refreshStats() })
-watch(() => route.query.id, (id) => { if (typeof id === 'string') drawerId.value = Number(id) })
+watch(() => [route.query.resource_ref, route.query.resource_type, route.query.status_group, route.query.severity, scope.key.value], () => {
+  rows.value = []; total.value = 0; selected.value = []; drawerId.value = null
+  applyRouteQuery(); void search()
+}, { flush: 'sync' })
+watch(() => route.query.id, () => {
+  const id = positiveIdParam(route.query.id)
+  drawerId.value = scope.error.value || routeError.value ? null : id
+})
 watch(drawerId, (id) => {
   const cur = route.query.id
   if (id === null && cur) router.replace({ query: { ...route.query, id: undefined } })
@@ -197,32 +219,29 @@ async function onAck(row: Alarm) {
   reload()
 }
 async function onBatchAck() {
-  const { value } = await ElMessageBox.prompt(`将认领选中的 ${selected.value.length} 条告警，可填写处理备注（选填）`, '批量认领', {
-    inputPlaceholder: '例如：已定位为上游变更导致，处理中', confirmButtonText: '确认认领', cancelButtonText: '取消',
-  })
-  const res = await batchAck(selected.value.map((a) => a.id), value || undefined)
-  ElMessage.success(`已认领 ${res.acked} 条告警`)
-  reload()
-}
-async function exportCsv() {
-  exporting.value = true
+  if (!canAck.value || batchAcking.value || !selected.value.length) return
+  const ids = selected.value.map(alarm => alarm.id)
+  const tenantId = app.tenantId
+  batchAcking.value = true
   try {
-    const all: Alarm[] = []
-    for (let p = 1; p <= 10; p++) { // 最多导出 2000 条；更大量请使用报表中心异步导出
-      const res = await listAlarms({ ...query, page: p, page_size: 200 })
-      all.push(...res.items)
-      if (all.length >= res.total) break
-    }
-    downloadCsv(`告警列表_${fmtTime(new Date().toISOString(), 'YYYYMMDD_HHmm')}.csv`,
-      ['告警ID', '租户', '级别', '状态', '告警标题', '规则', '云服务', '资源类型', '资源', '子对象', '当前值', '阈值', '首次发生', '最近发生', '恢复时间', '触发次数', '负责人', '认领人'],
-      all.map((a) => [a.id, app.tenantOf(a.tenant_id)?.name ?? '', a.severity, ALARM_STATUS[a.status]?.label, a.title, a.rule_id, SERVICES[a.service], RESOURCE_TYPES[a.resource_type],
-        a.resource_name, a.sub_object, a.current_value, a.threshold_text, fmtTime(a.first_seen, 'YYYY-MM-DD HH:mm:ss'),
-        fmtTime(a.last_seen, 'YYYY-MM-DD HH:mm:ss'), fmtTime(a.resolved_at, 'YYYY-MM-DD HH:mm:ss'), a.count, a.owner, a.ack_by]))
-    ElMessage.success(`已导出 ${all.length} 条`)
-  } finally {
-    exporting.value = false
-  }
+    const { value } = await ElMessageBox.prompt(`将认领选中的 ${ids.length} 条告警，可填写处理备注（选填）`, '批量认领', {
+      inputPlaceholder: '处理备注', confirmButtonText: '确认认领', cancelButtonText: '取消',
+    })
+    if (disposed || tenantId !== app.tenantId) return
+    const res = await batchAck(ids, value || undefined)
+    if (disposed) return
+    ElMessage.success(`已认领 ${res.acked} 条告警`)
+    await reload()
+  } catch { /* 取消不提交，接口错误由请求层显示。 */ }
+  finally { batchAcking.value = false }
 }
+async function exportExcel() {
+  if (exporting.value || routeError.value) return
+  exporting.value = true
+  try { if (await scope.request('export', config => exportAlarms({ ...query }, config))) ElMessage.success('Excel 已导出') }
+  finally { exporting.value = false }
+}
+
 </script>
 
 <style scoped lang="scss">

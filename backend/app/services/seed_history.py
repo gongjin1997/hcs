@@ -642,7 +642,8 @@ def _pod_event(ctx: Ctx, tenant: HcsAccount, st: PodState | None, ns: str, workl
         detail = {"k8s_type": "Normal", "involved_kind": kind, "component": "deployment-controller"}
         pod, cname = "", ""
     last = end or at
-    return PodEvent(tenant_id=tenant.id, cluster_id=st.cluster_id if st else "", cluster_name=st.cluster_name if st else "",
+    return PodEvent(tenant_id=tenant.id, project_ref=st.project_ref if st else None,
+                    cluster_id=st.cluster_id if st else "", cluster_name=st.cluster_name if st else "",
                     namespace=ns, workload_kind=kind, workload=workload, pod=pod, container=cname if pod else "",
                     node=st.node if st is not None and pod else None, event_type=etype,
                     level=EVENT_TYPES[etype]["level"], reason=reason, message=msg, source=source, count=count,
@@ -663,6 +664,9 @@ def _pod_history(ctx: Ctx) -> None:
             ns, workload = ref.split("/", 1)
             pods = [s for s in states if s.namespace == ns and s.workload == workload]
             if not pods:
+                # 仅演示模板使用明确app标签匹配；事件仍写入真实直接owner，不再伪造Deployment。
+                pods = [s for s in states if s.namespace == ns and (s.labels or {}).get("app") == workload]
+            if not pods:
                 continue
             for _ in range(n):
                 at = ctx.now - timedelta(days=rng.uniform(0.2, 7.0))
@@ -670,8 +674,8 @@ def _pod_history(ctx: Ctx) -> None:
                     local = at.astimezone(ctx.tz)
                     at = local.replace(hour=rng.choice([10, 11, 14, 15, 16, 20, 21])).astimezone(UTC)
                     at = min(at, ctx.now - timedelta(hours=3))
-                db.add(_pod_event(ctx, tenant, rng.choice(pods), ns, workload, pods[0].workload_kind, etype, at,
-                                  probes, scale))
+                chosen = rng.choice(pods)
+                db.add(_pod_event(ctx, tenant, chosen, ns, chosen.workload, chosen.workload_kind, etype, at, probes, scale))
     db.flush()
 
 

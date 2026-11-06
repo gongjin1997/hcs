@@ -67,15 +67,19 @@ def test_list_filters(client, admin):
 
 
 def test_patch_records_manual_change(client, admin):
+    owner = next(u for u in client.get("/api/v1/system/user-options", headers=admin).json()["data"]
+                 if u["username"] == "oncall")
     rid = client.get("/api/v1/resources", params={"resource_type": "ecs_server", "keyword": "ecs-nginx-01"},
                      headers=admin).json()["data"]["items"][0]["id"]
     r = client.patch(f"/api/v1/resources/{rid}", headers=admin,
                      json={"owner": "张伟", "business": "运维管理", "env_type": "TEST", "remark": "  "})
     assert r.status_code == 200 and r.json()["data"]["owner"] == "张伟" and r.json()["data"]["remark"] is None
+    assert r.json()["data"]["owner_user_id"] == owner["id"]
     detail = client.get(f"/api/v1/resources/{rid}", headers=admin).json()["data"]
     last = detail["changes"][0]
     assert last["source"] == "MANUAL" and last["operator"] == "系统管理员"
-    assert {c["field"] for c in last["changes"]} == {"owner", "business", "env_type"}
+    assert {c["field"] for c in last["changes"]} == {"owner", "owner_user_id", "business", "env_type"}
+    assert next(c["new"] for c in last["changes"] if c["field"] == "owner_user_id") == owner["id"]
     bad = client.patch(f"/api/v1/resources/{rid}", headers=admin, json={"env_type": "UAT"})
     assert bad.status_code == 400
     audit = client.get("/api/v1/system/audit-logs", params={"action": ["ledger.update"], "page_size": 1},

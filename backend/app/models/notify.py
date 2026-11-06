@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, Integer, String, Text
+from sqlalchemy import Boolean, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base, JsonType, UtcDateTime
@@ -11,6 +11,8 @@ from .base import utcnow
 class Contact(Base):
     __tablename__ = "contact"
     id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("sys_user.id", name="fk_contact_user_id_sys_user", ondelete="RESTRICT"), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(64))
     email: Mapped[str] = mapped_column(String(128))
     phone: Mapped[str | None] = mapped_column(String(32))

@@ -1,8 +1,8 @@
 """平台自身告警（服务 = platform）：平台自己出问题时也要有人知道。
 
 | 规则 | 触发 | 恢复 |
-| R-PLAT-001 巡检任务连续失败 | 同一任务、同一租户连续失败 N 次（默认 3，系统设置可改） | 该任务该租户下一次执行成功 |
-| R-PLAT-002 租户认证失败 | 任务报 401 / 403（账号密码错误、AK/SK 失效、权限被回收） | 该租户任一任务执行成功 |
+| R-PLAT-001 巡检任务连续失败 | 同任务/租户/项目 FAILED、TIMEOUT、PARTIAL 累计至 N 次，SKIPPED 不清零 | 同范围真实 SUCCESS |
+| R-PLAT-002 租户认证失败 | 任务报 401 / 403（账号密码错误、AK/SK 失效、权限被回收） | 同任务/租户/项目真实 SUCCESS |
 | R-PLAT-003 通知发送失败 | 通知重试 5 次后仍失败（SMTP 不可用、收件人被拒） | 之后有通知发送成功 |
 | R-PLAT-004 后台进程心跳超时 | 调度 / 通知进程超过 N 分钟没有心跳（默认 3） | 心跳恢复 |
 
@@ -14,10 +14,12 @@ import logging
 import os
 import re
 import socket
+from collections.abc import Sequence
 from datetime import datetime, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.orm import Session
 
 from app import __version__
@@ -37,6 +39,7 @@ from app.models.alarm import ACTIVE_STATUSES
 from app.models.base import utcnow
 
 from . import settings_service
+from .recipients import emails_for_users
 
 log = logging.getLogger(__name__)
 PLATFORM = "platform"
@@ -50,7 +53,7 @@ RULES: dict[str, dict[str, str]] = {
                    "runbook": "1. 系统管理 → 租户接入，对该租户点“连通性测试”查看认证步骤的报错\n"
                               "2. 401：IAM 用户密码已修改 / 账号被锁定，或 AK/SK 已删除；更新凭据后保存\n"
                               "3. 403：账号缺少对应服务的只读权限（例如 MRS ReadOnlyAccess），请联系租户管理员授权\n"
-                              "4. 该租户任一任务执行成功后自动恢复"},
+                              "4. 同任务、同租户、同项目真实执行成功后恢复；历史未知项目不可推断恢复"},
     "R-PLAT-003": {"name": "通知发送失败", "resource_type": "platform_notify", "check_item": "notify_failed",
                    "runbook": "1. 通知管理 → SMTP 与测试邮件，向自己发一封测试邮件，查看报错\n"
                               "2. Connection refused / timeout：检查 SMTP 地址、端口、防火墙；STARTTLS 与端口是否匹配\n"
@@ -64,6 +67,121 @@ RULES: dict[str, dict[str, str]] = {
 }
 AUTH_ERROR = re.compile(r"\[(401|403)\]")
 WORKERS = {"scheduler": "调度进程", "notifier": "通知进程"}
+UNSUCCESSFUL = ("FAILED", "TIMEOUT", "PARTIAL")
+NEUTRAL = ("RUNNING", "SKIPPED")
+
+
+def run_outcome(runs: Sequence, *, skipped: bool = False) -> str:
+    """Shared manual/scheduler conclusion; only every requested execution succeeding is SUCCESS."""
+    statuses = [r.status for r in runs]
+    if not statuses or all(status == "SKIPPED" for status in statuses):
+        return "SKIPPED"
+    if all(status in ("FAILED", "TIMEOUT") for status in statuses):
+        return "FAILED"
+    if all(status == "SUCCESS" for status in statuses) and not skipped:
+        return "SUCCESS"
+    if any(status == "RUNNING" for status in statuses):
+        return "RUNNING"
+    return "PARTIAL"
+
+
+def scope_kind(task_code: str, tenant_id: int | None, project_ref: int | None) -> str:
+    if project_ref is not None:
+        return "PROJECT"
+    return "GLOBAL" if task_code == "data_cleanup" and tenant_id is None else "UNKNOWN"
+
+
+def task_scopes(db: Session, *, tenant_ids: list[int] | None = None, include_global: bool = False,
+                task_code: str | None = None, project_ref: int | None = None,
+                unknown_project: bool = False) -> list[dict[str, Any]]:
+    """One deterministic row per task/tenant/project, without a global history limit.
+
+    SQL windows count unsuccessful completed attempts back to the last real
+    SUCCESS. SKIPPED/RUNNING preserve evidence but neither reset nor increment.
+    Ordering uses completion time, with ID as a stable tie breaker.
+    """
+    model = InspectionRun
+    group = (model.task_code, model.tenant_id, model.project_ref)
+    order = (func.coalesce(model.finished_at, model.started_at).desc(), model.id.desc())
+    known = or_(model.project_ref.is_not(None), and_(model.task_code == "data_cleanup", model.tenant_id.is_(None)))
+    success = and_(model.status == "SUCCESS", model.finished_at.is_not(None), known)
+    q = select(model.id, model.task_code, model.tenant_id, model.project_ref, model.status,
+               model.started_at, model.finished_at, model.resource_total, model.abnormal_total,
+               func.row_number().over(partition_by=group, order_by=order).label("position"),
+               func.sum(case((success, 1), else_=0)).over(partition_by=group, order_by=order,
+                                                        rows=(None, 0)).label("successes_seen"),
+               func.sum(case((model.status.not_in(NEUTRAL), 1), else_=0)).over(
+                   partition_by=group, order_by=order, rows=(None, 0)).label("attempts_seen"))
+    if tenant_ids is not None:
+        condition = model.tenant_id.in_(tenant_ids)
+        q = q.where(or_(condition, model.tenant_id.is_(None)) if include_global else condition)
+    if task_code is not None:
+        q = q.where(model.task_code == task_code)
+    if project_ref is not None:
+        q = q.where(model.project_ref == project_ref)
+    if unknown_project:
+        q = q.where(model.project_ref.is_(None),
+                    or_(model.task_code != "data_cleanup", model.tenant_id.is_not(None)))
+    ranked = q.subquery()
+    c = ranked.c
+    stats = select(c.task_code, c.tenant_id, c.project_ref,
+        func.max(case((c.position == 1, c.id))).label("latest_id"),
+        func.sum(case((and_(c.status.in_(UNSUCCESSFUL), c.successes_seen == 0), 1), else_=0)).label("fails"),
+        func.max(case((and_(c.status == "SUCCESS", c.finished_at.is_not(None)), c.finished_at))).label("last_success_at"),
+        func.max(case((and_(c.status.not_in(NEUTRAL), c.attempts_seen == 1), c.status))).label("effective_status"),
+        func.max(case((and_(c.status.not_in(NEUTRAL), c.attempts_seen == 1), c.id))).label("effective_run_id"),
+        func.max(case((and_(c.status.not_in(NEUTRAL), c.attempts_seen == 1), c.finished_at))).label("effective_finished_at"),
+        func.max(case((and_(c.status.not_in(NEUTRAL), c.attempts_seen == 1), c.resource_total))).label(
+            "effective_resource_total"),
+        func.max(case((and_(c.status.not_in(NEUTRAL), c.attempts_seen == 1), c.abnormal_total))).label(
+            "effective_abnormal_total")
+    ).group_by(c.task_code, c.tenant_id, c.project_ref).subquery()
+    rows = db.execute(select(model, stats.c.fails, stats.c.last_success_at, stats.c.effective_status,
+                             stats.c.effective_run_id, stats.c.effective_finished_at,
+                             stats.c.effective_resource_total, stats.c.effective_abnormal_total)
+                      .join(stats, model.id == stats.c.latest_id)
+                      .order_by(model.task_code, model.tenant_id, model.project_ref)).all()
+    return [{"run": run, "task_code": run.task_code, "tenant_id": run.tenant_id, "project_ref": run.project_ref,
+             "project_scope": scope_kind(run.task_code, run.tenant_id, run.project_ref),
+             "project_label": f"项目#{run.project_ref}" if run.project_ref is not None else
+                              "全局内部任务" if scope_kind(run.task_code, run.tenant_id, run.project_ref) == "GLOBAL"
+                              else "历史未知项目（未记录）",
+             "last_status": run.status, "last_at": run.finished_at or run.started_at,
+             "resource_total": run.resource_total, "abnormal_total": run.abnormal_total,
+             "last_success_at": ok_at, "fails": int(fails or 0), "effective_status": effective_status,
+             "effective_run_id": effective_id, "effective_finished_at": effective_finished,
+             "effective_resource_total": effective_resources, "effective_abnormal_total": effective_abnormal}
+            for run, fails, ok_at, effective_status, effective_id, effective_finished,
+            effective_resources, effective_abnormal in rows]
+
+
+def task_health(scopes: list[dict], threshold: int, *, enabled: bool = True) -> str:
+    if not enabled:
+        return "DISABLED"
+    if not scopes:
+        return "UNKNOWN"
+    if any(s["fails"] >= threshold for s in scopes):
+        return "FAILED"
+    if any(s["fails"] or s["effective_status"] != "SUCCESS" or s["project_scope"] == "UNKNOWN"
+           or s["last_success_at"] is None or s["last_status"] in NEUTRAL for s in scopes):
+        return "WARN"
+    return "OK"
+
+
+def scope_execution_status(scope: dict) -> str:
+    status = scope["last_status"]
+    if status == "SUCCESS" and (scope["run"].finished_at is None or
+                                scope["project_scope"] == "UNKNOWN" and scope["fails"]):
+        return "PARTIAL"
+    if status in NEUTRAL and scope["effective_status"] in UNSUCCESSFUL:
+        return scope["effective_status"]
+    return status if status in (*UNSUCCESSFUL, *NEUTRAL, "SUCCESS") else "PARTIAL"
+
+
+def task_last_status(scopes: list[dict]) -> str | None:
+    values = [scope_execution_status(scope) for scope in scopes]
+    return next((status for status in ("FAILED", "TIMEOUT", "PARTIAL", "RUNNING", "SKIPPED", "SUCCESS")
+                 if status in values), None)
 
 
 def _fp(rule_id: str, key: str) -> str:
@@ -77,11 +195,14 @@ def _active(db: Session, rule_id: str, key: str) -> AlarmEvent | None:
 
 def fallback_recipients(db: Session) -> list[str]:
     cfg = settings_service.get_platform_alarm(db)
-    if cfg.mail_to:
-        return list(cfg.mail_to)
+    if cfg.recipient_user_ids:
+        # 已配置人员全部失效时不扩大投递范围，不偷偷改发管理员。
+        return emails_for_users(db, cfg.recipient_user_ids)
     admin = db.scalar(select(Role.id).where(Role.code == "admin"))
-    return [e for e in db.scalars(select(User.email).where(User.role_id == admin, User.enabled.is_(True),
-                                                           User.email.is_not(None))) if e]
+    if admin is None:
+        return []
+    ids = list(db.scalars(select(User.id).where(User.role_id == admin).order_by(User.id)))
+    return emails_for_users(db, ids)
 
 
 def raise_alarm(db: Session, rule_id: str, key: str, *, name: str, title: str, tenant_id: int | None = None,
@@ -162,31 +283,45 @@ def on_run(db: Session, run: InspectionRun) -> None:
 
 def _on_run(db: Session, run: InspectionRun) -> None:
     cfg = settings_service.get_platform_alarm(db)
-    key = f"{run.task_code}:{run.tenant_id or 0}"
+    if not cfg.enabled or run.status in NEUTRAL:
+        return
+    scopes = task_scopes(db, task_code=run.task_code)
+    current = next((s for s in scopes if s["tenant_id"] == run.tenant_id and s["project_ref"] == run.project_ref), None)
+    if current is None or current["effective_run_id"] != run.id:
+        return  # delayed callbacks cannot overwrite evidence from a later completed execution
+    key = f"{run.task_code}:{run.tenant_id or 0}" + (f":project:{run.project_ref}" if run.project_ref is not None else "")
+    auth_key = (f"tenant:{run.tenant_id}:project:{run.project_ref}:task:{run.task_code}"
+                if run.project_ref is not None else f"tenant:{run.tenant_id}")
     task = db.get(InspectionTask, run.task_code)
     task_name = task.name if task else run.task_code
     tenant = _tenant_label(db, run.tenant_id)
-    if run.status in ("SUCCESS", "PARTIAL"):
-        resolve_alarm(db, "R-PLAT-001", key, f"{task_name}（{tenant}）执行成功，自动恢复")
+    label = current["project_label"]
+    if run.status == "SUCCESS" and run.finished_at is not None:
+        if current["project_scope"] == "UNKNOWN":
+            return  # NULL does not prove that two historical runs refer to the same real project
+        resolve_alarm(db, "R-PLAT-001", key, f"{task_name}（{tenant} / {label}）执行成功，自动恢复")
         if run.tenant_id is not None:
-            resolve_alarm(db, "R-PLAT-002", f"tenant:{run.tenant_id}", f"{tenant} 的任务执行成功，认证已恢复")
+            active = _active(db, "R-PLAT-002", auth_key)
+            failed_at = (active.detail or {}).get("last_failure_at") if active is not None else None
+            if isinstance(failed_at, str) and run.finished_at >= datetime.fromisoformat(failed_at):
+                resolve_alarm(db, "R-PLAT-002", auth_key, f"{tenant} / {label} 的任务执行成功，认证已恢复")
         return
-    if run.status != "FAILED":
+    if run.status not in UNSUCCESSFUL:
         return
     error = (run.error_summary or "")[:300]
+    detail = {"task": run.task_code, "project_ref": run.project_ref, "project_scope": current["project_scope"],
+              "project_label": label, "error": error, "last_failure_run_id": run.id,
+              "last_failure_at": (run.finished_at or run.started_at).isoformat()}
     if cfg.auth_fail_alarm and run.tenant_id is not None and AUTH_ERROR.search(error):
-        raise_alarm(db, "R-PLAT-002", f"tenant:{run.tenant_id}", name="HCS 接口认证",
-                    title=f"认证失败（{task_name}）：{error[:60]}", tenant_id=run.tenant_id,
-                    detail={"task": run.task_code, "error": error})
-    recent = list(db.scalars(select(InspectionRun.status).where(
-        InspectionRun.task_code == run.task_code,
-        InspectionRun.tenant_id.is_(None) if run.tenant_id is None else InspectionRun.tenant_id == run.tenant_id,
-        InspectionRun.status != "RUNNING").order_by(InspectionRun.started_at.desc(), InspectionRun.id.desc())
-        .limit(cfg.task_fail_threshold)))
-    if len(recent) >= cfg.task_fail_threshold and all(s == "FAILED" for s in recent):
+        active = _active(db, "R-PLAT-002", auth_key)
+        previous = (active.detail or {}).get("last_failure_at") if active is not None else None
+        if previous is None or datetime.fromisoformat(previous) <= (run.finished_at or run.started_at):
+            raise_alarm(db, "R-PLAT-002", auth_key, name="HCS 接口认证",
+                        title=f"认证失败（{task_name} / {label}）：{error[:60]}", tenant_id=run.tenant_id, detail=detail)
+    if current["fails"] >= cfg.task_fail_threshold:
         raise_alarm(db, "R-PLAT-001", key, name=task_name,
-                    title=f"连续 {cfg.task_fail_threshold} 次执行失败：{error[:60]}", tenant_id=run.tenant_id,
-                    detail={"task": run.task_code, "error": error, "threshold": cfg.task_fail_threshold})
+                    title=f"连续 {current['fails']} 次执行未成功（{label}）：{error[:60]}", tenant_id=run.tenant_id,
+                    detail={**detail, "failures": current["fails"], "threshold": cfg.task_fail_threshold})
 
 
 def on_notification_failed(db: Session, n: Notification) -> None:

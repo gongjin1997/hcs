@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.models import AlarmRule
 
 from .model import Rule
+from .recovery_evidence import upgrade_default
 
 DEFAULT_RULES = Path(__file__).with_name("default_rules.yaml")
 
@@ -22,8 +23,10 @@ def sync_default_rules(db: Session) -> int:
         if row is None:
             db.add(AlarmRule(**{"scope": {}, "recover": {}, "for_count": 1, **r}, updated_by="system"))
             added += 1
-        elif not (row.runbook or "").strip() and r.get("runbook"):
-            row.runbook = r["runbook"]
+        else:
+            upgrade_default(db, row)
+            if not (row.runbook or "").strip() and r.get("runbook"):
+                row.runbook = r["runbook"]
     db.commit()
     return added
 

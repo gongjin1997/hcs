@@ -70,10 +70,15 @@ def test_send_report_mail(client, admin, monkeypatch):
     assert r.status_code == 200 and r.json()["data"]["sent_to"] == ["ops-report@example.com", "zhaolei@example.com"]
     sent.clear()
     assert client.post(f"/api/v1/reports/{rid}/send", json={"to": ["bad"]}, headers=admin).status_code == 400
-    r = client.post(f"/api/v1/reports/{rid}/send", json={"to": ["ops@example.com"]}, headers=admin)
+    person = client.post("/api/v1/system/users", json={
+        "username": "report-recipient", "display_name": "报表接收人", "email": "ops@example.com",
+        "login_enabled": False}, headers=admin)
+    assert person.status_code == 200, person.text
+    r = client.post(f"/api/v1/reports/{rid}/send",
+                    json={"recipient_user_ids": [person.json()["data"]["id"]]}, headers=admin)
     assert r.status_code == 200 and r.json()["data"]["sent_to"] == ["ops@example.com"]
     msg = sent[0]
-    assert msg["Subject"].startswith("【PROD】HCS 巡检日报") and msg["To"] == "ops@example.com"
+    assert msg["Subject"].startswith("HCS 巡检日报") and msg["To"] == "ops@example.com"
     files = [p.get_filename() for p in msg.iter_attachments()]
     assert files and files[0].endswith(".xlsx")
     html = msg.get_body(("html",)).get_content()

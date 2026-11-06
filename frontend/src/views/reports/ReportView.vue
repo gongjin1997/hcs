@@ -1,12 +1,16 @@
 <template>
   <div class="report-page">
-    <PageHeader title="报表中心" desc="日报 / 周报 / 月报按计划自动生成并邮件发送（正文摘要 + Excel 附件）；也可按任意周期手动生成、导出、补发">
-      <el-button v-perm="'report:manage'" type="primary" :icon="Plus" @click="openGen">生成报表</el-button>
-    </PageHeader>
+    <PageHeader title="报表中心" :refresh="refresh" :refreshing="listLoading || detailLoading" />
 
     <div class="layout">
       <!-- 左：报表列表 -->
       <aside class="hi-card list">
+        <div class="table-toolbar table-heading">
+          <b>报表列表</b>
+          <div class="table-actions">
+            <el-button v-perm="'report:manage'" type="primary" :icon="Plus" @click="openGen">生成报表</el-button>
+          </div>
+        </div>
         <el-segmented v-model="kind" :options="KIND_OPTIONS" block size="small" @change="reloadList" />
         <el-select v-if="tenantFilterOptions.length > 2" v-model="tenantFilter" size="small" class="tf" @change="reloadList">
           <template #prefix><el-icon><OfficeBuilding /></el-icon></template>
@@ -31,7 +35,7 @@
       <!-- 右：报表详情 -->
       <section v-loading="detailLoading" class="detail">
         <template v-if="current">
-          <div class="hi-card head">
+          <div class="hi-card head table-heading">
             <div class="h-left">
               <div class="t"><el-tag :color="REPORT_KIND[current.kind].color" effect="dark" class="kind-tag" size="small">{{ REPORT_KIND[current.kind].label }}</el-tag>
                 <h3>{{ current.title }}</h3>
@@ -42,17 +46,17 @@
                 <span v-if="current.send_error" class="text-danger"> · 发送失败：{{ current.send_error }}</span>
               </div>
             </div>
-            <div class="h-right">
+            <div class="h-right table-actions">
               <el-button v-perm="'report:manage'" :icon="RefreshRight" :loading="regenLoading" @click="regenerate">重新生成</el-button>
               <el-button :icon="Download" @click="onExport">导出 Excel</el-button>
               <el-button v-perm="'report:manage'" type="primary" :icon="Promotion" @click="openSend">发送邮件</el-button>
-              <el-button v-perm="'report:delete'" text type="danger" :icon="Delete" @click="onDelete" />
+              <el-button v-perm="'report:delete'" text type="danger" :icon="Delete" :loading="deleting" @click="onDelete" />
             </div>
           </div>
 
           <!-- 结论 -->
           <div class="hi-card conclusion">
-            <div class="hi-card__title">报表结论<span class="sub">自动生成，邮件正文同此</span></div>
+            <div class="hi-card__title">巡检摘要</div>
             <ol><li v-for="(c, i) in d.conclusion" :key="i">{{ c }}</li></ol>
           </div>
 
@@ -71,13 +75,13 @@
             </div>
 
             <el-row :gutter="16">
-              <el-col :span="16">
+              <el-col :xs="24" :lg="16">
                 <div class="hi-card fill">
-                  <div class="hi-card__title">告警趋势<span class="sub">按首次发生时间统计新增告警</span></div>
+                  <div class="hi-card__title">新增告警趋势</div>
                   <EChart :option="trendOption" height="260px" />
                 </div>
               </el-col>
-              <el-col :span="8">
+              <el-col :xs="24" :lg="8">
                 <div class="hi-card fill">
                   <div class="hi-card__title">按服务分布</div>
                   <div v-for="s in d.by_service ?? []" :key="s.service" class="svc">
@@ -92,9 +96,9 @@
 
             <!-- 运行态：ECS 状态 / 容器事件 / 各租户 -->
             <el-row v-if="d.ecs || d.pods" :gutter="16" class="mt-16">
-              <el-col v-if="d.ecs" :span="rtSpan">
+              <el-col v-if="d.ecs" :xs="24" :lg="Math.max(12, rtSpan)" :xl="rtSpan">
                 <div class="hi-card fill">
-                  <div class="hi-card__title">ECS 运行状态<span class="sub">期末状态</span>
+                  <div class="hi-card__title">ECS 运行状态<span class="sub">生成时状态</span>
                     <el-link type="primary" underline="never" @click="$router.push({ path: '/ledger', query: { type: 'ecs_server' } })">台账</el-link></div>
                   <div class="rt-nums">
                     <div><span>云服务器</span><b class="num">{{ d.ecs.total }}</b></div>
@@ -109,25 +113,25 @@
                   <div v-if="!d.ecs.top_reboot.length" class="tl-none text-3">本期无 ECS 重启</div>
                 </div>
               </el-col>
-              <el-col v-if="d.pods" :span="rtSpan">
+              <el-col v-if="d.pods" :xs="24" :lg="Math.max(12, rtSpan)" :xl="rtSpan">
                 <div class="hi-card fill">
                   <div class="hi-card__title">CCE 容器事件<span class="sub">本期 {{ d.pods.events }} 起</span>
                     <el-link type="primary" underline="never" @click="$router.push('/pod-events')">详情</el-link></div>
                   <div class="rt-nums">
-                    <div><span>容器重启</span><b class="num" :class="{ 'text-warn': d.pods.restarts }">{{ d.pods.restarts }}</b></div>
-                    <div><span>OOMKilled</span><b class="num" :class="{ 'text-danger': d.pods.oom }">{{ d.pods.oom }}</b></div>
+                    <div><span>容器重启</span><b class="num" :class="{ 'text-warn': d.pods.restarts }">{{ d.pods.restarts ?? '—' }}</b></div>
+                    <div><span>OOMKilled</span><b class="num" :class="{ 'text-danger': d.pods.oom }">{{ d.pods.oom ?? '—' }}</b></div>
                     <div><span>CrashLoop</span><b class="num" :class="{ 'text-danger': d.pods.crashloop }">{{ d.pods.crashloop }}</b></div>
                     <div><span>背压</span><b class="num" :class="{ 'text-warn': d.pods.backpressure }">{{ d.pods.backpressure }}</b></div>
                     <div><span>背压时长</span><b class="num">{{ d.pods.backpressure_min }}<small>分钟</small></b></div>
-                    <div><span>驱逐</span><b class="num" :class="{ 'text-warn': d.pods.evicted }">{{ d.pods.evicted }}</b></div>
+                    <div><span>驱逐</span><b class="num" :class="{ 'text-warn': d.pods.evicted }">{{ d.pods.evicted ?? '—' }}</b></div>
                   </div>
                   <div class="tl-title text-3">重启最多的工作负载</div>
-                  <div v-for="(x, i) in d.pods.top_restart.slice(0, 5)" :key="x.workload" class="tl link" @click="goWorkload(x.workload)">
-                    <i>{{ i + 1 }}</i><span class="ellipsis">{{ wl(x.workload).name }}<em class="text-3">{{ wl(x.workload).ns }}</em></span><b class="num">{{ x.count }} 次</b></div>
+                  <div v-for="(x, i) in d.pods.top_restart.slice(0, 5)" :key="`${x.tenant_id}:${x.project_ref}:${x.cluster_id}:${x.workload_kind}:${x.workload}`" class="tl link" @click="goWorkload(x)">
+                    <i>{{ i + 1 }}</i><span class="ellipsis">{{ wl(x.workload).name }}<em class="text-3">{{ wl(x.workload).ns }} · {{ x.workload_kind || '工作负载' }}</em></span><b class="num">{{ x.count ?? '—' }} 次</b></div>
                   <div v-if="!d.pods.top_restart.length" class="tl-none text-3">本期无容器重启</div>
                 </div>
               </el-col>
-              <el-col v-if="d.by_tenant?.length" :span="rtSpan">
+              <el-col v-if="d.by_tenant?.length" :xs="24" :lg="Math.max(12, rtSpan)" :xl="rtSpan">
                 <div class="hi-card fill">
                   <div class="hi-card__title">各租户概览<span class="sub">本期告警 · 当前健康分</span></div>
                   <div v-for="t in d.by_tenant" :key="t.tenant_id" class="bt">
@@ -141,7 +145,7 @@
             </el-row>
 
             <el-row :gutter="16" class="mt-16">
-              <el-col :span="12">
+              <el-col :xs="24" :lg="12">
                 <div class="hi-card fill">
                   <div class="hi-card__title">告警最多的资源 Top {{ d.top_resources?.length }}</div>
                   <el-table :data="d.top_resources" size="small">
@@ -152,7 +156,7 @@
                   </el-table>
                 </div>
               </el-col>
-              <el-col :span="12">
+              <el-col :xs="24" :lg="12">
                 <div class="hi-card fill">
                   <div class="hi-card__title">命中最多的规则 Top {{ d.top_rules?.length }}</div>
                   <el-table :data="d.top_rules" size="small">
@@ -179,23 +183,24 @@
             </div>
 
             <el-row :gutter="16" class="mt-16">
-              <el-col :span="14">
+              <el-col :xs="24" :lg="14">
                 <div class="hi-card fill">
-                  <div class="hi-card__title">巡检任务执行<span class="sub">成功率 {{ ov.run_success_rate ?? '-' }}% · 共 {{ ov.inspection_runs ?? 0 }} 次</span></div>
+                  <div class="hi-card__title">巡检任务执行<span class="sub">已完成任务成功率 {{ ov.run_success_rate ?? '-' }}% · {{ ov.inspection_runs ?? 0 }} 条记录</span></div>
                   <el-table :data="d.tasks" size="small">
                     <el-table-column label="任务" prop="name" min-width="150" show-overflow-tooltip />
-                    <el-table-column label="执行" width="56" align="right" prop="runs" />
+                    <el-table-column label="记录" width="56" align="right" prop="runs" />
                     <el-table-column label="成功 / 部分 / 失败" width="116" align="center">
                       <template #default="{ row }"><span class="text-ok">{{ row.success }}</span> / <span class="text-warn">{{ row.partial }}</span> / <span :class="{ 'text-danger': row.failed }">{{ row.failed }}</span></template>
                     </el-table-column>
-                    <el-table-column label="成功率" width="116"><template #default="{ row }"><el-progress :percentage="row.success_rate ?? 0" :stroke-width="6" :color="(row.success_rate ?? 0) >= 95 ? '#2e7d32' : '#f57c00'" /></template></el-table-column>
+                    <el-table-column label="跳过 / 运行中" width="100" align="center"><template #default="{ row }">{{ row.skipped ?? 0 }} / {{ row.running ?? 0 }}</template></el-table-column>
+                    <el-table-column label="成功率" width="116"><template #default="{ row }"><span v-if="row.success_rate == null">—</span><el-progress v-else :percentage="row.success_rate" :stroke-width="6" :color="row.success_rate >= 95 ? '#2e7d32' : '#f57c00'" /></template></el-table-column>
                     <el-table-column label="平均耗时" width="78" align="right"><template #default="{ row }">{{ row.avg_sec ?? '-' }} s</template></el-table-column>
                   </el-table>
                 </div>
               </el-col>
-              <el-col :span="10">
+              <el-col :xs="24" :lg="10">
                 <div class="hi-card fill">
-                  <div class="hi-card__title">容量水位（期末）<span class="sub">≥ 80% 需关注</span></div>
+                  <div class="hi-card__title">生成时容量水位<span class="sub">仅列有效采样</span></div>
                   <div v-for="c in d.capacity ?? []" :key="c.name + c.metric" class="cap">
                     <span class="n ellipsis">{{ c.name }}<em class="text-3">{{ c.metric }}</em></span>
                     <el-progress :percentage="c.value" :color="usageColor(c.value)" :stroke-width="8" :show-text="false" />
@@ -208,25 +213,25 @@
 
           <!-- 资源台账 -->
           <div class="hi-card mt-16">
-            <div class="hi-card__title">资源台账<span class="sub">{{ current.kind === 'LEDGER' ? '当前快照 · 近 30 天变更' : '期末快照 · 本期同步发现的变更' }}</span>
+            <div class="hi-card__title">资源台账<span class="sub">{{ current.kind === 'LEDGER' ? '生成时快照 · 近 30 天变更' : '生成时快照 · 本期同步发现的变更' }}</span>
               <el-link type="primary" underline="never" @click="$router.push('/ledger')">查看台账</el-link></div>
             <div class="ledger-sum">
               <div><span>资源总数</span><b class="num">{{ d.ledger.total }}</b></div>
-              <div><span>vCPU / 内存</span><b class="num">{{ d.ledger.vcpus }} / {{ d.ledger.memory_gb }}<small>GB</small></b></div>
-              <div><span>块存储</span><b class="num">{{ (d.ledger.storage_gb / 1024).toFixed(1) }}<small>TB</small></b></div>
+              <div><span>已知 vCPU / 内存</span><b class="num">{{ d.ledger.vcpus ?? '—' }} / {{ d.ledger.memory_gb ?? '—' }}<small>GB</small></b></div>
+              <div><span>已知块存储</span><b class="num">{{ d.ledger.storage_gb == null ? '—' : (d.ledger.storage_gb / 1024).toFixed(1) }}<small>TB</small></b></div>
               <div><span>未分配负责人</span><b class="num text-warn">{{ d.ledger.unassigned }}</b></div>
               <div><span>疑似闲置</span><b class="num text-warn">{{ d.ledger.idle }}</b></div>
               <div><span>新增 / 变更 / 释放</span><b class="num"><em class="text-ok">{{ d.ledger.changes_count.CREATED ?? 0 }}</em> / <em>{{ d.ledger.changes_count.UPDATED ?? 0 }}</em> / <em class="text-danger">{{ d.ledger.changes_count.DELETED ?? 0 }}</em></b></div>
             </div>
             <el-row :gutter="16">
-              <el-col :span="current.kind === 'LEDGER' ? 10 : 9">
+              <el-col :xs="24" :lg="current.kind === 'LEDGER' ? 10 : 9">
                 <el-table :data="d.ledger.by_type" size="small" :max-height="current.kind === 'LEDGER' ? 560 : 360">
                   <el-table-column label="资源类型" prop="name" min-width="130" />
                   <el-table-column label="数量" width="70" align="right"><template #default="{ row }"><b class="num">{{ row.count }}</b></template></el-table-column>
                   <el-table-column label="未分配" width="70" align="right"><template #default="{ row }"><span :class="{ 'text-warn': row.unassigned }">{{ row.unassigned }}</span></template></el-table-column>
                 </el-table>
               </el-col>
-              <el-col :span="current.kind === 'LEDGER' ? 14 : 15">
+              <el-col :xs="24" :lg="current.kind === 'LEDGER' ? 14 : 15">
                 <el-table :data="d.ledger.changes" size="small" :max-height="current.kind === 'LEDGER' ? 560 : 360">
                   <el-table-column label="时间" width="110"><template #default="{ row }">{{ fmtTime(row.detected_at, 'MM-DD HH:mm') }}</template></el-table-column>
                   <el-table-column label="类型" width="70"><template #default="{ row }"><el-tag :type="CHANGE_TYPE[row.change_type]?.type ?? 'info'" size="small">{{ CHANGE_TYPE[row.change_type]?.label ?? row.change_type }}</el-tag></template></el-table-column>
@@ -267,18 +272,16 @@
     </el-dialog>
 
     <!-- 发送邮件 -->
-    <el-dialog v-model="send.visible" title="发送报表邮件" width="480px">
-      <el-form label-width="72px">
+    <el-dialog v-model="send.visible" :title="`发送报表：${send.reportTitle}`" :close-on-click-modal="!send.loading" :close-on-press-escape="!send.loading" :show-close="!send.loading" width="480px">
+      <el-form label-width="72px" :disabled="send.loading">
         <el-form-item label="收件人">
-          <el-select v-model="send.to" multiple filterable allow-create default-first-option placeholder="输入邮箱后回车" style="width: 100%">
-            <el-option v-for="m in send.suggest" :key="m" :label="m" :value="m" />
-          </el-select>
+          <RecipientSelect v-model="send.recipient_user_ids" :tenant-id="send.reportTenantId" :global-only="send.reportTenantId == null" :active="send.visible" :disabled="send.loading" />
         </el-form-item>
-        <p class="text-3 gen-tip">邮件正文为报表摘要（结论 + 核心指标），附件为完整 Excel。默认收件人：合并报表取 INSPECTOR_REPORT_MAIL_TO，租户报表取该租户配置的“报表收件人”。</p>
+        <p class="text-3 gen-tip">邮件包含摘要和 Excel 附件。默认收件人取系统或租户配置，可在发送前修改。</p>
       </el-form>
       <template #footer>
-        <el-button @click="send.visible = false">取消</el-button>
-        <el-button type="primary" :loading="send.loading" :disabled="!send.to.length" @click="doSend">发送</el-button>
+        <el-button :disabled="send.loading" @click="send.visible = false">取消</el-button>
+        <el-button type="primary" :loading="send.loading" :disabled="!send.recipient_user_ids.length" @click="doSend">发送</el-button>
       </template>
     </el-dialog>
   </div>
@@ -286,13 +289,15 @@
 
 <script setup lang="ts">
 import { Delete, Download, OfficeBuilding, Plus, Promotion, RefreshRight, WarningFilled } from '@element-plus/icons-vue'
-import dayjs from 'dayjs'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, onScopeDispose, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { createReport, deleteReport, exportReport, getReport, listReports, listUsers, reportSchedule, sendReport } from '@/api'
+import { createReport, deleteReport, exportReport, getReport, listReports, sendReport } from '@/api'
+import RecipientSelect from '@/components/RecipientSelect.vue'
 import EChart from '@/components/EChart.vue'
 import PageHeader from '@/components/PageHeader.vue'
+import { reportPeriodName, reportRegenerationDate } from './report-title'
+import { useLatestRequest } from '@/composables/useLatestRequest'
 import SeverityTag from '@/components/SeverityTag.vue'
 import StatusTag from '@/components/StatusTag.vue'
 import TenantTag from '@/components/TenantTag.vue'
@@ -308,6 +313,8 @@ const route = useRoute()
 const router = useRouter()
 const user = useUserStore()
 const app = useAppStore()
+let disposed = false
+onScopeDispose(() => { disposed = true })
 /** 用户拥有全部租户权限时才能看到 / 生成“全部租户合并”报表 */
 const fullScope = computed(() => user.user?.tenant_ids == null)
 const showTenant = computed(() => app.tenants.length > 1)
@@ -323,42 +330,59 @@ const tenantFilterOptions = computed(() => {
 const reports = ref<ReportBrief[]>([])
 const listTotal = ref(0)
 const listPage = ref(1)
-const listLoading = ref(false)
+const listRequest = useLatestRequest()
+const listLoading = listRequest.loading
 async function fetchList(append = false) {
-  listLoading.value = true
-  try {
-    const res = await listReports({ kind: (kind.value || undefined) as ReportKind | undefined, page: listPage.value, page_size: 15,
-      tenant_id: tenantFilter.value === 'all' ? undefined : tenantFilter.value })
+  const query = { kind: (kind.value || undefined) as ReportKind | undefined, page: listPage.value, page_size: 15,
+    tenant_id: tenantFilter.value === 'all' ? undefined : tenantFilter.value }
+  return listRequest.run(() => listReports(query), res => {
     reports.value = append ? [...reports.value, ...res.items] : res.items
     listTotal.value = res.total
-  } finally { listLoading.value = false }
+  })
 }
-async function reloadList() { listPage.value = 1; await fetchList(); if (reports.value[0] && !reports.value.some((r) => r.id === current.value?.id)) open(reports.value[0].id) }
-const loadMore = () => { listPage.value++; fetchList(true) }
-const periodName = (r: ReportBrief) => {
-  const s = dayjs(r.period_start)
-  if (r.kind === 'DAILY') return `日报 · ${s.format('MM-DD ddd')}`
-  if (r.kind === 'WEEKLY') return `周报 · ${s.format('MM-DD')} ~ ${dayjs(r.period_end).subtract(1, 'day').format('MM-DD')}`
-  if (r.kind === 'MONTHLY') return `月报 · ${s.format('YYYY 年 M 月')}`
-  return `台账 · ${dayjs(r.created_at).format('MM-DD HH:mm')}`
+async function reloadList() {
+  listPage.value = 1
+  detailRequest.invalidate()
+  current.value = null
+  const { id: _id, ...query } = route.query
+  await router.replace({ query })
+  if (await fetchList() && reports.value[0]) await open(reports.value[0].id)
 }
+async function loadMore() {
+  if (listLoading.value) return
+  const previous = listPage.value
+  listPage.value++
+  try { await fetchList(true) } catch (error) {
+    if (listPage.value === previous + 1) listPage.value = previous
+    throw error
+  }
+}
+const periodName = (r: ReportBrief) => reportPeriodName(r.title, REPORT_KIND[r.kind].label)
 const itemBrief = (r: ReportBrief) => (r.kind === 'LEDGER'
   ? `资源 ${r.summary.ledger_total ?? '-'} · 未分配 ${r.summary.unassigned ?? '-'}`
   : `告警 ${r.summary.new_alarms ?? 0} · P1 ${r.summary.p1 ?? 0} · 成功率 ${r.summary.run_success_rate ?? '-'}%`)
 
 // ---- 详情 ----
 const current = ref<ReportDetail | null>(null)
-const detailLoading = ref(false)
+const detailRequest = useLatestRequest()
+const detailLoading = detailRequest.loading
 const d = computed(() => current.value!.data as ReportData)
 // 台账报表只有资源快照，不展示告警 / 任务 / 容量等巡检指标
 const CHANGE_DEFAULT: Record<string, string> = { CREATED: '新资源纳入台账', DELETED: '资源已在 HCS 释放' }
 const ov = computed(() => (current.value && current.value.kind !== 'LEDGER' ? current.value.data.overview : undefined))
 async function open(id: number) {
-  detailLoading.value = true
-  try {
-    current.value = await getReport(id)
-    router.replace({ query: { ...route.query, id: String(id) } })
-  } finally { detailLoading.value = false }
+  current.value = null
+  return detailRequest.run(() => getReport(id), report => {
+    current.value = report
+    void router.replace({ query: { ...route.query, id: String(id) } })
+  })
+}
+async function refresh() {
+  listPage.value = 1
+  if (!await fetchList()) return
+  const id = current.value?.id ?? reports.value[0]?.id
+  if (id) await open(id)
+  else { detailRequest.invalidate(); current.value = null }
 }
 const kpis = computed(() => {
   const o = ov.value!
@@ -381,16 +405,20 @@ const pct = (v: number, max: number) => `${(v / max) * 100}%`
 const rtSpan = computed(() => ([d.value.ecs, d.value.pods, d.value.by_tenant?.length].filter(Boolean).length === 3 ? 8 : 12))
 /** top_restart 的 workload 为 “集群/命名空间/工作负载” */
 const wl = (k: string) => { const p = k.split('/'); return { name: p[p.length - 1], ns: p.slice(0, -1).join(' / ') } }
-const goWorkload = (k: string) => {
-  const p = k.split('/')
-  router.push({ path: '/pod-events', query: { namespace: p[p.length - 2], workload: p[p.length - 1] } })
+const goWorkload = (item: string | NonNullable<ReportData['pods']>['top_restart'][number]) => {
+  const path = typeof item === 'string' ? item : item.workload
+  const p = path.split('/')
+  router.push({ path: '/pod-events', query: { namespace: p[p.length - 2], workload: p[p.length - 1],
+    ...(typeof item === 'string' ? {} : { tenant_id: item.tenant_id ?? undefined, project_ref: item.project_ref ?? undefined,
+      unknown_project: item.project_ref === null ? '1' : undefined,
+      cluster_id: item.cluster_id || undefined, workload_kind: item.workload_kind || undefined }) } })
 }
 const trendOption = computed(() => {
   const t = d.value.trend
   return {
     tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
     legend: { right: 0, top: 0, icon: 'circle', itemWidth: 8, data: SEVERITIES.map((s) => `${s} ${SEVERITY[s].label}`) },
-    grid: { left: 8, right: 8, top: 34, bottom: 4, containLabel: true },
+    grid: { left: 8, right: 8, top: 34, bottom: 4, outerBoundsMode: 'same', outerBoundsContain: 'all' },
     xAxis: { type: 'category', data: t?.labels ?? [], axisTick: { show: false }, axisLine: { lineStyle: { color: '#e5e8ef' } }, axisLabel: { color: '#86909c' } },
     yAxis: { type: 'value', minInterval: 1, splitLine: { lineStyle: { color: '#f0f2f5', type: 'dashed' } }, axisLabel: { color: '#86909c' } },
     series: SEVERITIES.map((s) => ({
@@ -403,27 +431,44 @@ const trendOption = computed(() => {
 // ---- 操作 ----
 const regenLoading = ref(false)
 async function regenerate() {
-  const r = current.value!
-  await ElMessageBox.confirm(r.kind === 'LEDGER' ? '按当前台账生成一份新的台账报表？' : '按最新数据重新生成该周期报表（覆盖当前内容）？', '重新生成', { type: 'info' })
+  if (regenLoading.value || !current.value) return
+  const target = current.value
+  const tenantId = app.tenantId
+  let date: string | undefined
+  try { date = reportRegenerationDate(target.kind, target.data.period.label) }
+  catch (error) { ElMessage.warning((error as Error).message); return }
   regenLoading.value = true
   try {
-    const date = r.kind === 'LEDGER' ? undefined : dayjs(r.period_start).add(8, 'hour').format('YYYY-MM-DD')
-    const res = await createReport(r.kind, date, r.tenant_id)
+    await ElMessageBox.confirm(target.kind === 'LEDGER' ? '按当前台账生成一份新的台账报表？' : '按最新数据重新生成该周期报表（覆盖当前内容）？', '重新生成', { type: 'info' })
+    if (disposed || tenantId !== app.tenantId) return
+    const res = await createReport(target.kind, date, target.tenant_id)
+    if (disposed) return
     ElMessage.success('已重新生成')
     await fetchList()
     await open(res.id)
-  } finally { regenLoading.value = false }
+  } catch { /* 取消不执行，接口错误由请求层提示。 */ }
+  finally { regenLoading.value = false }
 }
 async function onExport() {
   const name = await exportReport(current.value!.id)
   ElMessage.success(`已导出：${name}`)
 }
+const deleting = ref(false)
 async function onDelete() {
-  await ElMessageBox.confirm(`删除「${current.value!.title}」？`, '删除报表', { type: 'warning' })
-  await deleteReport(current.value!.id)
-  ElMessage.success('已删除')
-  current.value = null
-  await reloadList()
+  if (deleting.value || !current.value) return
+  const target = current.value
+  const tenantId = app.tenantId
+  deleting.value = true
+  try {
+    await ElMessageBox.confirm(`删除「${target.title}」？`, '删除报表', { type: 'warning' })
+    if (disposed || tenantId !== app.tenantId) return
+    await deleteReport(target.id)
+    if (disposed) return
+    ElMessage.success('已删除')
+    if (current.value?.id === target.id) { current.value = null; await reloadList() }
+    else await fetchList()
+  } catch { /* 取消不执行；接口错误由请求层提示。 */ }
+  finally { deleting.value = false }
 }
 
 /** gen.tenant：0 = 全部租户合并报表 */
@@ -439,6 +484,7 @@ function openGen() {
 const pickerType = computed(() => (gen.kind === 'WEEKLY' ? 'week' : gen.kind === 'MONTHLY' ? 'month' : 'date'))
 const pickerFormat = computed(() => (gen.kind === 'WEEKLY' ? 'YYYY 第 ww 周' : gen.kind === 'MONTHLY' ? 'YYYY-MM' : 'YYYY-MM-DD'))
 async function doGenerate() {
+  if (gen.loading) return
   gen.loading = true
   try {
     const res = await createReport(gen.kind, gen.kind === 'LEDGER' ? undefined : gen.date || undefined, gen.tenant || null)
@@ -450,19 +496,28 @@ async function doGenerate() {
   } finally { gen.loading = false }
 }
 
-const send = reactive({ visible: false, loading: false, to: [] as string[], suggest: [] as string[], defaults: [] as string[] })
+const send = reactive({ visible: false, loading: false, reportId: null as number | null, reportTitle: '', tenantId: null as number | null, reportTenantId: null as number | null, recipient_user_ids: [] as number[] })
 async function openSend() {
+  if (send.loading || !current.value) return
   const c = current.value
-  send.to = [...(c?.sent_to.length ? c.sent_to : c?.default_to?.length ? c.default_to : send.defaults)]
+  send.reportId = c.id
+  send.reportTitle = c.title
+  send.tenantId = app.tenantId
+  send.reportTenantId = c.tenant_id
+  send.recipient_user_ids = [...(c.default_user_ids ?? [])]
   send.visible = true
 }
 async function doSend() {
+  if (send.loading || !send.reportId || !send.recipient_user_ids.length || disposed || send.tenantId !== app.tenantId || !user.can('report:manage')) return
+  const id = send.reportId
+  const ids = [...send.recipient_user_ids]
   send.loading = true
   try {
-    await sendReport(current.value!.id, send.to)
-    ElMessage.success(`已发送至 ${send.to.join('、')}`)
+    await sendReport(id, ids)
+    if (disposed) return
+    ElMessage.success('报表已发送')
     send.visible = false
-    await Promise.all([open(current.value!.id), fetchList()])
+    await Promise.all([current.value?.id === id ? open(id) : undefined, fetchList()])
   } finally { send.loading = false }
 }
 
@@ -470,11 +525,6 @@ onMounted(async () => {
   await fetchList()
   const id = Number(route.query.id) || reports.value[0]?.id
   if (id) open(id)
-  if (!user.can('report:manage')) return
-  const [sch, users] = await Promise.all([reportSchedule(), user.can('user:manage') ? listUsers().catch(() => []) : Promise.resolve([])])
-  send.defaults = sch.mail_to
-  send.suggest = [...new Set([...sch.mail_to, ...sch.tenants.flatMap((t) => t.mail_to),
-    ...users.map((u) => u.email).filter((e): e is string => !!e)])]
 })
 </script>
 
@@ -499,7 +549,7 @@ onMounted(async () => {
   .h-right { display: flex; gap: 8px; flex: none; } }
 .conclusion { margin-bottom: 16px; background: linear-gradient(180deg, #f5f8ff, #fff); border-color: var(--el-color-primary-light-8);
   ol { margin: 0; padding-left: 20px; line-height: 1.95; color: var(--hi-text-1); font-size: 13.5px; } }
-.kpis { display: grid; grid-template-columns: repeat(8, 1fr); gap: 12px; margin-bottom: 16px;
+.kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px;
   .kpi { display: flex; flex-direction: column; gap: 3px; padding: 12px 14px; background: #fff; border: 1px solid var(--hi-border); border-radius: var(--hi-radius); min-width: 0;
     .k { font-size: 12px; color: var(--hi-text-2); white-space: nowrap; }
     b { font-size: 22px; line-height: 1.2; small { font-size: 11px; font-weight: 500; color: var(--hi-text-3); margin-left: 3px; } }
@@ -530,4 +580,20 @@ onMounted(async () => {
   &:last-child { border-bottom: none; }
   .bt-l { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; min-width: 0; font-size: 12.5px; b { color: var(--hi-text-1); } }
   .bt-s { font-size: 24px; flex: none; small { font-size: 11px; margin-left: 2px; color: var(--hi-text-3); font-weight: 500; } } }
+@media (max-width: 767px) {
+  .layout { flex-direction: column; }
+  .list, .detail { width: 100%; box-sizing: border-box; }
+  .list { position: static; }
+  .list .items { max-height: 240px; }
+  .head .h-left { min-width: 0; max-width: 100%; }
+  .head .t { flex-wrap: wrap; }
+  .head h3 { overflow-wrap: anywhere; }
+  .head .h-right { flex: 1 1 100%; flex-wrap: wrap; justify-content: flex-start; }
+  .kpis, .ledger-sum { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cap { grid-template-columns: minmax(0, 1fr) 72px 46px; }
+  .cap .n { overflow-wrap: anywhere; }
+}
+@media (max-width: 1199px) {
+  :deep(.el-row) { row-gap: 16px; }
+}
 </style>

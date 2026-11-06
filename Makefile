@@ -4,9 +4,10 @@ VENV    := backend/.venv
 BIN     := $(VENV)/bin
 # 一键演示环境：生产 compose + 演示覆盖（Mock HCS / Mailpit / 演示数据）+ 源码构建；生产部署在 deploy/ 目录用 deploy/Makefile
 WEB_PORT ?= 8080
-COMPOSE  := WEB_PORT=$(WEB_PORT) docker compose --project-directory deploy -f deploy/docker-compose.yml -f deploy/docker-compose.demo.yml -f deploy/docker-compose.build.yml
+COMPOSE  := WEB_PORT=$(WEB_PORT) docker-compose --project-directory deploy -f deploy/docker-compose.yml -f deploy/docker-compose.demo.yml -f deploy/docker-compose.build.yml
 
 .PHONY: help init dev-api dev-mock dev-web scheduler notifier run-once ledger-sync report migrate bootstrap status probe revision apidoc lock lint test cov check build up down logs
+.PHONY: test-pg test-web test-lan test-offline test-code lan lan-status lan-stop diagnostics
 
 help:            ## 显示帮助
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -18,7 +19,7 @@ init:            ## 初始化后端虚拟环境与前端依赖（需要 Python 3
 	cd frontend && npm ci
 
 dev-api:         ## 启动后端 API（热重载，:8000，自动建表 + 演示数据）
-	cd backend && .venv/bin/uvicorn app.main:app --reload --port 8000
+	cd backend && .venv/bin/uvicorn app.main:app --reload --port 8000 --timeout-graceful-shutdown 8
 
 dev-mock:        ## 启动 Mock HCS 8.5.1（:9000，两个租户：账号密码 + CES / AK/SK + Prometheus；IAM、巡检与台账服务、CCE K8s API；配合 INSPECTOR_HCS_MOCK_URL 使用）
 	cd backend && .venv/bin/uvicorn mock_hcs.app:app --port 9000
@@ -69,10 +70,40 @@ lint:            ## 代码检查：ruff + mypy + vue-tsc
 test:            ## 后端单元 / 接口测试
 	cd backend && .venv/bin/pytest
 
+test-pg:         ## PostgreSQL 16 全量测试（临时容器；可传 PG_URL）
+	PG_URL="$(PG_URL)" bash scripts/test-pg.sh
+
+test-web:        ## 前端组合函数回归测试
+	cd frontend && npm test
+
+test-lan:        ## 局域网启动脚本回归测试（随机回环端口）
+	$(PY) -m unittest discover -s scripts -p test_lan.py
+
+test-offline:    ## ARM64 正式离线部署脚本回归（临时配置，不连接真实云）
+	$(PY) -m unittest discover -s scripts -p test_offline_deploy.py
+
+test-code:       ## 代码包、离线发布与 Compose 兼容回归
+	$(PY) -m unittest discover -s scripts -p test_code_bundle.py
+	$(PY) -m unittest discover -s scripts -p test_release_manager.py
+	$(PY) -m unittest discover -s scripts -p test_compose_compat.py
+	$(BIN)/python -m unittest discover -s scripts -p test_network_check.py
+
+lan:             ## 启动独立局域网演示环境（PostgreSQL / Redis / Mock / 邮件收件箱）
+	python3 scripts/lan.py start
+
+lan-status:      ## 查看局域网演示进程与访问地址
+	python3 scripts/lan.py status
+
+lan-stop:        ## 停止本项目局域网演示，保留数据
+	python3 scripts/lan.py stop
+
+diagnostics:     ## 离线诊断 LAN 日志（不联网、不读取配置、不操作现有进程）
+	python3 scripts/lan.py diagnostics
+
 cov:             ## 后端测试 + 覆盖率（终端报告 + backend/htmlcov/；门槛见 pyproject 的 fail_under）
 	cd backend && .venv/bin/pytest --cov=app --cov-report=term --cov-report=html
 
-check: lint test ## 提交前检查（CI 同款）
+check: lint test test-web test-lan test-offline test-code ## 提交前检查（CI 同款）
 	cd frontend && npm run build
 
 build:           ## 从源码构建镜像（backend / web）

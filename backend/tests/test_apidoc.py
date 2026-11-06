@@ -15,7 +15,8 @@ def test_every_api_requires_login_except_whitelist():
 
 def test_write_apis_have_permission_codes():
     """写操作（POST / PUT / PATCH / DELETE）除个人操作外都要声明权限点。"""
-    self_service = {"/api/v1/auth/login", "/api/v1/auth/password", "/api/v1/mail-actions/{token}"}
+    self_service = {"/api/v1/auth/login", "/api/v1/auth/password", "/api/v1/auth/logout", "/api/v1/mail-actions/{token}",
+                    "/api/v1/diagnostics/client-errors"}  # 个人故障报告，仍须登录与租户范围校验
     no_perm = []
     for r in apidoc._routes(list(app.routes)):
         if not r.include_in_schema or r.path in self_service:

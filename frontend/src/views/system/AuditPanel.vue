@@ -16,7 +16,7 @@
       <el-input v-model="q.keyword" placeholder="操作人 / 对象 / IP" clearable :prefix-icon="Search" class="w-220" @keyup.enter="search" @clear="search" />
       <el-button type="primary" :icon="Search" @click="search">查询</el-button>
       <span class="flex-1" />
-      <span class="text-3">共 {{ total }} 条 · 可查询最近 180 天；密码、SK 等敏感字段不写入审计</span>
+      <span class="text-3">共 {{ total }} 条 · 保留天数见“系统设置 → 数据保留”；密码、SK 等敏感字段不写入审计</span>
     </div>
     <el-table v-loading="loading" :data="items" row-key="id" size="default">
       <el-table-column label="时间" width="150"><template #default="{ row }">{{ fmtTime(row.at) }}<div class="text-3">{{ fromNow(row.at) }}</div></template></el-table-column>
@@ -101,8 +101,8 @@ const DETAIL_LABEL: Record<string, string> = {
   permissions: '权限数', tenants: '租户', events: '事件数', failed: '未通过项', metrics_source: '生效指标来源', auth_type: '认证方式',
 }
 const VALUE_LABEL: Record<string, Record<string, string>> = {
-  metrics_source: { CES: '云监控 CES', PROMETHEUS: 'Prometheus', NONE: '不采集指标', AUTO: '自动探测' },
-  auth_type: { PASSWORD: 'IAM 用户名 + 密码', AKSK: 'AK/SK 签名' },
+  metrics_source: { AOM: 'AOM（已停用，历史）', CES: '云监控 CES', PROMETHEUS: 'Prometheus', NONE: '仅服务原生', AUTO: '自动选择' },
+  auth_type: { PASSWORD: '凭据认证', AKSK: '签名认证' },
 }
 function fmtVal(v: unknown): string {
   if (v === true) return '是'

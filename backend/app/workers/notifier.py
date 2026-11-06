@@ -8,16 +8,17 @@
 import logging
 import signal
 import time
+from uuid import uuid4
 
 from sqlalchemy import func, select
 
 from app.core.config import ensure_prod_ready
 from app.core.db import SessionLocal
-from app.core.logging import setup_logging
+from app.core.logging import log_context, setup_logging
 from app.models import Notification
 from app.notify.dispatcher import dispatch_pending
 from app.notify.escalation import escalate_unacked
-from app.services import platform_watch, silence_service
+from app.services import platform_watch, silence_service, sms_service
 
 log = logging.getLogger("notifier")
 NAME = "notifier"
@@ -31,11 +32,11 @@ def _graceful(*_: object) -> None:
 
 
 def every_minute(db) -> None:
-    if (e := escalate_unacked(db)):
-        log.info("escalated %s unacknowledged alarms", e)
+    escalate_unacked(db)
     res = silence_service.sweep(db)
     if res["released"] or res["suppressed"]:
-        log.info("silence sweep: released=%s suppressed=%s", res["released"], res["suppressed"])
+        log.info("silence_sweep_finished", extra={"event": "silence_sweep_finished", **res})
+    sms_service.enqueue_due(db)
     platform_watch.check_heartbeats(db, ["scheduler"])
 
 
@@ -46,26 +47,33 @@ def heartbeat(db) -> None:
 
 
 def main(interval: float = 5.0, minute: float = 60.0, beat_every: float = 30.0) -> None:
-    setup_logging()
+    setup_logging(service=NAME)
     ensure_prod_ready()
     signal.signal(signal.SIGTERM, _graceful)
-    log.info("notifier started")
+    log.info("notifier_started", extra={"event": "notifier_started"})
     last_minute = last_beat = 0.0
     while not _stop:
-        try:
-            with SessionLocal() as db:
-                if time.monotonic() - last_beat >= beat_every:
-                    last_beat = time.monotonic()
-                    heartbeat(db)
-                if time.monotonic() - last_minute >= minute:
-                    last_minute = time.monotonic()
-                    every_minute(db)
-                n = dispatch_pending(db)
-                if n:
-                    log.info("sent %s notifications", n)
-        except Exception:  # noqa: BLE001
-            log.exception("notifier loop failed")
+        with log_context(operation_id=uuid4().hex, task="notification_dispatch"):
+            phase = "heartbeat"
+            try:
+                with SessionLocal() as db:
+                    if time.monotonic() - last_beat >= beat_every:
+                        last_beat = time.monotonic()
+                        heartbeat(db)
+                    phase = "maintenance"
+                    if time.monotonic() - last_minute >= minute:
+                        last_minute = time.monotonic()
+                        every_minute(db)
+                    phase = "dispatch"
+                    dispatch_pending(db)
+                    phase = "sms_dispatch"
+                    sms_service.dispatch_pending(db)
+            except Exception as exc:  # noqa: BLE001
+                log.error("notifier_cycle_failed", extra={"event": "notifier_cycle_failed", "phase": phase,
+                          "exception_type": type(exc).__name__},
+                          exc_info=(RuntimeError, RuntimeError(type(exc).__name__), exc.__traceback__))
         time.sleep(interval)
+    log.info("notifier_stopped", extra={"event": "notifier_stopped"})
 
 
 if __name__ == "__main__":

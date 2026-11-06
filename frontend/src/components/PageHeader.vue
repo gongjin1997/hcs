@@ -1,22 +1,34 @@
 <template>
-  <div class="page-header">
-    <div>
-      <h2>{{ title }}</h2>
-      <p v-if="desc">{{ desc }}</p>
-    </div>
-    <div class="extra"><slot /></div>
-  </div>
+  <Teleport v-if="target && refresh" :to="target">
+    <el-tooltip content="刷新当前页面" placement="bottom">
+      <el-button class="page-refresh" text circle aria-label="刷新当前页面" :loading="refreshing || running" :icon="Refresh" @click="runRefresh" />
+    </el-tooltip>
+  </Teleport>
 </template>
 
-<script setup lang="ts">
-defineProps<{ title: string; desc?: string }>()
+<script lang="ts">
+import type { InjectionKey, ShallowRef } from 'vue'
+
+export const pageHeaderTargetKey: InjectionKey<Readonly<ShallowRef<HTMLElement | null>>> = Symbol('page-refresh-target')
 </script>
 
-<style scoped lang="scss">
-.page-header {
-  display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 16px;
-  h2 { margin: 0; font-size: 19px; font-weight: 600; color: var(--hi-text-1); letter-spacing: 0.2px; }
-  p { margin: 6px 0 0; font-size: 13px; color: var(--hi-text-3); }
-  .extra { display: flex; align-items: center; gap: 8px; flex: none; }
+<script setup lang="ts">
+import { Refresh } from '@element-plus/icons-vue'
+import { inject, ref, shallowRef } from 'vue'
+
+const props = defineProps<{
+  title: string
+  desc?: string
+  refresh?: () => unknown | Promise<unknown>
+  refreshing?: boolean
+}>()
+const target = inject(pageHeaderTargetKey, shallowRef(null))
+const running = ref(false)
+
+async function runRefresh() {
+  if (running.value || props.refreshing || !props.refresh) return
+  running.value = true
+  try { await props.refresh() } catch { /* 请求层负责显示错误。 */ }
+  finally { running.value = false }
 }
-</style>
+</script>

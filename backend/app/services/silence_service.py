@@ -38,16 +38,29 @@ def _hm(v: str) -> time:
 
 
 def normalize_matchers(m: dict) -> dict:
+    unknown = set(m) - set(MATCH_KEYS)
+    if unknown:
+        raise BizError(ErrorCode.BAD_REQUEST, f"不支持的匹配条件：{', '.join(sorted(unknown))}")
     out: dict = {}
     for k in MATCH_KEYS:
         v = m.get(k)
         if k == "name_contains":
+            if v is not None and not isinstance(v, str):
+                raise BizError(ErrorCode.BAD_REQUEST, "资源名称匹配条件必须是字符串")
             if isinstance(v, str) and v.strip():
                 out[k] = v.strip()[:128]
         elif v:
             if not isinstance(v, list):
                 raise BizError(ErrorCode.BAD_REQUEST, f"匹配条件 {k} 应为数组")
-            out[k] = sorted({int(x) for x in v}) if k in ("tenant_ids", "resource_refs") else sorted({str(x) for x in v})
+            if k in ("tenant_ids", "resource_refs"):
+                try:
+                    if any(type(x) not in (int, str) for x in v):
+                        raise ValueError("not an integer ID")
+                    out[k] = sorted({int(x) for x in v})
+                except (ValueError, TypeError, OverflowError) as exc:
+                    raise BizError(ErrorCode.BAD_REQUEST, f"匹配条件 {k} 必须是整数数组") from exc
+            else:
+                out[k] = sorted({str(x) for x in v})
     if not out:
         raise BizError(ErrorCode.BAD_REQUEST, "至少需要一个匹配条件（例如租户、服务、资源或规则），防止误把全部告警静默")
     return out
@@ -56,7 +69,13 @@ def normalize_matchers(m: dict) -> dict:
 def normalize_recurrence(r: dict | None) -> dict:
     if not r:
         return {}
-    days = sorted({int(d) for d in r.get("weekdays") or []})
+    try:
+        raw_days = r.get("weekdays") or []
+        if not isinstance(raw_days, list) or any(type(d) not in (int, str) for d in raw_days):
+            raise ValueError("not integer weekdays")
+        days = sorted({int(d) for d in raw_days})
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise BizError(ErrorCode.BAD_REQUEST, "每周维护窗口的星期必须是 1 至 7 的整数数组") from exc
     if not days or any(d < 1 or d > 7 for d in days):
         raise BizError(ErrorCode.BAD_REQUEST, "每周重复需要选择星期（1=周一 … 7=周日）")
     start, end = _hm(r.get("start", "")), _hm(r.get("end", ""))
@@ -168,24 +187,26 @@ def unsuppress(db: Session, alarm: AlarmEvent, now: datetime, note: str) -> None
     alarm_service.enqueue_notification(db, alarm, "FIRING", now)
 
 
-def sweep(db: Session, now: datetime | None = None, only: Silence | None = None) -> dict:
+def sweep(db: Session, now: datetime | None = None, only: Silence | None = None, *, commit: bool = True) -> dict:
     """每分钟执行（通知进程）：静默结束的告警恢复为 FIRING 并补发通知；新进入生效期的静默抑制匹配的告警。"""
     now = now or utcnow()
     if only is not None:                               # 新建 / 修改后只处理这一个静默（未生效的不做任何事）
         actives = [only] if is_active(only, now) else []
     else:
         actives = active_silences(db, now)
-    active_ids = {s.id for s in actives}
+    active_by_id = {s.id: s for s in actives}
     released = suppressed = 0
     if only is None:
         for a in db.scalars(select(AlarmEvent).where(AlarmEvent.status == "SUPPRESSED",
                                                      AlarmEvent.silence_id.is_not(None))).all():
-            if a.silence_id in active_ids:
+            current = active_by_id.get(a.silence_id) if a.silence_id is not None else None
+            if current is not None and matches(current.matchers or {}, a):
                 continue
             other = next((s for s in actives if matches(s.matchers or {}, a)), None)
             if other is not None:                      # 原静默结束，但又命中了另一个生效中的静默
                 a.silence_id = other.id
                 a.suppress_reason = f"{KIND_LABEL.get(other.kind, '静默')}：{other.name}"[:64]
+                other.suppressed_total = (other.suppressed_total or 0) + 1
                 continue
             unsuppress(db, a, now, "静默 / 维护窗口已结束，告警仍未恢复，补发告警通知")
             released += 1
@@ -194,7 +215,10 @@ def sweep(db: Session, now: datetime | None = None, only: Silence | None = None)
         if s is not None:
             suppress(db, a, s, now)
             suppressed += 1
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     return {"released": released, "suppressed": suppressed}
 
 
@@ -212,6 +236,7 @@ def release(db: Session, s: Silence, now: datetime, operator: str) -> int:
         if other is not None:
             a.silence_id = other.id
             a.suppress_reason = f"{KIND_LABEL.get(other.kind, '静默')}：{other.name}"[:64]
+            other.suppressed_total = (other.suppressed_total or 0) + 1
             continue
         verb = "取消了" if s.cancelled_at is not None else "修改了"
         unsuppress(db, a, now, f"{operator} {verb}{KIND_LABEL.get(s.kind, '静默')}“{s.name}”，告警仍未恢复，补发告警通知")

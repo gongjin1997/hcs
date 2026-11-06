@@ -6,21 +6,33 @@
   （make install / make upgrade 自动执行；升级时先于新版本 api / scheduler / notifier 运行）
 """
 import logging
+from time import perf_counter
+from uuid import uuid4
 
 from app.core.config import ensure_prod_ready, get_settings
 from app.core.db import SessionLocal
-from app.core.logging import setup_logging
+from app.core.logging import log_context, setup_logging
 from app.services.bootstrap import bootstrap
 
 log = logging.getLogger("bootstrap")
 
 
 def main() -> None:
-    setup_logging()
-    ensure_prod_ready()
-    with SessionLocal() as db:
-        result = bootstrap(db, admin_password=get_settings().init_admin_password)
-    log.info("bootstrap finished: %s", result)
+    setup_logging(service="bootstrap")
+    with log_context(task="bootstrap", operation_id=uuid4().hex):
+        started = perf_counter()
+        log.info("bootstrap_started", extra={"event": "bootstrap_started"})
+        try:
+            ensure_prod_ready()
+            with SessionLocal() as db:
+                result = bootstrap(db, admin_password=get_settings().init_admin_password)
+        except Exception as exc:
+            log.error("bootstrap_failed", extra={"event": "bootstrap_failed", "exception_type": type(exc).__name__,
+                      "cost_ms": round((perf_counter() - started) * 1000, 2)},
+                      exc_info=(RuntimeError, RuntimeError(type(exc).__name__), exc.__traceback__))
+            raise
+        log.info("bootstrap_finished", extra={"event": "bootstrap_finished", "counts": result,
+                                              "cost_ms": round((perf_counter() - started) * 1000, 2)})
     if not result["admin_created"] and get_settings().init_admin_password:
         log.warning("users already exist, INSPECTOR_INIT_ADMIN_PASSWORD ignored; clear it in deploy/.env")
 
