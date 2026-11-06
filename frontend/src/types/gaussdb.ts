@@ -15,6 +15,7 @@ export interface GaussInstance {
   region: string | null
   status_raw: string | null
   health: string
+  scope_excluded?: boolean
   vcpus: number | null
   memory_size: number | null
   memory_unit: string | null

@@ -13,6 +13,7 @@ export interface MonitoringCoverageRow {
   resource_type: 'ecs_server' | 'dcs_instance' | 'gaussdb_instance'
   resource_name: string
   resources: number
+  out_of_scope_resources?: number
   eligible_resources: number
   inspected_resources: number
   unknown_resources: number

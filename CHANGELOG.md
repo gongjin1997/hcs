@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+### 2026-11-07：采集范围；DCS / GaussDB / ECS 业务逻辑按 PDF 复核
+
+- **采集范围**（采集开关之下的细分）：每个“租户 × 资源类型”可配置包含 / 排除规则，细化到 CCE 的集群 / 命名空间 / 工作负载、DCS / GaussDB / MRS 集群 / ECS 的单个实例、DataArts 实时 / 批作业与 MRS 作业的工作空间 / 作业 / 节点；ECS 还支持按环境、业务系统、负责人、核心资源匹配。规则存于 `sys_setting`（`collect_scope:*`），租户设置覆盖全局默认；新增接口 `/system/collect-scopes`（读取、保存、预览、候选值），审计 `collect.scope`，前端在“系统管理 → 采集开关”的每个单元格里“设置范围”。
+- 采集器在调用云接口之前裁剪：整个工作空间 / 集群不发请求，范围外的作业不再逐个查状态或实例详情，范围外的 GaussDB 实例不再查磁盘用量。判定为三值逻辑，拿不准的对象保留，由巡检流水线用完整信息（含台账字段）最终判定。
+- 新增 `resource.scope_excluded`（迁移 `0019`，默认 false，升级后不改变任何采集行为）：范围外的资源不评估、不记为缺采、不计入覆盖率与健康分，其活动告警被行政关闭（留处理记录，非指标恢复）；资源台账、DCS / GaussDB / ECS 列表标注“范围外”，台账仍完整记录。
+- **DCS**：`instances/statistic` 的 `used_cpu` 是累计 CPU 秒数（API §4.2.6）。改为由两次采样差值折算每个主节点的 CPU 占用（Δ秒 ÷ Δ时间 ÷ 主节点数，主节点数取实例列表 `cache_mode` / `sharding_count`），首次采样、实例重启、间隔过短或过长、拿不到主节点数时不输出、不补零；`R-DCS-006` 因此可用，页面新增“CPU 折算 %”列，且没有选择实例时直接显示当前范围内的全部实例。
+- **没有数据来源的规则默认停用**：`R-DCS-007`（实例连接数，API 无此字段）、`R-GS-007` / `R-GS-008`（GaussDB 无实时 CPU / 内存接口）。它们每轮都“缺采”，使实例长期显示“部分覆盖”、无法判为健康；`gaussdb_status` 不再负责 cpu / memory 检查项。迁移 `0020` 只停用未经人工修改的系统规则，备份在 `sys_setting`（`rule-nosource-0020:*`），可降级还原。
+- **GaussDB**：新增 `R-GS-011`——处于 BUILD / MODIFYING / EXPANDING / REBOOTING / UPGRADING / RESTORING / SWITCHOVER / MIGRATING / REBALANCING / UPGRADE TO BE OBSERVED / MODIFYING DATABASE PORT / REPAIRING 超过 60 分钟告警（P3），状态枚举取自 GaussDB API 参考。节点状态在 API 参考中没有取值范围，因此仍不创建节点规则。
+- 内置规则 37 条（DGC 8、ECS 7、GaussDB 8、DCS 6、CCE 5、MRS 3，其中 3 条默认停用）；`docs/资源与指标指南.md` 重新生成；修正上一次提交遗留的断言（采集开关页资源类型数应为 15）。
+- 未完成：DCS 逻辑节点健康（API §4.3.3，节点 `Inactive`）、ECS 配额口径的进一步复核、DCS / GaussDB 页面的整体改版（本次只做数据正确性与范围标注）。
+- 沙箱无法安装依赖，本次改动未运行 `make check`、pytest 和 vitest；已用离线替身运行匹配引擎、服务层纯逻辑、采集器裁剪、DCS CPU 折算、前端纯函数用例，并通过 ruff、mypy 和 TypeScript 检查。合并前请在 CI 或本地完整跑一遍，尤其是依赖数据库的 `test_collect_scope.py`、迁移 `0019` / `0020` 用例。
+
 ### 2026-11-06：目录收拢、下线 RDS / Kafka / CSS、MRS 作业改走 DataArts
 
 - **单一目录**：资源类型、云服务、内置任务（周期、资源类型、负责的检查项、说明）统一定义在 `services/catalog.py`（`TASK_SPECS`）。采集开关、任务初始化、巡检证据、资源指南、任务说明、`ledger_sync` / `data_cleanup` 代码均由它派生；采集器注册表和台账抓取函数在导入时校验与目录一致，漂移直接启动失败。新增 `tests/test_catalog_consistency.py` 守护。

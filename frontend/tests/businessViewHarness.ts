@@ -13,6 +13,7 @@ import * as dictionary from '../src/utils/dict'
 import * as format from '../src/utils/format'
 import * as reportTitle from '../src/views/reports/report-title'
 import * as podClusterOptions from '../src/views/pods/cluster-options'
+import * as collectScope from '../src/views/system/collect-scope'
 
 interface Node { children: Node[]; parent: Node | null }
 const node = (): Node => ({ children: [], parent: null })
@@ -60,6 +61,7 @@ export function mountBusinessScript<T extends object>(file: string, options: {
     '@/utils/clipboard': { copyText: vi.fn(async () => true) },
     './report-title': reportTitle,
     './cluster-options': podClusterOptions,
+    './collect-scope': collectScope,
     'vue-router': { useRoute: () => route, useRouter: () => ({ replace: vi.fn(async () => undefined), push: vi.fn(async () => undefined) }) },
     ...options.dependencies,
   }

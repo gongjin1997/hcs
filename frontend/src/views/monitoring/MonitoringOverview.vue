@@ -71,7 +71,7 @@ function openLedger(row: MonitoringCoverageRow) {
           <div>巡检 <span :class="row.inspection_enabled ? 'enabled' : 'text-3'">{{ row.inspection_enabled ? '开启' : '关闭' }}</span><span class="text-3"> · 项目 {{ row.enabled_projects }}/{{ row.projects }}</span></div>
         </template></el-table-column>
         <el-table-column label="巡检覆盖" min-width="145"><template #default="{ row }">
-          <b class="num">{{ row.inspected_resources }} / {{ row.eligible_resources }}</b><span class="text-3"> · 资源 {{ row.resources }}</span>
+          <b class="num">{{ row.inspected_resources }} / {{ row.eligible_resources }}</b><span class="text-3"> · 资源 {{ row.resources }}</span><span v-if="row.out_of_scope_resources" class="text-3" title="被采集范围规则排除，不计入覆盖率"> · 范围外 {{ row.out_of_scope_resources }}</span>
           <div v-if="row.partial_resources || row.stale_resources" class="text-3">不完整 {{ row.partial_resources }} · 过期 {{ row.stale_resources }}</div>
         </template></el-table-column>
         <el-table-column label="最近巡检" min-width="155"><template #default="{ row }">{{ fmtTime(row.last_inspected_at) }}</template></el-table-column>

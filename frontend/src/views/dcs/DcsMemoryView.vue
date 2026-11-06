@@ -32,8 +32,9 @@ const { instanceOptions, instancesTotal, instanceKeyword, instancesLoading, inst
   queryHistory, refresh, cancelHistory, exportExcel, cancelExport, setTablePage, setTableSize } = model
 const metric = shallowRef<DcsChartMetric>('memory_usage')
 const metricDefinition = computed(() => history.value?.metrics?.find(item => item.key === metric.value))
+// 没有选择实例时显示当前范围内的全部实例（概览），选择后只看所选实例
 const currentInstances = computed(() => history.value?.series.map(item => item.instance)
-  ?? instanceOptions.value.filter(item => selectedIds.value.includes(item.id)))
+  ?? (selectedIds.value.length ? instanceOptions.value.filter(item => selectedIds.value.includes(item.id)) : instanceOptions.value))
 const presets: { value: DcsRangePreset; label: string }[] = [
   { value: '1d', label: '最近 1 天' }, { value: '2d', label: '最近 2 天' },
   { value: '7d', label: '最近 7 天' }, { value: 'custom', label: '自定义' },
@@ -137,7 +138,7 @@ async function onExport() {
       <el-alert v-if="validationError" :title="validationError" type="warning" show-icon :closable="false" />
     </section>
 
-    <DcsCurrentStatistics :instances="currentInstances" :loading="busy" />
+    <DcsCurrentStatistics :instances="currentInstances" :loading="busy" :selected-ids="selectedIds" @select="id => selectInstances([id])" />
     <el-alert v-if="historyError" :title="historyError" type="error" show-icon :closable="false">
       <el-button link type="primary" :loading="historyLoading" @click="queryHistory">重试查询</el-button>
     </el-alert>

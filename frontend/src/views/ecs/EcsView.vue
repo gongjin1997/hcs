@@ -91,7 +91,7 @@ watch(() => [route.query.instance_id, route.query.tenant_id, app.tenantId, scope
           <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon><el-button link type="primary" @click="refresh">重试</el-button></el-alert>
           <el-table v-loading="loading" :data="rows" row-key="id" stripe>
             <el-table-column label="实例 / IP" min-width="190"><template #default="{ row }">
-              <div class="instance-name"><el-button link type="primary" @click="openTrend(row as EcsInstance)">{{ row.name }}</el-button><el-tag v-if="row.critical" size="small" type="danger" effect="plain">核心</el-tag></div>
+              <div class="instance-name"><el-button link type="primary" @click="openTrend(row as EcsInstance)">{{ row.name }}</el-button><el-tag v-if="row.critical" size="small" type="danger" effect="plain">核心</el-tag><el-tag v-if="row.scope_excluded" size="small" type="info" effect="plain" title="被采集范围规则排除，不再采集指标与巡检">范围外</el-tag></div>
               <div class="text-3 mono">{{ row.ip ?? '—' }}</div>
               <div class="text-3 mono resource-id" :title="row.resource_id">{{ row.resource_id }}</div>
             </template></el-table-column>

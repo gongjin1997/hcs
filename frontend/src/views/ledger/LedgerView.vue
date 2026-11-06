@@ -106,7 +106,8 @@
               <el-table-column label="资源名称" min-width="200" fixed>
                 <template #default="{ row }">
                   <div class="name"><span class="ellipsis">{{ row.name }}</span>
-                    <el-tag v-if="row.critical" size="small" type="danger" effect="plain" class="core">核心</el-tag></div>
+                    <el-tag v-if="row.critical" size="small" type="danger" effect="plain" class="core">核心</el-tag>
+                    <el-tag v-if="row.scope_excluded" size="small" type="info" effect="plain" class="core" title="被采集范围规则排除：台账仍记录，但不再采集、评估和告警">范围外</el-tag></div>
                   <div class="text-3 mono ellipsis">{{ row.resource_id }}</div>
                 </template>
               </el-table-column>

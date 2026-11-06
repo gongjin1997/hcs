@@ -35,11 +35,11 @@ function openRow(value: unknown) {
     <el-alert v-if="listError" :title="listError" type="error" :closable="false" show-icon />
     <div v-if="projectsError" class="filter-error" role="status">{{ projectsError }}<el-button link @click="$emit('retryProjects')">重试</el-button></div>
     <el-table v-loading="listLoading" :data="items" row-key="id">
-      <el-table-column label="实例名称" min-width="230"><template #default="{ row }"><el-button class="instance-name" link type="primary" @click="openRow(row)">{{ row.name }}</el-button><div class="instance-id mono text-3" :title="row.resource_id">{{ row.resource_id }}</div></template></el-table-column>
+      <el-table-column label="实例名称" min-width="230"><template #default="{ row }"><el-button class="instance-name" link type="primary" @click="openRow(row)">{{ row.name }}</el-button><el-tag v-if="row.scope_excluded" size="small" type="info" effect="plain" title="被采集范围规则排除，不再采集">范围外</el-tag><div class="instance-id mono text-3" :title="row.resource_id">{{ row.resource_id }}</div></template></el-table-column>
       <el-table-column v-if="app.multiTenant" label="租户" min-width="120"><template #default="{ row }"><TenantTag :id="row.tenant_id" :name="row.tenant_name" /></template></el-table-column>
       <el-table-column label="项目 / 区域" min-width="160"><template #default="{ row }">{{ row.project_name || '未关联项目' }}<div class="text-3">{{ row.region || '—' }}</div></template></el-table-column>
       <el-table-column label="运行状态" min-width="120"><template #default="{ row }"><el-tag :type="rawStatusType(row.status_raw)" effect="plain" size="small" :title="row.status_raw || undefined">{{ statusText('gaussdb_instance', row.status_raw) }}</el-tag></template></el-table-column>
-      <el-table-column label="巡检状态" min-width="100"><template #default="{ row }"><HealthBadge :value="row.health" /></template></el-table-column>
+      <el-table-column label="巡检状态" min-width="100"><template #default="{ row }"><span v-if="row.scope_excluded" class="text-3">范围外</span><HealthBadge v-else :value="row.health" /></template></el-table-column>
       <el-table-column label="配置" min-width="150"><template #default="{ row }"><span>{{ quantityText(row.vcpus, 'vCPU') }}</span><div class="text-3">{{ quantityText(row.memory_size, row.memory_unit) }}</div></template></el-table-column>
       <el-table-column label="台账更新" min-width="145"><template #default="{ row }"><span :title="fmtTime(row.snapshot_at, 'YYYY-MM-DD HH:mm:ss')">{{ fmtTime(row.snapshot_at, 'MM-DD HH:mm:ss') }}</span></template></el-table-column>
       <el-table-column label="操作" width="90" fixed="right"><template #default="{ row }"><el-button link type="primary" @click="openRow(row)">查看</el-button></template></el-table-column>

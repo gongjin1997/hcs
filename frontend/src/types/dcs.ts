@@ -21,6 +21,9 @@ export interface DcsInstance {
   max_memory_mb: number | null
   snapshot_at: string | null
   used_cpu_seconds?: number | null
+  /** 由两次累计 CPU 秒折算的每主节点占用 %；折算不了时为空 */
+  cpu_usage?: number | null
+  scope_excluded?: boolean
   input_kbps?: number | null
   output_kbps?: number | null
   keys?: number | null

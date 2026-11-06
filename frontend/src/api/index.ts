@@ -1,8 +1,8 @@
 import type {
-  Alarm, AlarmDetail, AlarmStats, AuditLog, ChangeType, CollectSwitches, Contact, ContactIn, DryRunResult, GroupIn, ImportResult,
+  Alarm, AlarmDetail, AlarmStats, AuditLog, ChangeType, CollectScopes, CollectSwitches, Contact, ContactIn, DryRunResult, GroupIn, ImportResult,
   LedgerDict, LedgerDictSetting, LedgerSummary, NotificationRow, Page, PermissionGroup, PlatformStatus, PodEvent, PodEventOptions,
   PodEventStats, PodTimeline, Probe, ProbeIn, ReportBrief, ReportDetail, ReportKind, Resource, ResourceChange, ResourceDetail,
-  ResourceMeta, ResourcePatch, Role, RouteIn, Rule, SettingItem, Silence, SilenceIn, SilenceMatchers, SilencePreview, SilenceStatus,
+  ResourceMeta, ResourcePatch, Role, RouteIn, Rule, ScopeCandidate, ScopePreview, ScopeRule, ScopeSaveResult, SettingItem, Silence, SilenceIn, SilenceMatchers, SilencePreview, SilenceStatus,
   SimulateResult, SmtpInfo, Summary, SwitchImpact, SwitchItem, SystemInfo, SystemSettings, Tenant, TenantCheckResult, TenantIn,
   ClassificationConfig, UserAdmin, UserCreate, UserImportResult, UserInfo, UserOption, UserPatch,
 } from '@/types'
@@ -197,6 +197,15 @@ export const switchImpact = (items: SwitchItem[]) => post<SwitchImpact>('/system
 export const saveCollectSwitches = (items: SwitchItem[]) =>
   put<{ changed: { tenant_id: number; resource_type: string; name: string; old: boolean | null; new: boolean | null }[]; closed_alarms: number }>(
     '/system/collect-switches', { items })
+
+// ---- 采集范围：tenantId 0 = 全局默认；rules 为 null = 租户跟随全局 ----
+export const getCollectScopes = () => get<CollectScopes>('/system/collect-scopes')
+export const previewCollectScope = (tenantId: number, resourceType: string, rules: ScopeRule[] | null) =>
+  post<ScopePreview>(`/system/collect-scopes/${tenantId}/${resourceType}/preview`, { rules })
+export const saveCollectScope = (tenantId: number, resourceType: string, rules: ScopeRule[] | null) =>
+  put<ScopeSaveResult>(`/system/collect-scopes/${tenantId}/${resourceType}`, { rules })
+export const collectScopeCandidates = (tenantId: number, resourceType: string, dim: string, keyword = '', limit = 50) =>
+  get<ScopeCandidate[]>(`/system/collect-scopes/${tenantId}/${resourceType}/candidates`, { dim, keyword: keyword || undefined, limit })
 
 // ---- 系统设置 / 平台状态 ----
 export const getSettings = () => get<SystemSettings>('/system/settings')

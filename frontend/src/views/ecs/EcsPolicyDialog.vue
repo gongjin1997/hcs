@@ -93,7 +93,7 @@ function configureMapping() { prometheusJson.value = JSON.stringify({ queries: {
             <div v-if="!policy.selection.resource_ids.length" class="text-3">未选择实例，指标和巡检不处理任何实例。</div>
             <div v-if="optionsError" class="text-danger">{{ optionsError }} <el-button link @click="loadInstances()">重试</el-button></div>
           </el-form-item>
-          <div class="scope-note text-3">实例范围用于指标和巡检；台账同步和项目配额独立执行。台账中“未纳入巡检”的实例仍会被排除。</div>
+          <div class="scope-note text-3">实例范围用于指标和巡检；台账同步和项目配额独立执行。台账中“未纳入巡检”的实例仍会被排除。按名称 / 资源 ID 通配、业务系统、环境、负责人等更细的条件，请到“系统管理 → 采集开关”里设置“采集范围”；两处同时设置时取交集。</div>
           <el-divider content-position="left">指标来源映射</el-divider>
           <el-alert v-if="!mappingDraft" title="未填写自定义查询时使用内置 Prometheus 查询；未配置数据源时显示“无数据”。" type="info" :closable="false" />
           <div class="mapping-help text-3">AOM 已停用，旧映射不再使用；保存策略时清除旧映射。</div>

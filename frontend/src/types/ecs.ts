@@ -26,6 +26,7 @@ export interface EcsInstance {
   health: string
   critical: boolean
   monitored: boolean
+  scope_excluded?: boolean
   included: boolean
   metrics_enabled: boolean
   inspection_enabled: boolean

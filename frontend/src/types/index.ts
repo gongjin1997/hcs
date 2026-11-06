@@ -101,7 +101,7 @@ export interface Resource {
   vcpus: number | null; memory_gb: number | null; storage_gb: number | null; created_time: string | null
   labels: Record<string, string>; attrs: Record<string, any>; metrics: Record<string, any>
   expected_state: Record<string, any>; owner: string | null; owner_user_id: number | null; business: string | null; env_type: string | null
-  remark: string | null; monitored: boolean; critical: boolean; lifecycle: 'ACTIVE' | 'DELETED'
+  remark: string | null; monitored: boolean; scope_excluded?: boolean; critical: boolean; lifecycle: 'ACTIVE' | 'DELETED'
   first_seen: string; last_seen: string; deleted_at: string | null; status_since: string | null; active_alarms: number
 }
 export type ResourcePatch = Partial<Pick<Resource, 'owner_user_id' | 'business' | 'env_type' | 'remark' | 'critical' | 'monitored' | 'expected_state'>>
@@ -326,6 +326,36 @@ export interface CollectSwitches {
 /** tenant_id = 0 表示全局默认；租户 enabled = null 表示跟随全局 */
 export interface SwitchItem { resource_type: string; tenant_id: number; enabled: boolean | null }
 export interface SwitchImpact { stop: string[]; start: string[]; active_alarms: number }
+
+// ---- 采集范围（采集开关之下，细化到命名空间 / 实例 / 工作空间下的作业）----
+export type ScopeEffect = 'include' | 'exclude'
+/** match：维度 → 值列表（精确值或含 * ? 的通配，区分大小写）。同一规则内各维度取“且”，同一维度内取“或”。 */
+export interface ScopeRule { effect: ScopeEffect; match: Record<string, string[]>; note?: string }
+export interface ScopeDimension { key: string; label: string }
+export type ScopeSource = 'tenant' | 'global' | 'none'
+export interface ScopeCell {
+  /** 租户自己保存的规则；null = 跟随全局 */
+  setting: ScopeRule[] | null; source: ScopeSource; rules: ScopeRule[]; resources: number; excluded: number
+  updated_by: string | null; updated_at: string | null
+}
+export interface ScopeType {
+  code: string; name: string; service: string; category: string; dimensions: ScopeDimension[]
+  global: { rules: ScopeRule[]; updated_by: string | null; updated_at: string | null }
+  tenants: Record<string, ScopeCell>
+}
+export interface CollectScopes {
+  types: ScopeType[]; tenants: SwitchTenant[]; global_editable: boolean
+  limits: { rules: number; patterns: number; pattern_length: number }
+}
+export interface ScopePreview {
+  total: number; included: number; excluded: number; newly_excluded: number; newly_included: number
+  closing_alarms: number; truncated: boolean; samples: { excluded: string[]; included: string[] }; rules: ScopeRule[]
+}
+export interface ScopeSaveResult {
+  changed: boolean; before: ScopeRule[] | null; after: ScopeRule[] | null
+  excluded: number; restored: number; closed_alarms: number
+}
+export interface ScopeCandidate { value: string; count: number }
 
 // ---- 系统设置 ----
 export interface SettingField { key: string; label: string; default: unknown; ge?: number; le?: number }
