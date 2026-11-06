@@ -1,7 +1,7 @@
 import { vi } from 'vitest'
 import { effectScope, markRaw, reactive } from 'vue'
 import * as Vue from 'vue'
-import type { GaussApi, GaussDirectoryApi, GaussInstance, GaussMetricSeries, GaussNativeRows, GaussOverviewOut } from '../src/types/gaussdb'
+import type { GaussApi, GaussDirectoryApi, GaussInstance, GaussMetricSeries, GaussNativeRows, GaussOverviewOut, GaussSummary } from '../src/types/gaussdb'
 import { useGaussPanel } from '../src/views/gaussdb/useGaussPanel'
 import { useGaussDiskHistory } from '../src/views/gaussdb/useGaussDiskHistory'
 import * as gaussUtils from '../src/views/gaussdb/gauss-utils'
@@ -12,6 +12,10 @@ export const gaussInstance = (id = 11, tenantId = 7): GaussInstance => ({
   id, resource_id: `db-${id}`, name: `数据库 ${id}`, tenant_id: tenantId, tenant_name: `租户 ${tenantId}`,
   project_ref: 107, project_name: '项目甲', region: 'region-test', status_raw: 'ACTIVE', health: 'OK',
   vcpus: 8, memory_size: 32, memory_unit: null, storage_size: 100, storage_unit: 'GB', snapshot_at: '2026-11-02T01:00:00Z',
+})
+export const gaussSummary = (patch: Partial<GaussSummary> = {}): GaussSummary => ({
+  total: 2, abnormal: 0, transitional: 0, stopped: 0, normal: 2, scope_excluded: 0, disk_high: 0, components_down: 0,
+  active_alarms: 0, last_collected_at: '2026-11-02T01:59:00Z', ...patch,
 })
 export const gaussRows = (patch: Partial<GaussNativeRows> = {}): GaussNativeRows => ({
   source: 'GAUSSDB', status: 'AVAILABLE', queried_at: '2026-11-02T02:00:00Z', items: [], total: null,
@@ -52,6 +56,7 @@ export const gaussMetric = (metric: GaussMetricSeries['metric'] = 'cpu'): GaussM
 export function createGaussApi() {
   return {
     instances: vi.fn<GaussApi['instances']>(async (query, context) => ({ items: [gaussInstance(11, context.tenantId ?? 7), gaussInstance(12, context.tenantId ?? 7)], total: 2, page: query.page, page_size: query.page_size })),
+    summary: vi.fn<GaussApi['summary']>(async () => gaussSummary()),
     overview: vi.fn<GaussApi['overview']>(async (id, context) => gaussOverview(id, context.tenantId ?? 7)),
     slowNodes: vi.fn<GaussApi['slowNodes']>(async () => gaussRows({ items: [{ node_id: 'node-1', node_name: '节点甲', role: 'master', component_type: 'CN' }] })),
     slowSql: vi.fn<GaussApi['slowSql']>(async () => gaussRows({ items: [{ sql_id: 'sql-1', sql_text: 'select 1', avg_exec_time: '5000000' }] })),

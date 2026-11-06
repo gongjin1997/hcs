@@ -26,12 +26,31 @@ describe('GaussDB 工作区与查询子组件', () => {
     expect(textOf(view.root)).toContain('数据库 11'); expect(textOf(view.root)).toContain('8 vCPU')
     expect(textOf(view.root)).toContain('32 （单位未确认）')
     expect(textOf(view.root)).toContain('cn-1'); expect(textOf(view.root)).toContain('dn-2')
-    expect(allNodes(view.root).filter(node => node.tag === 'TabPane').map(node => node.props.name)).toEqual(['overview', 'disk', 'performance', 'slow-sql', 'sessions'])
+    expect(allNodes(view.root).filter(node => node.tag === 'TabPane').map(node => node.props.name)).toEqual(['overview', 'performance', 'slow-sql', 'sessions'])
     await clickButton(view.root, '实例列表'); expect(view.onBack).toHaveBeenCalledOnce()
     await clickButton(view.root, '查看会话'); expect(view.onPanel).toHaveBeenCalledWith('sessions')
     expect(view.api.sessions).not.toHaveBeenCalled()
     await clickButton(view.root, '导出 Excel')
     expect(view.api.export).toHaveBeenCalledExactlyOnceWith(11, { panel: 'overview' }, expect.objectContaining({ tenantId: 7 }))
+  })
+  it('概览先展示最近一次巡检采集的磁盘与组件，宕机组件高亮，不发在线请求', async () => {
+    const state = createGaussModel(); dispose.push(state.stop); await settlePersonnel()
+    const local = { ...gaussInstance(), disk_state: 'AVAILABLE' as const, disk_usage: 91.5, disk_used_gb: 91.5, disk_total_gb: 100,
+      disk_observed_at: '2026-11-02T01:58:00Z', disk_freshness: 'FRESH' as const, active_alarms: 2,
+      components: { state: 'AVAILABLE' as const, observed_at: '2026-11-02T01:58:00Z', freshness: 'FRESH' as const, total: 2, down: 1, unknown: 0, by_type: { DN: 2 }, warning: null },
+      component_items: [
+        { node_id: 'node-1', node_name: 'dn-1', component_id: 'dn_6001', component_type: 'DN', role: 'master', status: 'Primary' },
+        { node_id: 'node-2', node_name: 'dn-2', component_id: 'dn_6002', component_type: 'DN', role: 'slave', status: 'Down' },
+      ] }
+    expect(await state.model.openInstance(11, async () => local)).toBe(true)
+    const view = mount('GaussWorkspace.vue', { props: { model: state.model, canRun: true }, dependencies: state.dependencies })
+    await settlePersonnel()
+    const text = textOf(view.root)
+    expect(text).toContain('91.5%'); expect(text).toContain('1 个组件宕机'); expect(text).toContain('dn_6002'); expect(text).toContain('宕机')
+    expect(text).toContain('最近一次巡检采集的结果')
+    expect(findNode(view.root, 'Table', node => Array.isArray(node.props.data) && node.props.data.length === 2)).toBeTruthy()
+    expect(gaussButtons(view.root)).toContain('查询实例数据')
+    for (const key of ['overview', 'slowNodes', 'slowSql', 'sessions', 'inspections'] as const) expect(state.api[key]).not.toHaveBeenCalled()
   })
   it('viewer 概要说明在线查询权限，所有标签只发 panel 事件', async () => {
     const view = await setup('GaussWorkspace.vue', ['ledger:view'])

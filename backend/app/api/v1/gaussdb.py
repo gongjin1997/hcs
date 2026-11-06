@@ -17,6 +17,7 @@ from app.schemas.gaussdb import (
     GaussNativeRows,
     GaussOverviewOut,
     GaussProjectOption,
+    GaussSummaryOut,
 )
 from app.services import gaussdb_monitoring as service
 from app.services.gaussdb_history import disk_history
@@ -31,12 +32,22 @@ def slow_query(start_at: datetime = Query(), end_at: datetime = Query(),
     return service.SlowQuery.create(start_at, end_at, node_ids, threshold, sql_id)
 
 
-@router.get("/instances", response_model=ApiResponse[GaussInstancesOut], summary="GaussDB 实例列表（本地台账）")
+@router.get("/instances", response_model=ApiResponse[GaussInstancesOut],
+            summary="GaussDB 实例列表（本地台账与最近一次巡检；异常在前）")
 def instances(keyword: str | None = Query(None, max_length=200), tenant_id: int | None = Query(None, ge=1),
-              project_ref: int | None = Query(None, ge=1), page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=100),
+              project_ref: int | None = Query(None, ge=1),
+              status_group: Literal["abnormal", "transitional", "stopped", "normal"] | None = Query(None),
+              page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=100),
               db: Session = Depends(get_db), scope: Scope = Depends(get_scope)):
     return ok(service.list_instances(db, scope, keyword=keyword, tenant_id=tenant_id, project_ref=project_ref,
-                                      page=page, page_size=page_size))
+                                      status_group=status_group, page=page, page_size=page_size))
+
+
+@router.get("/summary", response_model=ApiResponse[GaussSummaryOut],
+            summary="GaussDB 概况：状态分组、磁盘高水位、组件宕机（本地）")
+def instances_summary(tenant_id: int | None = Query(None, ge=1), project_ref: int | None = Query(None, ge=1),
+                      db: Session = Depends(get_db), scope: Scope = Depends(get_scope)):
+    return ok(service.summary(db, scope, tenant_id=tenant_id, project_ref=project_ref))
 
 
 @router.get("/projects", response_model=ApiResponse[list[GaussProjectOption]], summary="GaussDB 可见台账项目选项（不请求云）")

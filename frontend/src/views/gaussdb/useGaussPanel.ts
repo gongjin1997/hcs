@@ -1,7 +1,7 @@
 import { computed, onScopeDispose, reactive, shallowRef, watch } from 'vue'
 import type {
   GaussApi, GaussDirectoryApi, GaussExportQuery, GaussInstance, GaussNativeRow, GaussNativeRows, GaussOverviewOut,
-  GaussPanel, GaussRequestContext, GaussSessionsQuery, GaussSlowQuery,
+  GaussPanel, GaussRequestContext, GaussSessionsQuery, GaussSlowQuery, GaussStatusGroup, GaussSummary,
 } from '../../types/gaussdb'
 import { errorText, GAUSS_PANELS, rangeQuery } from './gauss-utils'
 
@@ -18,11 +18,15 @@ export function useGaussPanel(options: {
   const total = shallowRef(0)
   const page = shallowRef(1)
   const pageSize = shallowRef(20)
-  const listFilters = reactive({ keyword: '', project_ref: null as number | null })
+  // 输入框里的是草稿，点击“查询”（或切换状态分组）后才生效；翻页沿用已生效的条件，改输入不会清空表格
+  const listFilters = reactive({ keyword: '', project_ref: null as number | null, status_group: null as GaussStatusGroup | null })
+  let appliedFilters = { keyword: '', project_ref: null as number | null, status_group: null as GaussStatusGroup | null }
   const listLoading = shallowRef(false)
   const listError = shallowRef('')
+  const summary = shallowRef<GaussSummary | null>(null)
+  const summaryError = shallowRef('')
   const selected = shallowRef<GaussInstance | null>(null)
-  const panel = shallowRef<GaussPanel>('disk')
+  const panel = shallowRef<GaussPanel>('overview')
   const overview = shallowRef<GaussOverviewOut | null>(null)
   const slowNodes = shallowRef<GaussNativeRows | null>(null)
   const rows = shallowRef<GaussNativeRows | null>(null)
@@ -74,6 +78,7 @@ export function useGaussPanel(options: {
   function clearList() {
     listController?.abort(); listController = null
     listLoading.value = false; listError.value = ''; items.value = []; total.value = 0
+    summary.value = null; summaryError.value = ''
     clearSelection()
   }
   function resetForms() {
@@ -91,14 +96,16 @@ export function useGaussPanel(options: {
     listController = controller
     const scope = context(controller)
     listLoading.value = true
+    const filters = { ...appliedFilters }
+    void loadSummary(controller, scope, filters.project_ref)
     try {
       const result = await options.api.instances({
-        keyword: listFilters.keyword.trim() || undefined, project_ref: listFilters.project_ref ?? undefined,
-        page: page.value, page_size: pageSize.value,
+        keyword: filters.keyword.trim() || undefined, project_ref: filters.project_ref ?? undefined,
+        status_group: filters.status_group ?? undefined, page: page.value, page_size: pageSize.value,
       }, scope)
       if (disposed || controller.signal.aborted || listController !== controller || scope.tenantId !== options.tenantId() || !options.canView()) return
       if (result.items.some(item => (scope.tenantId !== null && item.tenant_id !== scope.tenantId)
-        || (listFilters.project_ref !== null && item.project_ref !== listFilters.project_ref))) throw new Error('实例列表范围不匹配，请重试')
+        || (filters.project_ref !== null && item.project_ref !== filters.project_ref))) throw new Error('实例列表范围不匹配，请重试')
       items.value = result.items; total.value = result.total
     } catch (cause) {
       if (!disposed && listController === controller && !controller.signal.aborted) listError.value = errorText(cause, '实例列表查询失败')
@@ -106,7 +113,22 @@ export function useGaussPanel(options: {
       if (!disposed && listController === controller) listLoading.value = false
     }
   }
-  function search() { page.value = 1; return loadInstances() }
+  /** 概况卡片与列表同一范围（租户、项目），不随关键字和分组变化；失败不影响列表。 */
+  async function loadSummary(controller: AbortController, scope: GaussRequestContext, projectRef: number | null) {
+    try {
+      const result = await options.api.summary({ project_ref: projectRef ?? undefined }, scope)
+      if (!disposed && listController === controller && !controller.signal.aborted && scope.tenantId === options.tenantId()) summary.value = result
+    } catch (cause) {
+      if (!disposed && listController === controller && !controller.signal.aborted) summaryError.value = errorText(cause, '概况统计加载失败')
+    }
+  }
+  function search() {
+    appliedFilters = { keyword: listFilters.keyword, project_ref: listFilters.project_ref, status_group: listFilters.status_group }
+    page.value = 1; return loadInstances()
+  }
+  function setStatusGroup(value: GaussStatusGroup | null) {
+    listFilters.status_group = value; return search()
+  }
   function changePage(value: number) {
     if (!Number.isSafeInteger(value) || value < 1 || disposed) return
     page.value = value; return loadInstances()
@@ -176,7 +198,7 @@ export function useGaussPanel(options: {
         || result.instance.resource_id !== instance.resource_id) throw new Error('实例诊断范围不匹配，请重试')
       overview.value = result
       if (!components.value.some(item => componentKey(item.node_id, item.component_id) === sessionFilters.componentKey)) sessionFilters.componentKey = ''
-      if (panel.value === 'disk' || panel.value === 'overview') applied.value = { panel: 'overview' }
+      if (panel.value === 'overview') applied.value = { panel: 'overview' }
     })
   }
   async function loadSlowNodes() {
@@ -203,7 +225,7 @@ export function useGaussPanel(options: {
   }
   async function queryPanel() {
     if (!canQuery.value) return false
-    if (panel.value === 'disk' || panel.value === 'overview') return queryOverview()
+    if (panel.value === 'overview') return queryOverview()
     invalidateResults()
     try {
       if (panel.value === 'slow-sql') {
@@ -292,9 +314,9 @@ export function useGaussPanel(options: {
     if (offset > 1000) { error.value = '巡检偏移量最多 1000，请缩小时间范围'; return }
     inspectionFilters.offset = offset
   }
-  const refresh = () => selected.value && options.canRun() ? queryPanel() : loadInstances()
+  /** 只重跑已经查过的在线结果；没有查过的标签不因刷新自动请求 HCS。 */
+  const refresh = () => selected.value ? (options.canRun() && applied.value ? queryPanel() : Promise.resolve(false)) : loadInstances()
 
-  watch(listFilters, () => { page.value = 1; clearList() }, { flush: 'sync' })
   const invalidatePanel = (key: GaussPanel) => { panelResults.delete(key); if (panel.value === key) invalidateResults() }
   watch([slowFilters, slowRange], () => invalidatePanel('slow-sql'), { deep: true, flush: 'sync' })
   watch(sessionFilters, () => invalidatePanel('sessions'), { deep: true, flush: 'sync' })
@@ -307,7 +329,7 @@ export function useGaussPanel(options: {
       rows.value = cached.rows; applied.value = cached.applied; detail.value = cached.detail
       inspectionRecord.value = cached.record; detailTitle.value = cached.detailTitle; slowDetailQuery.value = cached.slowQuery
     }
-    if ((current === 'overview' || current === 'disk') && overview.value) applied.value = { panel: 'overview' }
+    if (current === 'overview' && overview.value) applied.value = { panel: 'overview' }
   }, { flush: 'sync' })
   watch(() => [options.canView(), options.canRun(), options.canExport()] as const, ([view, run, exp]) => {
     if (!view) clearList()
@@ -315,14 +337,15 @@ export function useGaussPanel(options: {
     if (!exp) cancelExport()
   }, { flush: 'sync' })
   watch([options.tenantId, () => options.scopeKey?.()], () => {
-    clearList(); resetForms(); listFilters.keyword = ''; listFilters.project_ref = null; page.value = 1
+    clearList(); resetForms(); Object.assign(listFilters, { keyword: '', project_ref: null, status_group: null }); page.value = 1
+    appliedFilters = { keyword: '', project_ref: null, status_group: null }
     void loadInstances()
   }, { immediate: true, flush: 'sync' })
   onScopeDispose(() => { disposed = true; clearList() })
-  return { items, total, page, pageSize, listFilters, listLoading, listError, selected, panel, panelTitle, overview, components,
+  return { items, total, page, pageSize, listFilters, listLoading, listError, summary, summaryError, selected, panel, panelTitle, overview, components,
     slowNodes, rows, detail, detailTitle, inspectionRecord, error, exportError, loading, loadingKind, exporting, applied, canQuery, canExport, canExportDetail, canExportSlowDetail,
     slowFilters, sessionFilters, inspectionFilters, slowRange, inspectionRange, componentKey,
-    loadInstances, search, changePage, changePageSize, selectInstance, openInstance, clearSelection, setPanel, queryOverview, loadSlowNodes, queryPanel, cancelQuery,
+    loadInstances, search, setStatusGroup, changePage, changePageSize, selectInstance, openInstance, clearSelection, setPanel, queryOverview, loadSlowNodes, queryPanel, cancelQuery,
     showDetail, closeDetail, exportExcel, exportInspectionDetail, exportSlowDetail, cancelExport, setRange, setInspectionPage, refresh }
 }
 

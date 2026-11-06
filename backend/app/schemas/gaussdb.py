@@ -7,6 +7,39 @@ from pydantic import BaseModel, Field
 NativeStatus = Literal["AVAILABLE", "NO_DATA", "PARTIAL", "UNAVAILABLE", "ERROR", "DISABLED", "UNSUPPORTED"]
 
 
+StatusGroup = Literal["abnormal", "transitional", "stopped", "normal"]
+Freshness = Literal["FRESH", "STALE", "NO_DATA"]
+
+
+class GaussComponent(BaseModel):
+    node_id: str
+    node_name: str | None = None
+    availability_zone_id: str | None = None
+    component_id: str
+    component_type: str
+    role: str | None = None
+    status: str | None = None
+    distributed_id: str | None = Field(default=None, description="DN 分组（分片）ID；其他组件为空")
+
+
+class GaussComponentSummary(BaseModel):
+    """最近一次巡检采集的组件汇总（本地，不请求云）。"""
+    state: Literal["AVAILABLE", "NO_DATA", "STALE", "ERROR"]
+    observed_at: datetime | None = Field(default=None, description="本地收到组件响应的时间")
+    freshness: Freshness = "NO_DATA"
+    total: int | None = None
+    down: int | None = None
+    unknown: int | None = None
+    by_type: dict[str, int] = Field(default_factory=dict)
+    warning: str | None = None
+
+
+class GaussNode(BaseModel):
+    name: str | None = None
+    role: str | None = None
+    status: str | None = None
+
+
 class GaussInstance(BaseModel):
     id: int
     resource_id: str
@@ -25,6 +58,37 @@ class GaussInstance(BaseModel):
     storage_size: float | None = None
     storage_unit: str | None = None
     snapshot_at: datetime | None = None
+    # 以下均来自本地巡检记录，列表与详情一致；不触发云请求
+    status_group: StatusGroup = "normal"
+    status_since: datetime | None = None
+    deploy_type: str | None = None
+    version: str | None = None
+    disk_usage: float | None = None
+    disk_used_gb: float | None = None
+    disk_total_gb: float | None = None
+    disk_state: Literal["AVAILABLE", "PARTIAL", "ERROR", "UNAVAILABLE"] | None = None
+    disk_observed_at: datetime | None = Field(default=None, description="本地收到 volume-usage 响应的时间")
+    disk_freshness: Freshness = "NO_DATA"
+    node_count: int | None = None
+    components: GaussComponentSummary | None = None
+    active_alarms: int = 0
+    # 只在单实例详情返回
+    nodes: list[GaussNode] | None = None
+    component_items: list[GaussComponent] | None = None
+
+
+class GaussSummaryOut(BaseModel):
+    """当前可见范围的 GaussDB 概况（本地数据）。"""
+    total: int = 0
+    abnormal: int = 0
+    transitional: int = 0
+    stopped: int = 0
+    normal: int = 0
+    scope_excluded: int = 0
+    disk_high: int = Field(0, description="最近一次采集磁盘使用率 ≥ 85% 的实例数（只计未过期的采集）")
+    components_down: int = Field(0, description="最近一次采集有组件宕机的实例数")
+    active_alarms: int = 0
+    last_collected_at: datetime | None = None
 
 
 class GaussInstancesOut(BaseModel):
@@ -40,17 +104,6 @@ class GaussProjectOption(BaseModel):
     tenant_id: int
     tenant_name: str
     region: str | None = None
-
-
-class GaussComponent(BaseModel):
-    node_id: str
-    node_name: str | None = None
-    availability_zone_id: str | None = None
-    component_id: str
-    component_type: str
-    role: str | None = None
-    status: str | None = None
-    distributed_id: str | None = Field(default=None, description="DN 分组（分片）ID；其他组件为空")
 
 
 class GaussDisk(BaseModel):

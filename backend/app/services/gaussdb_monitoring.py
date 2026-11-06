@@ -13,9 +13,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, case, func, not_, or_, select
 from sqlalchemy.orm import Session
 
+from app.collectors.gaussdb import NATIVE_STATES
 from app.core.config import get_settings
 from app.core.deps import Scope
 from app.core.response import BizError, ErrorCode, not_found
@@ -25,21 +26,25 @@ from app.hcs.gaussdb_native import components as native_components
 from app.hcs.gaussdb_native import identifier, instance_path, volume_usage
 from app.hcs.query_cache import QueryCache
 from app.hcs.ratelimit import request_budget
-from app.metrics.dcs_samples import finite_number
-from app.models import HcsAccount, HcsProject, Resource
+from app.metrics.dcs_samples import finite_number, parse_observed_at
+from app.models import AlarmEvent, HcsAccount, HcsProject, Resource
+from app.models.alarm import ACTIVE_STATUSES
 from app.models.base import utcnow
 from app.schemas.gaussdb import (
     GaussComponent,
+    GaussComponentSummary,
     GaussDisk,
     GaussInstance,
     GaussInstancesOut,
     GaussNativeRows,
+    GaussNode,
     GaussOverviewOut,
     GaussProjectOption,
+    GaussSummaryOut,
 )
 from app.services import settings_service
 from app.services.gaussdb_reports import normalize_metric_series
-from app.services.inspection_health import current_health
+from app.services.inspection_health import ALARM_HEALTH, current_health
 
 _cache = QueryCache()
 MAX_ROWS = 5000
@@ -131,11 +136,126 @@ def _target(db: Session, scope: Scope, resource_ref: int) -> Target:
     return target
 
 
-def instance_out(target: Target) -> GaussInstance:
+# 列表分组：先看告警（规则判定的结果），再看实例状态。状态枚举来自 GaussDB API（见 collectors/gaussdb.NATIVE_STATES）
+KNOWN_STATES = NATIVE_STATES | {"FROZEN"}
+ABNORMAL_STATES = ("FAILED", "STORAGE FULL", "FROZEN", "BUILD_FAILED")
+TRANSITIONAL_STATES = ("BUILD", "MODIFYING", "EXPANDING", "REBOOTING", "UPGRADING", "RESTORING", "SWITCHOVER",
+                       "MIGRATING", "BACKING UP", "REBALANCING", "UPGRADE TO BE OBSERVED", "MODIFYING DATABASE PORT",
+                       "REPAIRING")
+DISK_HIGH_PERCENT = 85
+COMPONENT_STATES = ("AVAILABLE", "NO_DATA", "STALE", "ERROR")
+DISK_STATES = ("AVAILABLE", "PARTIAL", "ERROR", "UNAVAILABLE")
+
+
+def status_group(health: str | None, status: str | None) -> str:
+    """异常：有活动告警、故障 / 磁盘满 / 冻结 / 创建失败，或状态未识别；变更中；已停止；正常。"""
+    if health in ALARM_HEALTH or status in ABNORMAL_STATES or status not in KNOWN_STATES:
+        return "abnormal"
+    if status in TRANSITIONAL_STATES:
+        return "transitional"
+    return "stopped" if status == "SHUTDOWN" else "normal"
+
+
+def _abnormal_clause():
+    return or_(Resource.health.in_(tuple(ALARM_HEALTH)), Resource.status_raw.is_(None),
+               Resource.status_raw.in_(ABNORMAL_STATES), Resource.status_raw.not_in(tuple(KNOWN_STATES)))
+
+
+def _group_clause(group: str):
+    abnormal = _abnormal_clause()
+    if group == "abnormal":
+        return abnormal
+    if group == "transitional":
+        return and_(not_(abnormal), Resource.status_raw.in_(TRANSITIONAL_STATES))
+    if group == "stopped":
+        return and_(not_(abnormal), Resource.status_raw == "SHUTDOWN")
+    return and_(not_(abnormal), Resource.status_raw == "ACTIVE")
+
+
+def _stale_after(attrs: dict) -> int:
+    """巡检有效期按任务周期计算（inspection_monitoring），没有时用采集器写入的磁盘有效期。"""
+    for key in ("inspection_monitoring", "gaussdb_monitoring"):
+        meta = attrs.get(key)
+        value = meta.get("stale_after_sec") if isinstance(meta, dict) else None
+        if type(value) is int and value >= 60:
+            return value
+    return 900
+
+
+def _freshness(observed: datetime | None, stale_after: int, now: datetime) -> Literal["FRESH", "STALE", "NO_DATA"]:
+    if observed is None or (now - observed).total_seconds() < -30:
+        return "NO_DATA"
+    return "FRESH" if (now - observed).total_seconds() <= stale_after else "STALE"
+
+
+def _count(value: object) -> int | None:
+    return value if type(value) is int and value >= 0 else None
+
+
+def _local_health(row: Resource, now: datetime) -> dict[str, Any]:
+    """本地巡检记录里的磁盘与组件：只采信有来源与接收时间的结果，过期如实标注，不拿台账配置量充当用量。"""
+    attrs, metrics = row.attrs or {}, row.metrics or {}
+    stale_after = _stale_after(attrs)
+    raw_meta = attrs.get("gaussdb_monitoring")
+    meta: dict = raw_meta if isinstance(raw_meta, dict) else {}
+    disk_state = meta.get("status") if meta.get("status") in DISK_STATES else None
+    measured = disk_state in ("AVAILABLE", "PARTIAL")
+    disk_at = parse_observed_at(meta.get("observed_at")) if measured else None
+    disk: dict[str, Any] = {key: finite_number(metrics.get(key)) if measured and disk_at else None
+                            for key in ("disk_usage", "disk_used_gb", "disk_total_gb")}
+    raw = attrs.get("gaussdb_components")
+    components = None
+    if isinstance(raw, dict) and raw.get("state") in COMPONENT_STATES:
+        observed = parse_observed_at(raw.get("observed_at"))
+        freshness = _freshness(observed, stale_after, now)
+        raw_types = raw.get("by_type")
+        by_type: dict = raw_types if isinstance(raw_types, dict) else {}
+        components = GaussComponentSummary(
+            state=raw["state"], observed_at=observed, freshness="STALE" if raw["state"] == "STALE" and observed else freshness,
+            total=_count(raw.get("total")), down=_count(raw.get("down")), unknown=_count(raw.get("unknown")),
+            by_type={str(k): v for k, v in by_type.items() if _count(v) is not None},
+            warning=raw.get("warning") if isinstance(raw.get("warning"), str) else None)
+    nodes = attrs.get("nodes")
+    return {**disk, "disk_state": disk_state, "disk_observed_at": disk_at,
+            "disk_freshness": _freshness(disk_at, stale_after, now), "components": components,
+            "node_count": len(nodes) if isinstance(nodes, list) else None}
+
+
+def _alarm_counts(db: Session, rows: Sequence[Resource]) -> dict[int, int]:
+    ids = [row.id for row in rows]
+    if not ids:
+        return {}
+    counts: dict[int, int] = {}
+    for start in range(0, len(ids), 500):
+        counts.update(db.execute(
+            select(AlarmEvent.resource_ref, func.count()).join(
+                Resource, (Resource.id == AlarmEvent.resource_ref)
+                & AlarmEvent.tenant_id.is_not_distinct_from(Resource.tenant_id))
+            .where(AlarmEvent.resource_ref.in_(ids[start:start + 500]), AlarmEvent.status.in_(ACTIVE_STATUSES))
+            .group_by(AlarmEvent.resource_ref)).all())
+    return counts
+
+
+def instance_out(target: Target, *, alarms: int = 0, detail: bool = False, now: datetime | None = None) -> GaussInstance:
     row, tenant, project = target.resource, target.tenant, target.project
     attrs = row.attrs or {}
     if project and project.account_id != row.tenant_id:
         project = None
+    extra: dict[str, Any] = {}
+    if detail:
+        raw_nodes = attrs.get("nodes")
+        nodes: list = raw_nodes if isinstance(raw_nodes, list) else []
+        extra["nodes"] = [GaussNode(**{key: node.get(key) if isinstance(node.get(key), str) else None
+                                       for key in ("name", "role", "status")}) for node in nodes if isinstance(node, dict)]
+        raw = attrs.get("gaussdb_components")
+        raw_items = raw.get("items") if isinstance(raw, dict) else None
+        items: list = raw_items if isinstance(raw_items, list) else []
+        extra["component_items"] = [GaussComponent.model_validate(item) for item in items
+                                    if isinstance(item, dict) and isinstance(item.get("node_id"), str)
+                                    and isinstance(item.get("component_id"), str)
+                                    and isinstance(item.get("component_type"), str)]
+    deploy = attrs.get("type")
+    version = attrs.get("version")
     return GaussInstance(id=row.id, resource_id=row.resource_id, name=row.name, tenant_id=row.tenant_id,
                          tenant_name=tenant.name if tenant else "未分配租户", project_ref=row.project_ref,
                          project_name=(project.project_name or project.project_id) if project else None,
@@ -145,32 +265,79 @@ def instance_out(target: Target) -> GaussInstance:
                          memory_unit="GB" if attrs.get("memory_unit_verified") is True else None,
                          storage_size=finite_number(attrs.get("volume_size")),
                          storage_unit="GB" if attrs.get("volume_unit_verified") is True else None,
-                         snapshot_at=row.last_seen)
+                         snapshot_at=row.last_seen, status_group=status_group(row.health, row.status_raw),
+                         status_since=row.status_since, deploy_type=deploy if isinstance(deploy, str) else None,
+                         version=version if isinstance(version, str) else None, active_alarms=alarms,
+                         **_local_health(row, now or utcnow()), **extra)
 
 
-def list_instances(db: Session, scope: Scope, *, keyword: str | None = None, tenant_id: int | None = None,
-                   project_ref: int | None = None, page: int = 1, page_size: int = 50) -> GaussInstancesOut:
+def _filtered(scope: Scope, *, tenant_id: int | None, project_ref: int | None):
     stmt = _resources(scope)
     if tenant_id is not None:
         scope.ensure(tenant_id, "租户")
         stmt = stmt.where(Resource.tenant_id == tenant_id)
     if project_ref is not None:
         stmt = stmt.where(Resource.project_ref == project_ref)
-    if keyword and keyword.strip():
-        stmt = stmt.where(or_(Resource.name.ilike(f"%{keyword.strip()}%"),
-                              Resource.resource_id.ilike(f"%{keyword.strip()}%")))
-    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = db.scalars(stmt.order_by(Resource.name, Resource.id).offset((page-1)*page_size).limit(page_size)).all()
+    return stmt
+
+
+def _labels(db: Session, rows: Sequence[Resource]) -> tuple[dict[int, HcsAccount], dict[int, HcsProject]]:
     tenants = {t.id: t for t in db.scalars(select(HcsAccount).where(HcsAccount.id.in_(
         {r.tenant_id for r in rows if r.tenant_id is not None})))}
     projects = {p.id: p for p in db.scalars(select(HcsProject).where(HcsProject.id.in_(
         {r.project_ref for r in rows if r.project_ref is not None})))}
-    return GaussInstancesOut(items=[instance_out(Target(r, tenants.get(r.tenant_id), projects.get(r.project_ref)))
-                                    for r in rows], total=total, page=page, page_size=page_size)
+    return tenants, projects
+
+
+def list_instances(db: Session, scope: Scope, *, keyword: str | None = None, tenant_id: int | None = None,
+                   project_ref: int | None = None, status_group: str | None = None,
+                   page: int = 1, page_size: int = 50) -> GaussInstancesOut:
+    """本地实例列表：异常在前，其次变更中、已停止、正常；同组按名称。"""
+    stmt = _filtered(scope, tenant_id=tenant_id, project_ref=project_ref)
+    if keyword and keyword.strip():
+        stmt = stmt.where(or_(Resource.name.ilike(f"%{keyword.strip()}%"),
+                              Resource.resource_id.ilike(f"%{keyword.strip()}%")))
+    if status_group:
+        stmt = stmt.where(_group_clause(status_group))
+    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    rank = case((_abnormal_clause(), 0), (Resource.status_raw.in_(TRANSITIONAL_STATES), 1),
+                (Resource.status_raw == "SHUTDOWN", 2), else_=3)
+    rows = db.scalars(stmt.order_by(rank, Resource.name, Resource.id).offset((page-1)*page_size).limit(page_size)).all()
+    tenants, projects = _labels(db, rows)
+    alarms, now = _alarm_counts(db, rows), utcnow()
+    return GaussInstancesOut(items=[instance_out(Target(r, tenants.get(r.tenant_id), projects.get(r.project_ref)),
+                                                 alarms=alarms.get(r.id, 0), now=now) for r in rows],
+                             total=total, page=page, page_size=page_size)
 
 
 def get_instance(db: Session, scope: Scope, resource_ref: int) -> GaussInstance:
-    return instance_out(_local_target(db, scope, resource_ref))
+    """单实例：列表字段之外带上最近一次采集的组件清单与实例节点（本地，不请求云）。"""
+    target = _local_target(db, scope, resource_ref)
+    return instance_out(target, alarms=_alarm_counts(db, [target.resource]).get(target.resource.id, 0), detail=True)
+
+
+def summary(db: Session, scope: Scope, *, tenant_id: int | None = None, project_ref: int | None = None) -> GaussSummaryOut:
+    """当前范围的 GaussDB 概况：按状态分组计数、磁盘高水位、组件宕机与活动告警（本地数据）。"""
+    rows = db.scalars(_filtered(scope, tenant_id=tenant_id, project_ref=project_ref)).all()
+    now = utcnow()
+    out = GaussSummaryOut(total=len(rows), active_alarms=sum(_alarm_counts(db, rows).values()))
+    latest: datetime | None = None
+    for row in rows:
+        group = status_group(row.health, row.status_raw)
+        setattr(out, group, getattr(out, group) + 1)
+        out.scope_excluded += bool(row.scope_excluded)
+        local = _local_health(row, now)
+        usage = local["disk_usage"]
+        if local["disk_freshness"] == "FRESH" and usage is not None and usage >= DISK_HIGH_PERCENT:
+            out.disk_high += 1
+        components = local["components"]
+        if components is not None and components.freshness == "FRESH" and (components.down or 0) > 0:
+            out.components_down += 1
+        for at in (local["disk_observed_at"], components.observed_at if components else None):
+            if at is not None and (latest is None or at > latest):
+                latest = at
+    out.last_collected_at = latest
+    return out
 
 
 def list_projects(db: Session, scope: Scope) -> list[GaussProjectOption]:

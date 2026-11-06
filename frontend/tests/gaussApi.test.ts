@@ -43,6 +43,14 @@ describe('GaussDB 原生 API 合同', () => {
     expect(request.get).toHaveBeenCalledWith('/gaussdb/instances', { keyword: 'db', project_ref: 107, page: 2, page_size: 20 },
       { signal, silent: true, timeout: 120000, headers: { 'X-Tenant-Id': '7' } })
   })
+  it('概况统计只读本地，带项目与租户头；状态分组随列表传递', async () => {
+    const signal = new AbortController().signal
+    await gaussApi.summary({ project_ref: 107 }, { signal, tenantId: null })
+    expect(request.get).toHaveBeenCalledWith('/gaussdb/summary', { project_ref: 107 },
+      { signal, silent: true, timeout: 120000, headers: { 'X-Tenant-Id': 'all' } })
+    await gaussApi.instances({ status_group: 'abnormal', page: 1, page_size: 20 }, { signal, tenantId: 7 })
+    expect(request.get.mock.calls.at(-1)![1]).toEqual({ status_group: 'abnormal', keyword: undefined, page: 1, page_size: 20 })
+  })
   it.each(endpoints)('$name 只 GET，保留 signal 与原生实例路径', async endpoint => {
     const ctx = { tenantId: 7, signal: new AbortController().signal }
     await endpoint.run(ctx)

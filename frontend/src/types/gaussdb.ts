@@ -1,6 +1,8 @@
 /** 与 backend/app/schemas/gaussdb.py 对齐；原生诊断内容不换算、不补值。 */
 export type GaussNativeStatus = 'AVAILABLE' | 'NO_DATA' | 'PARTIAL' | 'UNAVAILABLE' | 'ERROR' | 'DISABLED' | 'UNSUPPORTED'
-export type GaussPanel = 'overview' | 'disk' | 'performance' | 'slow-sql' | 'sessions'
+export type GaussPanel = 'overview' | 'performance' | 'slow-sql' | 'sessions'
+export type GaussStatusGroup = 'abnormal' | 'transitional' | 'stopped' | 'normal'
+export type GaussFreshness = 'FRESH' | 'STALE' | 'NO_DATA'
 export type GaussExportPanel = 'overview' | 'slow-sql' | 'slow-sql-detail' | 'sessions' | 'inspections' | 'inspection-detail'
 export type GaussNativeRow = Record<string, unknown>
 
@@ -22,9 +24,42 @@ export interface GaussInstance {
   storage_size: number | null
   storage_unit: string | null
   snapshot_at: string | null
+  // 以下来自本地巡检记录（最近一次采集），不请求云
+  status_group?: GaussStatusGroup
+  status_since?: string | null
+  deploy_type?: string | null
+  version?: string | null
+  disk_usage?: number | null
+  disk_used_gb?: number | null
+  disk_total_gb?: number | null
+  disk_state?: 'AVAILABLE' | 'PARTIAL' | 'ERROR' | 'UNAVAILABLE' | null
+  /** 本地收到 volume-usage 响应的时间 */
+  disk_observed_at?: string | null
+  disk_freshness?: GaussFreshness
+  node_count?: number | null
+  components?: GaussComponentSummary | null
+  active_alarms?: number
+  /** 只在单实例详情返回 */
+  nodes?: GaussNode[] | null
+  component_items?: GaussComponent[] | null
+}
+export interface GaussComponentSummary {
+  state: 'AVAILABLE' | 'NO_DATA' | 'STALE' | 'ERROR'
+  observed_at: string | null
+  freshness: GaussFreshness
+  total: number | null
+  down: number | null
+  unknown: number | null
+  by_type: Record<string, number>
+  warning: string | null
+}
+export interface GaussNode { name: string | null; role: string | null; status: string | null }
+export interface GaussSummary {
+  total: number; abnormal: number; transitional: number; stopped: number; normal: number; scope_excluded: number
+  disk_high: number; components_down: number; active_alarms: number; last_collected_at: string | null
 }
 export interface GaussInstancesOut { items: GaussInstance[]; total: number; page: number; page_size: number }
-export interface GaussInstancesQuery { keyword?: string; project_ref?: number; page: number; page_size: number }
+export interface GaussInstancesQuery { keyword?: string; project_ref?: number; status_group?: GaussStatusGroup; page: number; page_size: number }
 export interface GaussProjectOption { project_ref: number; project_name: string; tenant_id: number; tenant_name: string; region: string | null }
 export interface GaussDirectoryApi {
   instance: (id: number, context: GaussRequestContext) => Promise<GaussInstance>
@@ -33,6 +68,7 @@ export interface GaussDirectoryApi {
 export interface GaussComponent {
   node_id: string; node_name: string | null; component_id: string; component_type: string
   role: string | null; status: string | null
+  availability_zone_id?: string | null; distributed_id?: string | null
 }
 export interface GaussDisk {
   status: GaussNativeStatus
@@ -113,6 +149,8 @@ export type GaussExportQuery = { panel: GaussExportPanel; record_id?: string } &
 export interface GaussRequestContext { tenantId: number | null; signal: AbortSignal }
 export interface GaussApi {
   instances: (query: GaussInstancesQuery, context: GaussRequestContext) => Promise<GaussInstancesOut>
+  /** 当前范围的本地概况；不请求云 */
+  summary: (query: { project_ref?: number }, context: GaussRequestContext) => Promise<GaussSummary>
   overview: (id: number, context: GaussRequestContext) => Promise<GaussOverviewOut>
   slowNodes: (id: number, context: GaussRequestContext) => Promise<GaussNativeRows>
   slowSql: (id: number, query: GaussSlowQuery, context: GaussRequestContext) => Promise<GaussNativeRows>

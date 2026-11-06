@@ -3,7 +3,7 @@ import { effectScope, nextTick, ref, type EffectScope } from 'vue'
 import { useGaussPanel } from '../src/views/gaussdb/useGaussPanel'
 import { inspectionPoints, inspectionTime, nativeColumnLabel, nativeText, quantityText, rangeQuery } from '../src/views/gaussdb/gauss-utils'
 import type { GaussApi, GaussDirectoryApi, GaussNativeRows, GaussOverviewOut } from '../src/types/gaussdb'
-import { gaussInstance, gaussInspection, gaussOverview, gaussRows, inspectionRecord } from './gaussFixtures'
+import { gaussInstance, gaussInspection, gaussOverview, gaussRows, gaussSummary, inspectionRecord } from './gaussFixtures'
 import { deferred } from './businessViewHarness'
 
 const scopes: EffectScope[] = []
@@ -13,6 +13,7 @@ function setup() {
   const tenant = ref<number | null>(7), canView = ref(true), canRun = ref(true), canExport = ref(true)
   const api = {
     instances: vi.fn<GaussApi['instances']>(async (query, context) => ({ items: [gaussInstance(11, context.tenantId ?? 7), gaussInstance(12, context.tenantId ?? 7)], total: 2, page: query.page, page_size: query.page_size })),
+    summary: vi.fn<GaussApi['summary']>(async () => gaussSummary()),
     overview: vi.fn<GaussApi['overview']>(async (id, context) => gaussOverview(id, context.tenantId ?? 7)),
     slowNodes: vi.fn<GaussApi['slowNodes']>(async () => gaussRows({ items: [{ node_id: 'node-1', node_name: '节点甲', role: 'master', component_type: 'CN' }] })),
     slowSql: vi.fn<GaussApi['slowSql']>(async () => gaussRows({ items: [{ sql_id: 'sql-1', sql_text: 'select 1', avg_exec_time: '5000000' }] })),
@@ -134,13 +135,36 @@ describe('GaussDB 显式只读查询与权限', () => {
 })
 
 describe('GaussDB 租户、实例、分页和标签边界', () => {
-  it('默认 disk → overview 查询 → performance → disk 恢复概要导出，不被初始空缓存遮蔽', async () => {
+  it('改筛选只是草稿：表格不清空，查询或切换分组后生效，翻页沿用已生效条件', async () => {
+    const { model, api } = setup(); await settle()
+    expect(api.summary).toHaveBeenCalledOnce(); expect(model.summary.value?.total).toBe(2)
+    model.listFilters.keyword = ' db '; model.listFilters.project_ref = 107
+    expect(model.items.value).toHaveLength(2); expect(api.instances).toHaveBeenCalledOnce()
+    await model.changePage(2)
+    expect(api.instances.mock.calls.at(-1)![0]).toMatchObject({ keyword: undefined, project_ref: undefined, page: 2 })
+    await model.search()
+    expect(api.instances.mock.calls.at(-1)![0]).toMatchObject({ keyword: 'db', project_ref: 107, page: 1 })
+    expect(api.summary.mock.calls.at(-1)![0]).toEqual({ project_ref: 107 })
+    await model.setStatusGroup('abnormal')
+    expect(api.instances.mock.calls.at(-1)![0]).toMatchObject({ keyword: 'db', project_ref: 107, status_group: 'abnormal', page: 1 })
+    await model.changePage(2)
+    expect(api.instances.mock.calls.at(-1)![0]).toMatchObject({ status_group: 'abnormal', page: 2 })
+  })
+  it('概况统计失败不影响实例列表', async () => {
+    const { model, api } = setup(); await settle()
+    api.summary.mockRejectedValueOnce(new Error('统计暂不可用'))
+    await model.search(); await settle()
+    expect(model.items.value).toHaveLength(2); expect(model.listError.value).toBe('')
+    expect(model.summary.value).toBeNull(); expect(model.summaryError.value).toBe('统计暂不可用')
+  })
+  it('默认概览 → 实时查询 → 巡检报告 → 回到概览恢复概要导出，不被初始空缓存遮蔽', async () => {
     const { model, api, select } = setup(); await select()
-    expect(model.panel.value).toBe('disk')
-    model.setPanel('overview'); await model.queryPanel()
+    expect(model.panel.value).toBe('overview')
+    model.setPanel('disk'); expect(model.panel.value).toBe('overview')            // 旧链接的磁盘标签已并入概览
+    await model.queryPanel()
     const overview = model.overview.value
     model.setPanel('performance'); await model.queryPanel(); await model.showDetail(model.rows.value!.items[0])
-    model.setPanel('disk')
+    model.setPanel('overview')
     expect(model.overview.value).toBe(overview); expect(model.applied.value).toEqual({ panel: 'overview' })
     expect(model.rows.value).toBeNull(); expect(model.detail.value).toBeNull(); expect(model.canExport.value).toBe(true)
     expect(await model.exportExcel()).toBe('原生数据.xlsx')

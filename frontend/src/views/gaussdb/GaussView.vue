@@ -36,14 +36,7 @@ async function loadProjects() {
     if (!controller.signal.aborted && app.tenantId === tenantId) projects.value = result
   } catch (cause) { if (!controller.signal.aborted) projectsError.value = errorText(cause, '项目列表加载失败') }
 }
-async function preparePanel() {
-  if (!selected.value || !canRun.value || loading.value || opening.value) return
-  if (['overview', 'disk', 'sessions'].includes(model.panel.value)) {
-    if (!model.overview.value) await model.queryOverview()
-  } else if (model.panel.value === 'slow-sql') {
-    if (!model.slowNodes.value) await model.loadSlowNodes()
-  } else if (!model.rows.value) await model.queryPanel()
-}
+// 打开实例、切换标签都只读本地记录；慢 SQL、会话、巡检报告和实时磁盘 / 组件在对应标签里点击查询后才请求 HCS。
 function open(row: GaussInstance) {
   return router.push({ query: { ...route.query, instance_id: String(row.id), tenant_id: String(row.tenant_id), tab: 'overview' } })
 }
@@ -73,17 +66,15 @@ watch(() => [route.query.instance_id, route.query.tenant_id, route.query.tab, ap
     }
   }
   model.setPanel(tabParam(tab))
-  await preparePanel()
 }, { immediate: true })
 watch(() => [app.tenantId, scopeKey.value], () => { void loadProjects() }, { immediate: true, flush: 'sync' })
-watch(listLoading, busy => { if (!busy) void preparePanel() })
+/** 顶栏刷新：重读本地实例记录，再由工作区刷新本标签已有的结果（概览的存储趋势；已查询过的在线结果重新查询）。 */
 async function refresh() {
   if (opening.value) return
-  if (selected.value && !canRun.value) {
-    await model.openInstance(selected.value.id, gaussDirectoryApi.instance, true, selected.value.tenant_id ?? undefined)
-    if (model.panel.value === 'disk') await workspace.value?.refresh()
-  } else if (selected.value) await workspace.value?.refresh()
-  else await Promise.all([model.loadInstances(), loadProjects()])
+  if (selected.value) {
+    const ok = await model.openInstance(selected.value.id, gaussDirectoryApi.instance, true, selected.value.tenant_id ?? undefined)
+    if (ok) await workspace.value?.refresh()
+  } else await Promise.all([model.loadInstances(), loadProjects()])
 }
 onScopeDispose(() => { navigationGeneration++; projectController?.abort() })
 </script>

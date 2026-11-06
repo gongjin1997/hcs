@@ -23,7 +23,7 @@ watch(rows, result => {
 
 <template>
   <div class="performance-panel">
-    <header class="table-heading"><div><h3>性能与巡检报告</h3><p class="text-3">CPU、内存来自已完成报告，按报告中的采样时间展示。</p></div><el-button v-if="user.can('ledger:export')" :icon="Download" :disabled="!canExport" :loading="exporting" @click="model.exportExcel">导出记录 Excel</el-button></header>
+    <header class="table-heading"><div><h3>巡检报告</h3><p class="text-3">CPU、内存来自 GaussDB 自身巡检任务生成的已完成报告，按报告中的采样时间展示，不是当前使用率。没有报告时，请先在 GaussDB 控制台为实例配置巡检任务。</p></div><el-button v-if="user.can('ledger:export')" :icon="Download" :disabled="!canExport" :loading="exporting" @click="model.exportExcel">导出记录 Excel</el-button></header>
     <form class="report-filters" @submit.prevent="query">
       <el-date-picker :model-value="inspectionRange" type="datetimerange" aria-label="巡检时间范围" start-placeholder="开始时间" end-placeholder="结束时间" format="YYYY-MM-DD HH:mm" @update:model-value="value => model.setRange('inspection', value)" />
       <el-button native-type="submit" type="primary" :disabled="!canRun || loading" :loading="loadingKind === 'query'">查询报告</el-button>

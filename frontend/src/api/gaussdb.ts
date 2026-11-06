@@ -15,6 +15,7 @@ export const gaussDirectoryApi: GaussDirectoryApi = {
 
 export const listGaussInstances: GaussApi['instances'] = (query, context) =>
   get('/gaussdb/instances', { ...query, keyword: query.keyword?.trim() || undefined }, config(context))
+export const getGaussSummary: GaussApi['summary'] = (query, context) => get('/gaussdb/summary', { ...query }, config(context))
 export const getGaussOverview: GaussApi['overview'] = (id, context) => get(`${path(id)}/overview`, undefined, config(context))
 export const listGaussSlowNodes: GaussApi['slowNodes'] = (id, context) => get(`${path(id)}/slow-nodes`, undefined, config(context))
 export const getGaussSlowSql: GaussApi['slowSql'] = (id, query, context) =>
@@ -29,7 +30,7 @@ export const exportGaussPanel: GaussApi['export'] = (id, query, context) => down
   { ...query, ...(query.node_ids ? { node_ids: [...query.node_ids] } : {}) }, 'GaussDB诊断.xlsx', config(context))
 
 export const gaussApi: GaussApi = {
-  instances: listGaussInstances, overview: getGaussOverview, slowNodes: listGaussSlowNodes,
+  instances: listGaussInstances, summary: getGaussSummary, overview: getGaussOverview, slowNodes: listGaussSlowNodes,
   slowSql: getGaussSlowSql, slowDetail: getGaussSlowSqlDetail, sessions: getGaussSessions,
   inspections: getGaussInspections, inspectionDetail: getGaussInspectionDetail, export: exportGaussPanel,
 }

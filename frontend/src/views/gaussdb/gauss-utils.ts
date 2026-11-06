@@ -1,9 +1,44 @@
-import type { GaussNativeRow, GaussNativeStatus, GaussPanel } from '../../types/gaussdb'
+import type { GaussComponentSummary, GaussFreshness, GaussInstance, GaussNativeRow, GaussNativeStatus, GaussPanel, GaussStatusGroup } from '../../types/gaussdb'
 
+/** 概览只读本地巡检记录；其余标签都是按需的在线查询，点击“查询”后才请求。 */
 export const GAUSS_PANELS: { key: GaussPanel; label: string }[] = [
-  { key: 'overview', label: '概览' }, { key: 'disk', label: '磁盘' },
-  { key: 'performance', label: '性能与巡检' }, { key: 'slow-sql', label: '慢 SQL' }, { key: 'sessions', label: '会话' },
+  { key: 'overview', label: '概览' }, { key: 'performance', label: '巡检报告' },
+  { key: 'slow-sql', label: '慢 SQL' }, { key: 'sessions', label: '会话' },
 ]
+export const STATUS_GROUPS: { key: GaussStatusGroup; label: string; type: 'danger' | 'warning' | 'info' | 'success' }[] = [
+  { key: 'abnormal', label: '异常', type: 'danger' }, { key: 'transitional', label: '变更中', type: 'warning' },
+  { key: 'stopped', label: '已停止', type: 'info' }, { key: 'normal', label: '运行正常', type: 'success' },
+]
+export const FRESHNESS_TEXT: Record<GaussFreshness, string> = { FRESH: '最新', STALE: '已过期', NO_DATA: '未采集' }
+export const DISK_HIGH_PERCENT = 85
+type TagType = 'success' | 'warning' | 'danger' | 'info'
+
+/** 磁盘水位颜色：≥90 危险，≥85 警告（与内置规则 R-GS-006 的 P1 / P2 一致）。 */
+export const diskLevel = (usage: number | null | undefined): TagType =>
+  usage == null ? 'info' : usage >= 90 ? 'danger' : usage >= DISK_HIGH_PERCENT ? 'warning' : 'success'
+
+/** 列表与概览的磁盘文字：只显示有采集来源的值，过期的值注明。 */
+export function diskText(instance: Pick<GaussInstance, 'disk_usage' | 'disk_freshness' | 'disk_state'>): string {
+  if (instance.disk_usage == null) return instance.disk_state === 'ERROR' ? '查询失败' : '—'
+  return `${Number(instance.disk_usage.toFixed(2))}%${instance.disk_freshness === 'STALE' ? '（已过期）' : ''}`
+}
+
+/** 组件健康：宕机最严重；状态未识别不显示为正常；过期结果只作参考。 */
+export function componentHealth(summary: GaussComponentSummary | null | undefined): { type: TagType; text: string } {
+  if (!summary || summary.state === 'NO_DATA') return { type: 'info', text: '暂无组件数据' }
+  if (summary.state === 'ERROR') return { type: 'info', text: '组件查询失败' }
+  const result: { type: TagType; text: string } = summary.down ? { type: 'danger', text: `${summary.down} 个组件宕机` }
+    : summary.unknown ? { type: 'warning', text: `${summary.unknown} 个状态未识别` }
+      : { type: 'success', text: `${summary.total ?? 0} 个组件正常` }
+  return summary.freshness === 'FRESH' ? result : { type: 'info', text: `${result.text}（已过期）` }
+}
+
+/** 组件状态（GaussDB API 表 4-80）：Down 宕机；Primary / Standby / Normal / ETCD 角色均为正常。 */
+export const COMPONENT_STATUS_TEXT: Record<string, string> = {
+  Primary: '主', Standby: '备', Normal: '正常', Down: '宕机', StateLeader: 'ETCD 主', StateFollower: 'ETCD 备', StateCandidate: 'ETCD 仲裁',
+}
+export const componentStatusType = (status: string | null): TagType =>
+  status === 'Down' ? 'danger' : status && status in COMPONENT_STATUS_TEXT ? 'success' : 'info'
 export const NATIVE_STATUS: Record<GaussNativeStatus, string> = {
   AVAILABLE: '已获取', NO_DATA: '暂无数据', PARTIAL: '部分数据', UNAVAILABLE: '暂不可用',
   ERROR: '查询失败', DISABLED: '未启用', UNSUPPORTED: '上游不支持',

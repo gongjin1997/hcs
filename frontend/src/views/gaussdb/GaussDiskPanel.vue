@@ -1,23 +1,25 @@
 <script setup lang="ts">
-import type { GaussOverviewOut } from '@/types/gaussdb'
+import { computed } from 'vue'
+import type { GaussDisk, GaussOverviewOut } from '@/types/gaussdb'
 import { fmtTime } from '@/utils/format'
 import { quantityText } from './gauss-utils'
 import GaussNativeStatus from './GaussNativeStatus.vue'
 
-defineProps<{ overview: GaussOverviewOut }>()
+/** 实时查询结果传 overview；最近一次巡检采集（本地）传 disk。 */
+const props = defineProps<{ overview?: GaussOverviewOut | null; disk?: GaussDisk | null }>()
+const current = computed(() => props.disk ?? props.overview?.disk ?? null)
 </script>
 
 <template>
-  <div class="disk-panel">
-    <GaussNativeStatus :status="overview.disk.status" :warning="overview.disk.warning" :queried-at="overview.queried_at" />
+  <div v-if="current" class="disk-panel">
+    <GaussNativeStatus :status="current.status" :warning="current.warning" :queried-at="overview?.queried_at ?? null" />
     <div class="disk-stats">
-      <div><span class="text-3">已用存储</span><strong class="num">{{ quantityText(overview.disk.used_gb, 'GB') }}</strong></div>
-      <div><span class="text-3">总容量</span><strong class="num">{{ quantityText(overview.disk.total_gb, 'GB') }}</strong></div>
-      <div><span class="text-3">存储使用率</span><strong class="num">{{ quantityText(overview.disk.usage_percent, '%') }}</strong></div>
+      <div><span class="text-3">已用存储</span><strong class="num">{{ quantityText(current.used_gb, 'GB') }}</strong></div>
+      <div><span class="text-3">总容量</span><strong class="num">{{ quantityText(current.total_gb, 'GB') }}</strong></div>
+      <div><span class="text-3">存储使用率</span><strong class="num">{{ quantityText(current.usage_percent, '%') }}</strong></div>
     </div>
-    <p v-if="overview.disk.time_basis === 'RESPONSE_RECEIVED'" class="text-3">获取时间：{{ fmtTime(overview.disk.collected_at, 'YYYY-MM-DD HH:mm:ss') }}（本地接收）</p>
-    <p v-else class="text-3">源端采样时间：{{ overview.disk.observed_at ? fmtTime(overview.disk.observed_at, 'YYYY-MM-DD HH:mm:ss') : '源端未提供' }}</p>
-
+    <p v-if="current.time_basis === 'RESPONSE_RECEIVED'" class="text-3">获取时间：{{ fmtTime(current.collected_at, 'YYYY-MM-DD HH:mm:ss') }}（本地接收）</p>
+    <p v-else class="text-3">源端采样时间：{{ current.observed_at ? fmtTime(current.observed_at, 'YYYY-MM-DD HH:mm:ss') : '源端未提供' }}</p>
   </div>
 </template>
 

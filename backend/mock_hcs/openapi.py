@@ -123,8 +123,9 @@ def _dcs_nodes(ds: ModuleType, d: dict) -> list[dict]:
     overrides = d.get("node_status") or {}
     default = "Inactive" if d["status"] == "ERROR" else "Active"
     mode = d.get("mode", "ha")
-    plan = [(f"group-{g}/{role}", role, "redis-server", g)
-            for g in range(d.get("shards", 1) if mode != "ha" else 1) for role in ("master", "slave")]
+    plan: list[tuple[str, str, str, int | None]] = [
+        (f"group-{g}/{role}", role, "redis-server", g)
+        for g in range(d.get("shards", 1) if mode != "ha" else 1) for role in ("master", "slave")]
     plan += [(f"proxy-{k}", "proxy", "redis-proxy", None) for k in range(d.get("proxies", 0) if mode == "proxy" else 0)]
     nodes = []
     for index, (key, role, kind, group) in enumerate(plan):
