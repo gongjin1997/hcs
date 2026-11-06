@@ -72,7 +72,8 @@ class EcsMetricsCollector:
         if ctx.tenant_id is not None:
             state = ctx.db.execute(select(HcsAccount.id, HcsAccount.enabled, HcsAccount.metrics_source,
                 HcsAccount.endpoints, HcsAccount.prometheus_url, HcsAccount.secret_cipher, HcsAccount.access_key,
-                HcsAccount.domain_name, HcsAccount.capabilities).where(HcsAccount.id == ctx.tenant_id)).mappings().first()
+                HcsAccount.domain_name, HcsAccount.capabilities, HcsAccount.manageone_config).where(
+                    HcsAccount.id == ctx.tenant_id)).mappings().first()
             current_tenant = SimpleNamespace(**state) if state is not None else None
         current_source = ecs_source(current_tenant, current_policy, client=ctx.client)
         project_enabled = ctx.project_ref is None or ctx.db.scalar(select(HcsProject.enabled).where(
@@ -84,7 +85,7 @@ class EcsMetricsCollector:
             ctx.stats["metrics_skipped"] = "configuration_changed"
             ctx.errors.append("ECS 采样期间接入配置或开关已变更，本次结果未入库")
             return []
-        if result.source != current_source or result.source not in ("NONE", "PROMETHEUS", "CES"):
+        if result.source != current_source or result.source not in ("NONE", "PROMETHEUS", "CES", "MANAGEONE"):
             ctx.stats["metrics_skipped"] = "source_mismatch"
             ctx.errors.append("ECS 返回指标来源与当前配置不一致，本次结果未入库")
             return []

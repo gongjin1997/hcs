@@ -89,6 +89,7 @@
       <!-- 监控指标 -->
       <div class="sec"><span class="no">4</span>外部指标通道<span class="sec-tip">可选 ECS 使用率来源；DCS、GaussDB 使用原生接口</span></div>
       <el-alert v-if="tenant?.metrics_source === 'AOM'" title="旧 AOM 来源已停用，保存时改为“仅服务原生”；如需 Prometheus，请手动选择。" type="warning" :closable="false" class="mb-16" />
+      <p v-if="form.metrics_source === 'MANAGEONE'" class="text-3">ManageOne 来源由 ECS 配置单独管理，使用独立北向账号，详见 ECS 采集策略。</p>
       <div class="src-grid">
         <div v-for="(m, k) in metricsSources" :key="k" class="src" :class="{ on: form.metrics_source === k }" :style="{ '--c': m.color }" @click="form.metrics_source = k as MetricsSource">
           <div class="src-head"><el-radio :model-value="form.metrics_source" :value="k" @click.stop.prevent="form.metrics_source = k as MetricsSource">{{ m.label }}</el-radio>
@@ -106,7 +107,7 @@
         <el-col :span="12">
           <div class="metrics-tip">
             <el-icon><InfoFilled /></el-icon>
-            <div>外部指标仅支持 Prometheus，按需配置。DCS 本地历史仅包含实际接口采样；GaussDB 的磁盘、慢 SQL、会话等使用原生接口。</div>
+            <div>Prometheus 按需配置；ManageOne 账号在 ECS 采集策略中单独配置。DCS 本地历史来自实际采样，GaussDB 使用原生接口。</div>
           </div>
         </el-col>
       </el-row>
@@ -172,7 +173,8 @@ const form = ref<TenantIn>(blankTenant())
 const epRows = ref<{ k: string; v: string }[]>([])
 const advanced = ref<string[]>([])
 const saving = ref(false)
-const metricsSources = computed(() => Object.fromEntries(Object.entries(TENANT_METRICS_SOURCES).filter(([key]) => key !== 'CES' || props.tenant?.metrics_source === 'CES')))
+const metricsSources = computed(() => Object.fromEntries(Object.entries(TENANT_METRICS_SOURCES)
+  .filter(([key]) => key !== 'MANAGEONE' && (key !== 'CES' || props.tenant?.metrics_source === 'CES'))))
 const endpointServices = computed(() => ENDPOINT_SERVICES.filter(key => key !== 'ces' || epRows.value.some(row => row.k === 'ces')))
 
 const authChanged = computed(() => !!props.tenant && props.tenant.auth_type !== form.value.auth_type)

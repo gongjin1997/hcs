@@ -3,6 +3,7 @@ import { effectScope, nextTick, shallowRef, type EffectScope } from 'vue'
 import { useEcsTrend } from '../src/views/ecs/useEcsTrend'
 import { useEcsInstances } from '../src/views/ecs/useEcsInstances'
 import { ecsTrendChart } from '../src/views/ecs/ecs-chart'
+import { metricsSourceLabel } from '../src/utils/dict'
 import { ECS_PRESETS, ecsLatestReadings, ecsRangeQuery, percentText } from '../src/views/ecs/ecs-utils'
 import type { EcsHistoryExporter, EcsHistoryFetcher, EcsHistoryOut, EcsInstancesFetcher, EcsInstancesOut, EcsMetricKey } from '../src/types/ecs'
 import { deferred } from './businessViewHarness'
@@ -57,6 +58,24 @@ describe('ECS 真实趋势数据', () => {
     expect((ecsTrendChart(history, 'mem_util') as { series: unknown[] }).series).toEqual([])
     const malformed = ecsHistory(ecsRangeQuery('1h')); malformed.series[0].points[0].sample_count = 0
     expect((ecsTrendChart(malformed, 'cpu_util') as { series: { data: [number, number | null][] }[] }).series[0].data[0][1]).toBeNull()
+  })
+  it('趋势按历史来源标签区分 ManageOne 云硬盘和 Prometheus 最满分区，不按GiB推导', () => {
+    const history = ecsHistory(ecsRangeQuery('1h'))
+    history.series = [
+      { ...history.series[0], metric: 'disk_util', source: 'MANAGEONE', label: '云硬盘使用率', timestamp_semantics: 'source_sample' },
+      { ...history.series[0], metric: 'disk_util', source: 'PROMETHEUS', label: '最满分区使用率' },
+    ]
+    const option = ecsTrendChart(history, 'disk_util') as { series: { name: string; data: [number, number | null][] }[] }
+    expect(option.series.map(series => series.name)).toEqual([
+      '云硬盘使用率 · ManageOne · 配置源时间（须现场核实）',
+      '最满分区使用率 · PROMETHEUS · 时间语义未知',
+    ])
+    expect(option.series[0].data[0][1]).toBe(0)
+  })
+  it('只将ManageOne来源名映射为产品名称，AOM历史标签和其他来源标签保持现状', () => {
+    expect(metricsSourceLabel('MANAGEONE')).toBe('ManageOne')
+    expect(metricsSourceLabel('PROMETHEUS')).toBe('PROMETHEUS')
+    expect(metricsSourceLabel('AOM')).toBe('AOM（已停用，历史）')
   })
   it('最新读数保持 CPU/内存/磁盘顺序、真实零与缺失，旧来源不冒充当前采样', () => {
     const instance = ecsInstance()

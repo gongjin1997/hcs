@@ -2,6 +2,12 @@
 
 METRIC_KEYS = ("cpu_util", "mem_util", "disk_util", "boot_time")
 REASONS = {
+    "manageone_disabled": "ManageOne 性能接入未开启，请检查本租户的 ManageOne 配置",
+    "manageone_not_configured": "ManageOne 北向地址或集成账号未配置完整，请检查本租户的 ManageOne 配置",
+    "no_manageone_mapping": "ManageOne 未找到本项目 ECS 的唯一资源映射，请检查原生实例 ID 与项目 ID",
+    "manageone_source_unverified": "ManageOne ECS 资源来源信息不完整，暂不能确认指标归属",
+    "manageone_not_selected": "当前采集任务未选择 ManageOne 来源",
+    "manageone_metric_unsupported": "ManageOne 当前不提供开机时间指标",
     "aom_disabled": "AOM 已停用，当前租户仍选择旧 AOM 来源；请核实实际可用的监控来源",
     "prometheus_not_configured": "租户 Prometheus 地址未配置，请在租户接入中配置已有监控服务",
     "legacy_ces_disabled": "CES 兼容开关未开启；仅选择 CES 不会发起查询，须先核实局点接口",
@@ -36,6 +42,10 @@ INCOMPLETE = frozenset(("no_source", "mapping_missing", "no_series", "no_data", 
 
 def unavailable_reason(tenant: object) -> str:
     mode = str(getattr(tenant, "metrics_source", "AUTO") or "AUTO").upper()
+    if mode == "MANAGEONE":
+        config = getattr(tenant, "manageone_config", None)
+        return ("manageone_disabled" if not isinstance(config, dict) or config.get("enabled") is not True
+                else "manageone_not_configured")
     return {"AOM": "aom_disabled", "PROMETHEUS": "prometheus_not_configured",
             "CES": "legacy_ces_disabled", "NONE": "metrics_source_disabled"}.get(mode, "source_not_configured")
 
@@ -68,7 +78,7 @@ def log_summary(stats: dict) -> dict:
 
     source, status = stats.get("metrics_source"), diagnostic.get("status")
     return {
-        "metrics_source": source if source in ("NONE", "PROMETHEUS", "CES") else "unknown",
+        "metrics_source": source if source in ("NONE", "PROMETHEUS", "CES", "MANAGEONE") else "unknown",
         "metrics_status": status if isinstance(status, str) and status in STATUSES else "unknown",
         "metrics_reasons": diagnostic_reasons(diagnostic),
         "metrics_requested_resources": count(diagnostic.get("requested_resources", stats.get("servers"))),

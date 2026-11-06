@@ -106,9 +106,13 @@ def test_new_table_matches_models_and_has_expected_foreign_keys_indexes(pre_sms)
 
 
 def _outbox_records(engine):
+    tenant_table = Table("hcs_account", MetaData(), autoload_with=engine)
     with engine.begin() as connection:
-        tenant = connection.execute(HcsAccount.__table__.insert().values(code="sms-test", name="合成租户",
-            iam_endpoint="https://example.invalid", domain_name="synthetic")).inserted_primary_key[0]
+        tenant = connection.execute(tenant_table.insert().values(code="sms-test", name="合成租户",
+            short_name="", color="#1d63f0", iam_endpoint="https://example.invalid", domain_name="synthetic",
+            auth_type="PASSWORD", secret_cipher="", endpoints={}, enabled=True, report_mail_to=[],
+            report_user_ids=[], metrics_source="AUTO", capabilities={}, last_check={}, created_at=NOW,
+            updated_at=NOW)).inserted_primary_key[0]
         user = _user(connection, "sms-recipient")
         alarm = connection.execute(AlarmEvent.__table__.insert().values(tenant_id=tenant, fingerprint="sms-migration",
             rule_id="SMS-TEST", service="ecs", resource_type="ecs_server", resource_name="合成资源", severity="P1",
@@ -193,6 +197,8 @@ def test_reenable_after_upgrade_resets_cutoff_and_does_not_rebroadcast_old_alarm
             "password_cipher": encrypt("synthetic-gateway-secret")}))
     command.downgrade(cfg, "0009")
     command.upgrade(cfg, "0010")
+    # Runtime ORM tests use the current model, including later tenant columns.
+    command.upgrade(cfg, "head")
     with Session(engine) as db:
         assert not sms_settings.load_global(db).enabled
         assert sms_service.enqueue_due(db, NOW) == 0

@@ -147,6 +147,7 @@ export const METRICS_SOURCE: Record<string, { label: string; short: string; colo
   AOM: { label: 'AOM（已停用）', short: '已停用', color: '#8c8c8c', desc: '旧配置已停用，不作为当前指标来源' },
   CES: { label: 'CES（旧配置）', short: 'CES', color: '#8c8c8c', desc: '仅兼容已有 CES 配置' },
   PROMETHEUS: { label: 'Prometheus', short: 'Prometheus', color: '#e6522c', desc: '使用已配置的 Prometheus 地址查询支持的指标' },
+  MANAGEONE: { label: 'ManageOne', short: 'ManageOne', color: '#d97706', desc: '使用 ManageOne 运维北向接口查询 CPU、内存和云硬盘使用率；开机时间暂不支持' },
   NONE: { label: '仅服务原生', short: '服务原生', color: '#8c8c8c', desc: '不接入外部监控，保留服务接口可提供的指标与资源状态' },
 }
 /** 旧 AOM 来源不能作为当前来源，也不能隐式切换到 Prometheus。 */
@@ -155,6 +156,7 @@ export function effectiveMetricsSource(configured: string | null | undefined, ef
   return effective ?? configured ?? 'NONE'
 }
 export const historicalMetricsSourceLabel = (source: string) => source === 'AOM' ? 'AOM（已停用，历史）' : source
+export const metricsSourceLabel = (source: string) => source === 'MANAGEONE' ? 'ManageOne' : historicalMetricsSourceLabel(source)
 export const CAPABILITY: Record<string, string> = { prometheus: 'Prometheus', cce_api: 'CCE K8s API' }
 export const CHECK_KIND: Record<string, string> = { auth: '认证', service: '服务接口', capability: '能力探测' }
 /** ECS 状态分组颜色（总览 / 报表）：运行中 / 关机 / 故障 / 其他 */

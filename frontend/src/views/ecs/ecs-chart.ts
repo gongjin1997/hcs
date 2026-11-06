@@ -1,7 +1,7 @@
 import type { EChartsCoreOption } from 'echarts/core'
 import type { EcsHistoryOut, EcsMetricKey } from '../../types/ecs'
 import { ecsTimestampLabel, percentText } from './ecs-utils'
-import { historicalMetricsSourceLabel } from '../../utils/dict'
+import { metricsSourceLabel } from '../../utils/dict'
 
 export function ecsTrendChart(history: EcsHistoryOut, metric: EcsMetricKey, statistic: 'average' | 'maximum' = 'average'): EChartsCoreOption {
   return {
@@ -12,7 +12,7 @@ export function ecsTrendChart(history: EcsHistoryOut, metric: EcsMetricKey, stat
     xAxis: { type: 'time', min: Date.parse(history.start_at), max: Date.parse(history.end_at), axisLabel: { hideOverlap: true } },
     yAxis: { type: 'value', min: 0, max: 100, axisLabel: { formatter: '{value}%' } },
     series: history.series.filter(series => series.metric === metric).map((series, index) => ({
-      id: `${series.metric}:${series.source}:${index}`, name: `${series.label} · ${historicalMetricsSourceLabel(series.source)} · ${ecsTimestampLabel(series.timestamp_semantics)}`,
+      id: `${series.metric}:${series.source}:${index}`, name: `${series.label} · ${metricsSourceLabel(series.source)} · ${ecsTimestampLabel(series.timestamp_semantics)}`,
       type: 'line', connectNulls: false, showSymbol: true, symbolSize: 4,
       data: series.points.map(point => [Date.parse(point.at), point.sample_count > 0 && typeof point[statistic] === 'number' && Number.isFinite(point[statistic]) ? point[statistic] : null]),
     })),

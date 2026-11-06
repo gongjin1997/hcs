@@ -142,7 +142,7 @@ def upsert_resource(db: Session, service: str, group: list[Observation], now: da
         policy = ctx.params.get("_collection_policy") or {}
         max_age = policy.get("stale_after_sec", 900)
         source = ecs_source(ctx.tenant, policy, client=ctx.client)
-        current = (source in ("PROMETHEUS", "CES") and isinstance(meta, dict) and meta.get("source") == source
+        current = (source in ("PROMETHEUS", "CES", "MANAGEONE") and isinstance(meta, dict) and meta.get("source") == source
                    and meta.get("config_signature") == config_signature(ctx.tenant, policy, source))
         for key in ("cpu_util", "mem_util", "disk_util"):
             point = latest.get(key)
@@ -311,6 +311,13 @@ def process_observations(db: Session, service: str, observations: list[Observati
 
         persist_disk_samples(db, groups, resources, ctx, now)
     rules = rules_by_target(db, {k[0] for k in groups} | inspection_evidence.task_types(ctx))
+    if ecs_target:
+        from app.metrics.ecs_readings import ecs_source
+
+        if ecs_source(ctx.tenant, policy.model_dump(mode="json"), client=ctx.client) == "MANAGEONE":
+            # CLOUD_VM.diskUsage is cloud-volume usage, not filesystem usage.
+            rules = {key: selected for key, selected in rules.items()
+                     if key != ("ecs_server", "disk")}
     checks = [(o, rule, fingerprint(ctx.account, ctx.project_id, o.resource_type, o.resource_id, rule.id, o.sub_object))
               for o in observations for rule in rules.get((o.resource_type, o.check_item), [])
               if phase != "metrics"]

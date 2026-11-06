@@ -9,7 +9,7 @@ import TenantTag from '@/components/TenantTag.vue'
 import { useAppStore } from '@/stores/app'
 import { useUserStore } from '@/stores/user'
 import { fmtTime } from '@/utils/format'
-import { rawStatusType, statusText } from '@/utils/dict'
+import { metricsSourceLabel, rawStatusType, statusText } from '@/utils/dict'
 import type { EcsInstance } from '@/types/ecs'
 import { ECS_METRICS, ECS_STATE_LABEL, ecsLatestReadings, ecsTimestampLabel, percentText } from './ecs-utils'
 import { useEcsInstances } from './useEcsInstances'
@@ -103,7 +103,7 @@ watch(() => [route.query.instance_id, route.query.tenant_id, app.tenantId, scope
             <el-table-column v-for="(item, index) in ECS_METRICS" :key="item.key" :label="item.label" min-width="150"><template #default="{ row }">
               <div class="metric-reading"><b class="metric-value">{{ percentText(row.readings[index].value) }}</b><span class="metric-state" :class="`state-${row.readings[index].state.toLowerCase()}`" :title="row.readings[index].state !== 'FRESH' ? row.diagnostic?.message || undefined : undefined">{{ ECS_STATE_LABEL[row.readings[index].state as keyof typeof ECS_STATE_LABEL] }}</span></div>
               <el-tooltip :content="`${ecsTimestampLabel(row.readings[index].timestamp_semantics)}；返回：${fmtTime(row.readings[index].observed_at, 'YYYY-MM-DD HH:mm:ss')}；入库：${fmtTime(row.readings[index].collected_at, 'YYYY-MM-DD HH:mm:ss')}`"><div class="text-3 sample-time">返回 {{ fmtTime(row.readings[index].observed_at) }}</div></el-tooltip>
-              <div class="text-3 sample-source">{{ row.readings[index].source ?? '无来源' }}</div>
+              <div class="text-3 sample-source">{{ row.readings[index].source ? metricsSourceLabel(row.readings[index].source) : '无来源' }}</div>
             </template></el-table-column>
             <el-table-column label="操作" width="95" fixed="right"><template #default="{ row }"><el-button link type="primary" @click="openTrend(row as EcsInstance)">监控详情</el-button></template></el-table-column>
             <template #empty><el-empty :description="error ? '实例加载失败，可重试' : hasFilters ? '没有匹配的 ECS 实例，请调整筛选' : '当前范围暂无 ECS 实例'" :image-size="60" /></template>

@@ -7,6 +7,7 @@ import { useUserStore } from '@/stores/user'
 import { ECS_PHASES, ECS_POLICY_METRICS, ecsPhaseReason } from './ecs-policy'
 import { intervalText } from './ecs-utils'
 import { useEcsPolicy } from './useEcsPolicy'
+import ManageOneConfigDialog from './ManageOneConfigDialog.vue'
 import type { EcsPolicyMetricKey } from '@/types/ecs'
 
 const props = defineProps<{ modelValue: boolean; tenantId: number | null; tenantName?: string }>()
@@ -21,6 +22,9 @@ const { policy, loaded, prometheusJson, error, validationError, optionsError, in
   tenantId: () => scopedTenant.value, visible: () => props.modelValue, canManage: () => editable.value,
   fetcher: getEcsPolicy, saver: saveEcsPolicy, instancesFetcher: listEcsInstances,
 })
+const manageOneVisible = shallowRef(false)
+const canReadManageOne = computed(() => user.canAny('ledger:view', 'task:view', 'tenant:view') && scopedTenant.value != null
+  && (user.user?.tenant_ids == null || user.user.tenant_ids.includes(scopedTenant.value)))
 watch(() => [loaded.value?.tenant_id, policy.selection.mode] as const, ([tenant, mode]) => {
   if (tenant && mode === 'selected') void loadInstances()
 })
@@ -94,7 +98,10 @@ function configureMapping() { prometheusJson.value = JSON.stringify({ queries: {
             <div v-if="optionsError" class="text-danger">{{ optionsError }} <el-button link @click="loadInstances()">重试</el-button></div>
           </el-form-item>
           <div class="scope-note text-3">实例范围用于指标和巡检；台账同步和项目配额独立执行。台账中“未纳入巡检”的实例仍会被排除。按名称 / 资源 ID 通配、业务系统、环境、负责人等更细的条件，请到“系统管理 → 采集开关”里设置“采集范围”；两处同时设置时取交集。</div>
-          <el-divider content-position="left">指标来源映射</el-divider>
+        </el-form>
+        <el-divider content-position="left">指标来源映射</el-divider>
+          <div class="table-actions manageone-entry"><span class="text-3">ManageOne 原生使用率</span><el-button v-if="canReadManageOne" size="small" @click="manageOneVisible = true">配置 ManageOne</el-button></div>
+        <el-form :disabled="!editable || loading || saving" label-width="130px" @submit.prevent="onSave">
           <el-alert v-if="!mappingDraft" title="未填写自定义查询时使用内置 Prometheus 查询；未配置数据源时显示“无数据”。" type="info" :closable="false" />
           <div class="mapping-help text-3">AOM 已停用，旧映射不再使用；保存策略时清除旧映射。</div>
           <el-button v-if="prometheusJson.trim() === 'null'" @click="configureMapping">配置 Prometheus 映射</el-button>
@@ -116,6 +123,7 @@ function configureMapping() { prometheusJson.value = JSON.stringify({ queries: {
     </div>
     <template #footer><div class="table-actions policy-footer"><el-button :disabled="saving" @click="emit('update:modelValue', false)">关闭</el-button><el-button v-if="scopedTenant" :disabled="saving" :loading="loading" @click="load">重新读取</el-button><el-button v-if="editable" type="primary" :loading="saving" :disabled="!canSave" @click="onSave">保存策略</el-button></div></template>
   </el-dialog>
+  <ManageOneConfigDialog v-model="manageOneVisible" :tenant-id="scopedTenant" :tenant-name="tenantName || (scopedTenant ? app.tenants.find(tenant => tenant.id === scopedTenant)?.name : undefined)" @saved="emit('saved')" />
 </template>
 
 <style scoped lang="scss">
@@ -134,6 +142,7 @@ function configureMapping() { prometheusJson.value = JSON.stringify({ queries: {
 .mapping-help { line-height: 1.7; margin: -4px 0 16px 130px; overflow-wrap: anywhere; }
 .scope-note { line-height: 1.7; margin-bottom: 14px; }
 .mapping-metric { border-top: 1px solid var(--hi-border-light); padding-top: 16px; }
+.manageone-entry { justify-content: flex-start; align-items: center; gap: 10px; margin: 0 0 12px 130px; }
 .inline-hint { margin-left: 10px; }
 @media (max-width: 650px) {
   .mapping-help { margin-left: 0; }
@@ -144,5 +153,6 @@ function configureMapping() { prometheusJson.value = JSON.stringify({ queries: {
   .ecs-policy :deep(.el-form-item__label) { width: auto !important; justify-content: flex-start; }
   .ecs-policy :deep(.el-form-item__content) { margin-left: 0 !important; min-width: 0; }
   .inline-hint { margin-left: 0; }
+  .manageone-entry { margin-left: 0; }
 }
 </style>

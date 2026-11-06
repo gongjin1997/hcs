@@ -158,6 +158,7 @@ describe('AOM / 服务原生元数据和租户配置', () => {
     expect(tenantForm.TENANT_METRICS_SOURCES).not.toHaveProperty('AOM')
     expect(tenantForm.ENDPOINT_SERVICES).not.toContain('aom')
     expect(tenantForm.DEFAULT_ENDPOINTS).not.toHaveProperty('aom')
+    expect(tenantForm.TENANT_METRICS_SOURCES).not.toHaveProperty('MANAGEONE')
   })
   it('旧 AOM 转为 NONE，保留已有服务地址但不生成地址或更换成 Prometheus', () => {
     const old = seed('AOM')
@@ -181,6 +182,17 @@ describe('AOM / 服务原生元数据和租户配置', () => {
     const selector = find(root, el => el.tag === 'Select' && el.props.class === 'ep-k')
     expect(selector.props.allowCreate).not.toBe(true)
     expect(walk(root).filter(el => el.tag === 'Option').some(el => el.props.value === 'aom')).toBe(false)
+  })
+  it('普通租户来源选择排除ManageOne；已有ManageOne仅只读保留且原值提交不被改写', async () => {
+    const blank = await mount(Dialog)
+    expect(metricsValues(blank)).not.toContain('MANAGEONE')
+    const tenant = seed('MANAGEONE')
+    const root = await mount(Dialog, tenant)
+    expect(metricsValues(root)).not.toContain('MANAGEONE')
+    expect(text(root)).toContain('ManageOne 来源由 ECS 配置单独管理')
+    await click(find(root, el => el.tag === 'Button' && text(el) === '保存修改'))
+    expect(api.updateTenant.mock.calls[0][1]).toMatchObject({ metrics_source: 'MANAGEONE' })
+    expect(tenant.metrics_source).toBe('MANAGEONE')
   })
   it('旧 AOM 租户打开时选择服务原生，原配置提示停用，保存提交 NONE', async () => {
     const tenant = seed('AOM')

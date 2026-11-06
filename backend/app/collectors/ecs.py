@@ -154,8 +154,11 @@ class EcsStatusCollector:
                     metrics={"mem_util": m["mem_util"]}, metric_observed_at=parse_at(m.get("mem_util_observed_at")),
                     metric_config_signature=m.get("metric_config_signature")))
             if "disk_util" in m:
+                # ManageOne CLOUD_VM.diskUsage describes cloud volumes, not the
+                # fullest filesystem. Keep its display value but not filesystem
+                # rule evidence or a fabricated mount point.
                 d = {"disk_util": m["disk_util"], "disk_mount": m.get("disk_mount", "-")}
-                obs.append(Observation(RESOURCE_TYPE, sid, name, "disk", d, metrics=d,
+                obs.append(Observation(RESOURCE_TYPE, sid, name, "disk", {} if source == "MANAGEONE" else d, metrics=d,
                     metric_observed_at=parse_at(m.get("disk_util_observed_at")),
                     metric_config_signature=m.get("metric_config_signature")))
             obs.append(Observation(RESOURCE_TYPE, sid, name, "reboot", {"reboots_24h": count},

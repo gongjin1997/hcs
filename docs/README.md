@@ -33,7 +33,7 @@
 
 | 服务 | 文档 |
 | --- | --- |
-| ECS | [ECS指标与分频采集](ECS指标与分频采集.md) · [AOM与ECS指标来源核对](AOM与ECS指标来源核对.md) |
+| ECS | [ECS指标与分频采集](ECS指标与分频采集.md) · [AOM与ECS指标来源核对](AOM与ECS指标来源核对.md) · [ManageOne 8.5.1 指标来源核对](references/manageone851/README.md) |
 | DCS | [DCS内存监控](DCS内存监控.md) · [DCS监控合同_20261102](DCS监控合同_20261102.md) · [DCS原生指标接口核对](DCS原生指标接口核对.md) |
 | GaussDB | [GaussDB原生诊断与接口核对](GaussDB原生诊断与接口核对.md) · [GaussDB后端联调合同_20261102](GaussDB后端联调合同_20261102.md) · [GaussDB页面重构_API合同_20261103](GaussDB页面重构_API合同_20261103.md) |
 | CCE | [CCE接口复核与优化建议_20261106](CCE接口复核与优化建议_20261106.md) · [CCE事件计数与告警处理_20261106](CCE事件计数与告警处理_20261106.md) |

@@ -100,6 +100,8 @@ def config_signature(tenant: object, policy: dict, source: str) -> str:
                getattr(tenant, "prometheus_url", None), policy.get("prometheus"),
                policy.get("metric_keys"), getattr(tenant, "id", None), getattr(tenant, "secret_cipher", None),
                getattr(tenant, "access_key", None), getattr(tenant, "domain_name", None)]
+    if source == "MANAGEONE" or getattr(tenant, "metrics_source", None) == "MANAGEONE":
+        payload.append(getattr(tenant, "manageone_config", None))
     return sha256(dumps(payload, ensure_ascii=True, sort_keys=True, default=str).encode()).hexdigest()
 
 
@@ -111,7 +113,7 @@ def timestamp_semantics(source: str, metric: str, diagnostic: dict | None) -> Ti
     if value in ("evaluation", "source_sample"):
         return cast(TimestampSemantics, value)
     # CES 数据点的 timestamp 字段来自显式选择的旧兼容协议；不代表已认证 HCS 版次。
-    return "source_sample" if source == "CES" else "unknown"
+    return "source_sample" if source in ("CES", "MANAGEONE") else "unknown"
 
 
 def save_readings(db: Session, resources: Sequence[Resource], readings: Mapping[str, Iterable[Reading]],
@@ -133,7 +135,7 @@ def save_readings(db: Session, resources: Sequence[Resource], readings: Mapping[
             value = number(point.value)
             at = point.observed_at
             if (point.metric not in METRICS or value is None or point.unit != "%"
-                    or point.source not in ("PROMETHEUS", "CES") or at.tzinfo is None
+                    or point.source not in ("PROMETHEUS", "CES", "MANAGEONE") or at.tzinfo is None
                     or not cutoff <= at <= collected_at + timedelta(seconds=30)
                     or isinstance(point.period_sec, bool) or not isinstance(point.period_sec, int) or point.period_sec < 0):
                 rejected += 1
@@ -372,7 +374,7 @@ def history(db: Session, scope: Scope, resource_ref: int, query: HistoryQuery) -
         sample.resource_ref == resource.id, sample.tenant_id == resource.tenant_id,
         sample.project_ref == resource.project_ref, sample.metric.in_(query.metrics),
         sample.observed_at >= query.start_at, sample.observed_at < min(query.end_at, now + timedelta(seconds=30)),
-        sample.source.in_(("AOM", "PROMETHEUS", "CES"))).group_by(sample.metric, sample.source, semantics, bucket))
+        sample.source.in_(("AOM", "PROMETHEUS", "CES", "MANAGEONE"))).group_by(sample.metric, sample.source, semantics, bucket))
     groups: dict[tuple[str, str, str], dict[int, tuple]] = defaultdict(dict)
     for metric, source, meaning, index, average, maximum, minimum, count in records:
         groups[(metric, source, meaning)][int(index)] = (average, maximum, minimum, count)
@@ -388,11 +390,14 @@ def history(db: Session, scope: Scope, resource_ref: int, query: HistoryQuery) -
                 points.append(EcsHistoryPoint(at=query.start_at + timedelta(seconds=index*query.interval_sec),
                     average=round(values[0], 4) if values else None, maximum=values[1] if values else None,
                     minimum=values[2] if values else None, sample_count=values[3] if values else 0))
-            series.append(EcsHistorySeries(metric=metric, label=METRICS[metric], source=source, points=points,
+            label = "云硬盘使用率" if metric == "disk_util" and source == "MANAGEONE" else METRICS[metric]
+            series.append(EcsHistorySeries(metric=metric, label=label, source=source, points=points,
                 timestamp_semantics=cast(TimestampSemantics, meaning)))
     warnings = []
     if any(source == "AOM" for _, source, _ in groups):
         warnings.append("AOM 已停用；此来源仅为停用前的历史记录，不参与当前值和巡检告警")
+    if any(metric == "disk_util" and source == "MANAGEONE" for metric, source, _ in groups):
+        warnings.append("ManageOne 云硬盘使用率按原始百分比展示，不代表最满文件系统分区；不据此推算已用容量")
     if not groups:
         warnings.append("所选时段没有实际采样；启用后开始积累，不使用当前值回填历史")
     if query.start_at < now - timedelta(days=RETENTION_DAYS):

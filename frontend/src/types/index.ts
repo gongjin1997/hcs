@@ -48,7 +48,7 @@ export interface AuditLog {
 }
 
 export type AuthType = 'PASSWORD' | 'AKSK'
-export type MetricsSource = 'AUTO' | 'AOM' | 'CES' | 'PROMETHEUS' | 'NONE'
+export type MetricsSource = 'AUTO' | 'AOM' | 'CES' | 'PROMETHEUS' | 'MANAGEONE' | 'NONE'
 export interface TenantProject {
   id?: number; region_id: string; project_id: string; project_name: string | null; external_domain: string; env: string
   workspaces: string[]; enabled: boolean

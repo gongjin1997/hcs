@@ -7,7 +7,7 @@ import EChart from '@/components/EChart.vue'
 import { useUserStore } from '@/stores/user'
 import { resourceAlarmsLocation, resourceLedgerLocation, resourceViewerScopeKey } from '@/config/resource-navigation'
 import { fmtTime } from '@/utils/format'
-import { METRICS_SOURCE, historicalMetricsSourceLabel, rawStatusType, statusText } from '@/utils/dict'
+import { METRICS_SOURCE, metricsSourceLabel, rawStatusType, statusText } from '@/utils/dict'
 import type { EcsInstance, EcsMetricKey } from '@/types/ecs'
 import { ECS_METRICS, ECS_PRESETS, ECS_STATE_LABEL, ecsLatestReadings, ecsTimestampLabel, intervalText, percentText } from './ecs-utils'
 import { ecsTrendChart } from './ecs-chart'
@@ -26,13 +26,16 @@ const { preset, history, appliedQuery, error, exportError, loading, exporting, c
 const statistic = shallowRef<'average' | 'maximum'>('average')
 const chart = computed(() => history.value ? ecsTrendChart(history.value, metric.value, statistic.value) : {})
 const hasData = computed(() => history.value?.series.some(series => series.metric === metric.value && series.points.some(point => point.sample_count > 0 && typeof point[statistic.value] === 'number' && Number.isFinite(point[statistic.value]))) ?? false)
-const sources = computed(() => [...new Set(history.value?.series.filter(series => series.metric === metric.value).map(series => historicalMetricsSourceLabel(series.source)) ?? [])].join(' / '))
+const sources = computed(() => [...new Set(history.value?.series.filter(series => series.metric === metric.value).map(series => metricsSourceLabel(series.source)) ?? [])].join(' / '))
 const instance = computed(() => history.value?.instance ?? (props.instance?.id === props.instanceId && props.instance?.tenant_id === props.tenantId ? props.instance : null))
 const target = computed(() => instance.value && { ...instance.value, resource_type: 'ecs_server' })
 const ledgerLink = computed(() => resourceLedgerLocation(target.value, user))
 const alarmsLink = computed(() => resourceAlarmsLocation(target.value, user))
 const readings = computed(() => instance.value ? ecsLatestReadings(instance.value) : [])
-const metricLabel = computed(() => ECS_METRICS.find(item => item.key === metric.value)!.label)
+const metricLabel = computed(() => {
+  const labels = [...new Set(history.value?.series.filter(series => series.metric === metric.value).map(series => series.label) ?? [])]
+  return labels.join(' / ') || ECS_METRICS.find(item => item.key === metric.value)!.label
+})
 const detailPage = shallowRef(1)
 watch(history, () => { detailPage.value = 1 })
 watch(() => [props.modelValue, props.instanceId, props.tenantId] as const, () => { detailTab.value = 'trend' })
@@ -85,13 +88,13 @@ async function onExport() { if (await exportExcel()) ElMessage.success('Excel �
             <el-table-column label="时间语义" min-width="210"><template #default="{ row }">{{ ecsTimestampLabel(row.timestamp_semantics) }}</template></el-table-column>
             <el-table-column label="返回时间（本地）" min-width="180"><template #default="{ row }">{{ fmtTime(row.observed_at, 'YYYY-MM-DD HH:mm:ss') }}</template></el-table-column>
             <el-table-column label="入库时间（本地）" min-width="180"><template #default="{ row }">{{ fmtTime(row.collected_at, 'YYYY-MM-DD HH:mm:ss') }}</template></el-table-column>
-            <el-table-column label="当前来源" min-width="130"><template #default="{ row }">{{ row.source ?? '无来源' }}</template></el-table-column>
+            <el-table-column label="当前来源" min-width="130"><template #default="{ row }">{{ row.source ? metricsSourceLabel(row.source) : '无来源' }}</template></el-table-column>
           </el-table>
           <div class="table-heading sample-heading"><h3>{{ metricLabel }} · 聚合明细</h3><div class="table-actions"><el-select v-model="metric" aria-label="采样明细指标" class="metric-select"><el-option v-for="item in ECS_METRICS" :key="item.key" :value="item.key" :label="item.label" /></el-select><el-button v-if="user.can('ledger:export')" :icon="Download" :disabled="!canExport" :loading="exporting" @click="onExport">导出 Excel</el-button></div></div>
           <p class="text-3 section-caption">与趋势条件一致，最近窗口优先；缺失值为 —。</p>
           <el-table v-loading="loading" :data="visibleRows" size="small" stripe max-height="340">
             <el-table-column label="结果窗口（本地）" min-width="180"><template #default="{ row }">{{ fmtTime(row.at, 'YYYY-MM-DD HH:mm:ss') }}</template></el-table-column>
-            <el-table-column label="来源" min-width="210"><template #default="{ row }">{{ historicalMetricsSourceLabel(row.source) }}</template></el-table-column>
+            <el-table-column label="来源" min-width="210"><template #default="{ row }">{{ metricsSourceLabel(row.source) }}</template></el-table-column>
             <el-table-column label="时间语义" min-width="210"><template #default="{ row }">{{ ecsTimestampLabel(row.timestamp_semantics) }}</template></el-table-column>
             <el-table-column label="均值" width="90"><template #default="{ row }">{{ percentText(row.sample_count > 0 ? row.average : null) }}</template></el-table-column>
             <el-table-column label="峰值" width="90"><template #default="{ row }">{{ percentText(row.sample_count > 0 ? row.maximum : null) }}</template></el-table-column>
@@ -111,6 +114,7 @@ async function onExport() { if (await exportExcel()) ElMessage.success('Excel �
               <div><dt>巡检</dt><dd>{{ instance.inspection_enabled ? `已开启 · ${intervalText(instance.inspection_interval_sec)}` : '已关闭' }}</dd></div>
               <div><dt>当前指标来源</dt><dd>{{ sourceText }}</dd></div>
               <div><dt>结果过期判定</dt><dd>{{ intervalText(instance.stale_after_sec) }} · 按返回时间；PromQL 默认求值时间</dd></div>
+              <div v-if="instance.metrics_source === 'MANAGEONE'"><dt>采集说明</dt><dd>云硬盘使用率不代表分区使用率；开机时间暂不支持。</dd></div>
             </dl>
             <el-alert v-if="instance.diagnostic?.message" :title="instance.diagnostic.message" type="info" :closable="false" show-icon />
             <p v-if="instance.diagnostic?.at" class="text-3 section-caption">诊断时间 {{ fmtTime(instance.diagnostic.at, 'YYYY-MM-DD HH:mm:ss') }}</p>

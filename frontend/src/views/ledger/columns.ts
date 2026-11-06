@@ -64,7 +64,8 @@ export const MONITOR_COLUMNS: Record<string, MonitorCol[]> = {
   ecs_server: [
     { label: 'CPU', width: 120, usage: true, value: (r) => r.metrics.cpu_util },
     { label: '内存', width: 120, usage: true, value: (r) => r.metrics.mem_util },
-    { label: '磁盘（最满分区）', width: 150, usage: true, value: (r) => r.metrics.disk_util, sub: (r) => (r.metrics.disk_mount ? String(r.metrics.disk_mount) : '') },
+    { label: '磁盘使用率', width: 150, usage: true, value: (r) => r.metrics.disk_util,
+      sub: (r) => r.attrs.metrics_source === 'MANAGEONE' ? '云硬盘' : (r.metrics.disk_mount ? String(r.metrics.disk_mount) : '最满分区') },
     { label: '24h 重启', width: 84, value: (r) => r.metrics.reboots_24h ?? 0 },
     { label: '指标来源', width: 100, value: (r) => fmtValue('metrics_source', r.attrs.metrics_source) },
   ],

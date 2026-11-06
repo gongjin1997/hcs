@@ -427,7 +427,7 @@ def _finish(ctx: RunContext, out: dict[str, list[EcsReading]], source: str, diag
             fresh_resources = sum(metric == alias for _, metric in fresh_pairs)
             incomplete = entry["errors"] or entry["rejected_points"] or fresh_resources < len(ids)
             entry["status"] = "partial" if incomplete else "ready"
-            if fresh_resources < len(ids):
+            if fresh_resources < len(ids) and not entry.get("reason"):
                 entry["reason"] = "stale_samples" if not fresh_resources else "incomplete_fresh_coverage"
         elif entry["errors"]:
             entry["status"] = "error"
@@ -499,4 +499,8 @@ def collect_readings(ctx: RunContext, ids: list[str], ip_index: dict[str, str], 
         elif source == "CES":
             with ces_access(ctx.client, use_ces(ctx.tenant)):
                 _ces(ctx, ids, aliases, config, diagnostic, out)
+        elif source == "MANAGEONE":
+            from app.metrics.manageone import collect_manageone
+
+            collect_manageone(ctx, ids, aliases, diagnostic, out)
     return _finish(ctx, out, source, diagnostic, ids)

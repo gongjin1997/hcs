@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 
 SOURCES = {"AUTO": "自动选择", "CES": "云监控 CES（兼容）",
-           "PROMETHEUS": "Prometheus", "NONE": "仅服务原生字段"}
+           "PROMETHEUS": "Prometheus", "MANAGEONE": "ManageOne（ECS 性能）", "NONE": "仅服务原生字段"}
 CAPABILITIES = {"ces": "云监控 CES（兼容）", "prometheus": "Prometheus", "cce_api": "CCE K8s API"}
 _DNS_ERRORS = ("Name or service not known", "nodename nor servname", "getaddrinfo", "No address associated")
 
@@ -65,6 +65,11 @@ def use_prometheus(tenant: object, *, client: object | None = None) -> bool:
 
 def effective(tenant: object, *, client: object | None = None) -> str:
     """旧显式 AOM 返回 NONE，不擅自切换其他数据源；原生字段不受影响。"""
+    if mode(tenant) == "MANAGEONE":
+        config = getattr(tenant, "manageone_config", None)
+        return "MANAGEONE" if (isinstance(config, dict) and config.get("enabled") is True
+            and all(isinstance(config.get(key), str) and config[key].strip()
+                    for key in ("endpoint", "username", "secret_cipher"))) else "NONE"
     if use_ces(tenant):
         return "CES"
     return "PROMETHEUS" if use_prometheus(tenant, client=client) else "NONE"

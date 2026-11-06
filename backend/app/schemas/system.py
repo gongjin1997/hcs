@@ -75,7 +75,8 @@ class TenantIn(BaseModel):
     report_user_ids: list[StrictInt] | None = None
     report_mail_to: list[str] = Field(default_factory=list, description="旧客户端兼容：仅接受已登记用户的邮箱")
     remark: str | None = None
-    metrics_source: str = Field(default="AUTO", description="AUTO / CES（需全局显式启用）/ PROMETHEUS / NONE；AOM 已停用")
+    metrics_source: str = Field(
+        default="AUTO", description="AUTO / CES（兼容）/ PROMETHEUS / MANAGEONE（ECS）/ NONE；AOM 已停用")
     prometheus_url: str | None = None
     projects: list[ProjectIn] = Field(min_length=1)
 
@@ -104,7 +105,7 @@ class TenantIn(BaseModel):
     @classmethod
     def _source(cls, v: str) -> str:
         if v == "AOM":
-            raise ValueError("AOM 已全局停用，请选择 AUTO、PROMETHEUS 或 NONE；仅旧部署显式启用时可选择 CES")
+            raise ValueError("AOM 已全局停用，请选择 AUTO、PROMETHEUS 或 NONE；ManageOne 请在 ECS 采集策略中配置")
         if v not in SOURCES:
             raise ValueError(f"监控指标来源只能是 {'/'.join(SOURCES)}")
         return v

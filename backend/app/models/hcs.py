@@ -36,6 +36,8 @@ class HcsAccount(TimestampMixin, Base):
     report_mail_to: Mapped[list] = mapped_column(JsonType, default=list)
     # 来源：AUTO（可选 Prometheus，否则原生字段）/ CES（需全局显式启用）/ PROMETHEUS / NONE；旧 AOM 值保留但全局停用
     metrics_source: Mapped[str] = mapped_column(String(16), default="AUTO")
+    # ManageOne 独立接入，默认关闭；不继承 IAM 凭据或自动启用采集。
+    manageone_config: Mapped[dict] = mapped_column(JsonType, default=dict, server_default="{}")
     prometheus_url: Mapped[str | None] = mapped_column(String(255))         # 可选：租户侧 Prometheus HTTP API 地址
     # 能力探测结果 {ces|prometheus|cce_api: {available, reason, at}}；旧 aom 仅历史记录，不探测、不选源
     capabilities: Mapped[dict] = mapped_column(JsonType, default=dict)

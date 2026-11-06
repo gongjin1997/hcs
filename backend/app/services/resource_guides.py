@@ -64,7 +64,7 @@ _METRICS: dict[str, list[GuideField]] = {
             "CPU 使用率",
             "%",
             "CPU 百分比；Prometheus 默认取 5 分钟非空闲比例。",
-            "metrics/prometheus.py: node_cpu_seconds_total；旧部署可选 CES；AOM 已停用",
+            "ManageOne CLOUD_VM.cpuUsage；Prometheus node_cpu_seconds_total；旧部署可选 CES；AOM 已停用",
             "cpu",
             limitations=_CES_LIMIT + ("不同来源的采样与聚合口径不同，切换来源后不直接比较短时波动。",),
         ),
@@ -73,18 +73,18 @@ _METRICS: dict[str, list[GuideField]] = {
             "内存使用率",
             "%",
             "Prometheus 默认 (1-MemAvailable/MemTotal)×100。",
-            "node_memory_MemAvailable_bytes/node_memory_MemTotal_bytes；旧部署可选 CES；AOM 已停用",
+            "ManageOne CLOUD_VM.memoryUsage；node_memory_MemAvailable_bytes/node_memory_MemTotal_bytes；旧部署可选 CES",
             "memory",
             limitations=("Prometheus 需要 node_exporter 与私网 IP 标签匹配；AOM 已停用。",),
         ),
         _number(
             "disk_util",
-            "最满分区使用率",
+            "磁盘使用率",
             "%",
-            "Prometheus 在同一实际采样时间返回的文件系统中取最大值。",
-            "(1-node_filesystem_avail_bytes/node_filesystem_size_bytes)×100；旧部署可选 CES；AOM 已停用",
+            "Prometheus 为同一时刻最满文件系统分区；ManageOne 为原始云硬盘使用率，不推算已用容量。",
+            "ManageOne CLOUD_VM.diskUsage；Prometheus 文件系统 avail/size；旧部署可选 CES；AOM 已停用",
             "disk",
-            limitations=("Prometheus 默认排除 tmpfs、overlay、squashfs、iso9660；缺失的挂载点不参与最大值。",),
+            limitations=("Prometheus 默认排除临时文件系统；ManageOne 无挂载点，其云硬盘值不用于旧文件系统分区告警。",),
         ),
         _field(
             "disk_mount",
@@ -546,7 +546,7 @@ _ATTRS: dict[str, list[GuideField]] = {
         _attribute(
             "metrics_source",
             "当前选择指标源",
-            "PROMETHEUS/NONE 或显式兼容 CES；AOM 已停用，旧来源不能作为当前采样。",
+            "MANAGEONE / PROMETHEUS / NONE 或显式兼容 CES；AOM 已停用，旧来源不能作为当前采样。",
             "metrics/ecs_readings.py: ecs_source(tenant, policy)",
         ),
         _attribute("ecs_state_checked_at", "状态查询时间", "独立状态巡检完成查询的 UTC 时间，不是使用率采样时间。",
@@ -924,7 +924,7 @@ _CONTENT: dict[str, tuple[str, list[str], list[str], list[str]]] = {
         "实例状态、可选使用率与观测重启相结合，区分基础设施状态和操作系统压力。",
         [
             "先核对预期运行状态、ECS 原始状态与电源/任务状态，再看 CPU、内存、最满分区。",
-            "使用率为空先查租户指标源、CES Agent 或 Prometheus 目标/IP 关联，"
+            "使用率为空先查租户指标源、ManageOne 北向配置与对象映射，或 CES / Prometheus 采集，"
             "再查业务；开机时间变化用于辅助判断操作系统内重启。",
             "重启高时对照资源变更、宿主 HA 和系统日志，区分人工操作、内核故障与计划维护。",
         ],
