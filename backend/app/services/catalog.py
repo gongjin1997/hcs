@@ -145,10 +145,12 @@ TASK_SPECS: tuple[TaskSpec, ...] = (
     # GaussDB 没有实时 CPU / 内存接口（原生接口只有磁盘用量与巡检记录），所以不负责 cpu / memory 检查项：
     # 否则这两类规则每轮都“缺采”，实例永远是“部分覆盖”，无法判为健康
     TaskSpec("gaussdb_status", "GaussDB 实例状态与容量", "gaussdb", 120, ("gaussdb_instance",),
-             ("instance_status", "disk"),
-             note="使用 GaussDB 原生接口只读采集，不使用 AOM 映射；磁盘、慢 SQL、会话等见 GaussDB 面板"),
-    TaskSpec("dcs_status", "DCS 实例状态与内存", "dcs", 60, ("dcs_instance",), ("instance_status", "memory", "cpu"),
-             note="CPU 由两次 instances/statistic 的累计 CPU 秒数折算（Δ秒 ÷ Δ时间 ÷ 主节点数），首次采样与实例重启后不输出"),
+             ("instance_status", "disk", "components"),
+             note="使用 GaussDB 原生接口只读采集，不使用 AOM 映射；在线实例另查磁盘用量与组件状态"
+                  "（CN / DN / CMS / GTM / ETCD），慢 SQL、会话、巡检报告在 GaussDB 页面按需查询"),
+    TaskSpec("dcs_status", "DCS 实例状态与内存", "dcs", 60, ("dcs_instance",), ("instance_status", "memory", "cpu", "nodes"),
+             note="每轮批量查询一次逻辑节点（分片、主从、Proxy 及节点状态）；CPU 由两次 instances/statistic 的累计 CPU 秒数折算"
+                  "（Δ秒 ÷ Δ时间 ÷ 主节点数），首次采样与实例重启后不输出"),
     TaskSpec("ecs_status", "ECS 状态与告警巡检", "ecs", 120, ("ecs_server",),
              ("instance_status", "cpu", "memory", "disk", "reboot"),
              note="ECS 状态与告警判定；使用独立指标采样点，不重复查询指标源。各租户频率在 ECS 采集策略配置"),

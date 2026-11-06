@@ -29,6 +29,8 @@ GAUSSDB_PATHS = [
 ]
 DCS_INSTANCES = "/v2/{project_id}/instances"
 DCS_STATISTICS = "/v2/{project_id}/instances/statistic"
+DCS_NODES = "/v2/{project_id}/instances-logical-nodes"
+NO_NODES = {"count": 0, "instances": []}
 
 
 class PdfResponses:
@@ -68,10 +70,27 @@ def gaussdb_instance(index=0, **changes):
             "created": "2024-07-02 08:32:07 UTC", "nodes": [], **changes}
 
 
+GAUSS_ONLINE = ("ACTIVE", "STORAGE FULL", "BACKING UP")
+# §4.3.10 表 4-78～4-80 p112–114：nodes[].components[]，组件状态 Primary / Standby / Down …
+GAUSS_COMPONENTS = {"total_count": 1, "nodes": [{"id": "node-1", "name": "dn-1", "availability_zone_id": "az-1",
+                                                 "components": [{"id": "dn_6001", "type": "DN", "role": "master",
+                                                                 "status": "Primary", "distributed_id": "group-1"}]}]}
+
+
 def native_volumes(instances):
     # §4.2.1 正式 URI：磁盘查询使用 v3，不继承实例列表版本号，不用配置 volume.size 计算。
-    return {("gaussdb", f"/gaussdb/v3/{{project_id}}/instances/{row['id']}/volume-usage"):
-            [{"used": "15.0", "total": "185.0"}] for row in instances if row["status"] == "ACTIVE"}
+    # 在线实例（正常、磁盘满、备份中）同时查询 §4.3.10 组件列表，同样是 v3 前缀。
+    reads = {}
+    for row in instances:
+        if row["status"] in GAUSS_ONLINE:
+            prefix = f"/gaussdb/v3/{{project_id}}/instances/{row['id']}"
+            reads[("gaussdb", f"{prefix}/volume-usage")] = [{"used": "15.0", "total": "185.0"}]
+            reads[("gaussdb", f"{prefix}/components")] = [GAUSS_COMPONENTS]
+    return reads
+
+
+def native_call(route):
+    return {"offset": 0, "limit": 100} if route.endswith("/components") else None
 
 
 def dcs_instance(index=0, **changes):
@@ -95,7 +114,7 @@ def test_gaussdb_pdf_product_prefix_and_record_offsets(monkeypatch, variant, pat
     assert [row.resource_id for row in statuses] == [item["id"] for item in instances]
     expected = [("gaussdb", path, {"offset": 0, "limit": 100}), ("gaussdb", path, {"offset": 2, "limit": 100})]
     if consumer == "collector":
-        expected += [(service, route, None) for service, route in native_volumes(instances)]
+        expected += [(service, route, native_call(route)) for service, route in native_volumes(instances)]
     assert client.calls == expected
 
 
@@ -116,13 +135,16 @@ def test_gaussdb_volume_failure_has_safe_diagnostic(error, expected):
     item = gaussdb_instance()
     path = GAUSSDB_PATHS[0][1]
     volume_path = f"/gaussdb/v3/{{project_id}}/instances/{item['id']}/volume-usage"
+    component_path = f"/gaussdb/v3/{{project_id}}/instances/{item['id']}/components"
     client = PdfResponses({("gaussdb", path): [{"instances": [item], "total_count": 1}],
-                           ("gaussdb", volume_path): [error]})
+                           ("gaussdb", volume_path): [error], ("gaussdb", component_path): [GAUSS_COMPONENTS]})
     ctx = context(client)
 
     rows = GaussDBCollector().collect(ctx)
 
-    assert len(rows) == 2 and rows[-1].storage_status == "ERROR"
+    # 磁盘失败不影响组件查询：实例状态、组件、缺采的磁盘占位
+    assert [row.check_item for row in rows] == ["instance_status", "components", "disk"]
+    assert rows[-1].storage_status == "ERROR"
     assert ctx.errors == [f"GaussDB 原生磁盘用量查询失败（{expected}）"]
     assert "private endpoint detail" not in ctx.errors[0]
 
@@ -135,14 +157,19 @@ def test_gaussdb_pdf_instance_nodes_preserve_roles_and_status(role):
     client = PdfResponses({("gaussdb", GAUSSDB_PATHS[0][1]): [
         {"instances": [item], "total_count": 1},
     ], **native_volumes([item])})
-    row, disk = GaussDBCollector().collect(context(client))
+    row, disk, component = GaussDBCollector().collect(context(client))
     assert row.attrs["nodes"] == [{"name": "node-1", "role": role, "status": "ACTIVE"}]
     assert row.metrics == {"cpu_usage": None, "mem_usage": None, "disk_usage": None,
                            "disk_used_gb": None, "disk_total_gb": None}
     assert disk.metrics == {"disk_usage": 8.11, "disk_used_gb": 15, "disk_total_gb": 185}
     assert row.attrs["memory_size"] == 64 and row.attrs["volume_size"] == 40
     assert row.attrs["memory_unit_verified"] is False and row.attrs["volume_unit_verified"] is False
-    assert len(client.calls) == 2
+    assert component.check_item == "components"
+    assert component.facts == {"down_components": 0, "unknown_components": 0, "down_list": ""}
+    assert row.attrs["gaussdb_components"]["items"][0] == {
+        "node_id": "node-1", "node_name": "dn-1", "availability_zone_id": "az-1", "component_id": "dn_6001",
+        "component_type": "DN", "role": "master", "status": "Primary", "distributed_id": "group-1"}
+    assert len(client.calls) == 3
 
 
 @pytest.mark.parametrize("variant,path", GAUSSDB_PATHS)
@@ -236,13 +263,16 @@ def test_dcs_pdf_statistics_memory_mb_and_cumulative_cpu_seconds():
         ("dcs", DCS_INSTANCES): [{"instances": [dcs_instance(used_memory=10, max_memory=100)], "instance_num": 1}],
         ("dcs", DCS_STATISTICS): [{"statistics": [{"instance_id": "dcs-0", "used_memory": 0, "max_memory": 460,
                                                   "used_cpu": "12000.56", "keys": 10, "cmd_get_count": 20}]}],
+        ("dcs", DCS_NODES): [NO_NODES],
     })
     rows = DcsCollector().collect(context(client))
     status, memory = rows
     assert memory.check_item == "memory"
     assert memory.facts == {"memory_usage": 0.0, "used_memory_mb": 0.0, "max_memory_mb": 460.0}
     assert status.metrics["cpu_usage"] is None and status.metrics["connected_clients"] is None
-    assert client.calls[-1] == ("dcs", DCS_STATISTICS, None)
+    assert client.calls[1] == ("dcs", DCS_STATISTICS, None)
+    # §4.3.3 p80：批量节点查询按实例分页，limit 最大 100
+    assert client.calls[2] == ("dcs", DCS_NODES, {"offset": 0, "limit": 100})
 
 
 @pytest.mark.parametrize("body", [None, [], "invalid-root", 1, {"statistics": None},
@@ -251,13 +281,14 @@ def test_dcs_pdf_malformed_statistics_is_partial_and_keeps_list_snapshot(body):
     client = PdfResponses({
         ("dcs", DCS_INSTANCES): [{"instances": [dcs_instance(used_memory=2, max_memory=128)], "instance_num": 1}],
         ("dcs", DCS_STATISTICS): [body],
+        ("dcs", DCS_NODES): [NO_NODES],
     })
     ctx = context(client)
     rows = DcsCollector().collect(ctx)
     assert rows[0].status_raw == "RUNNING" and ctx.errors
     assert rows[1].facts == {"memory_usage": 1.6, "used_memory_mb": 2, "max_memory_mb": 128}
     assert ctx.stats["native_statistics"] == 0
-    assert len(client.calls) == 2
+    assert len(client.calls) == 3
 
 
 @pytest.mark.parametrize("status", ["CREATING", "CREATEFAILED", "RUNNING", "ERROR", "RESTARTING", "EXTENDING", "RESTORING"])
@@ -266,10 +297,14 @@ def test_dcs_pdf_instance_status_is_preserved_without_node_status_conversion(sta
     client = PdfResponses({
         ("dcs", DCS_INSTANCES): [{"instances": [dcs_instance(status=status)], "instance_num": 1}],
         ("dcs", DCS_STATISTICS): [{"statistics": []}],
+        ("dcs", DCS_NODES): [NO_NODES],
     })
     row, = [item for item in DcsCollector().collect(context(client)) if item.check_item == "instance_status"]
     assert row.status_raw == status and row.facts == {"status": status}
-    assert len(client.calls) == (2 if status == "RUNNING" else 1)
+    # 统计只查运行中实例；节点查询除创建中 / 创建失败外都查（§4.3.3：创建中实例不返回节点信息）
+    paths = [call[1] for call in client.calls]
+    assert (DCS_STATISTICS in paths) is (status == "RUNNING")
+    assert (DCS_NODES in paths) is (status not in ("CREATING", "CREATEFAILED"))
 
 
 def test_dcs_pdf_iso_utc_created_time_and_capacity_units_are_independent_of_memory_mb():
@@ -286,8 +321,9 @@ def test_dcs_pdf_statistics_error_does_not_fall_back_to_v1_or_other_products(sta
     client = PdfResponses({
         ("dcs", DCS_INSTANCES): [{"instances": [dcs_instance(used_memory=2, max_memory=128)], "instance_num": 1}],
         ("dcs", DCS_STATISTICS): [HcsError(status, "SYNTHETIC.ERROR", "unavailable")],
+        ("dcs", DCS_NODES): [NO_NODES],
     })
     ctx = context(client)
     rows = DcsCollector().collect(ctx)
     assert ctx.errors and len(rows) == 2
-    assert [call[:2] for call in client.calls] == [("dcs", DCS_INSTANCES), ("dcs", DCS_STATISTICS)]
+    assert [call[:2] for call in client.calls] == [("dcs", DCS_INSTANCES), ("dcs", DCS_STATISTICS), ("dcs", DCS_NODES)]

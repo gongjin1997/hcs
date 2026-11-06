@@ -57,6 +57,25 @@ class RunContext:
         return self.scopes.get(self.tenant_id, resource_type) if self.scopes is not None else OPEN
 
 
+def previous_attrs(ctx: RunContext, resource_type: str, ids: list[str], key: str) -> dict[str, dict]:
+    """上一次保存在资源记录里的某个对象型属性（只读本租户、本项目）；接口本轮失败时用来保留上次的结果。"""
+    if ctx.db is None or not ids:
+        return {}
+    from sqlalchemy import select
+
+    from app.models import Resource
+
+    found: dict[str, dict] = {}
+    for start in range(0, len(ids), 500):
+        for resource_id, attrs in ctx.db.execute(select(Resource.resource_id, Resource.attrs).where(
+                Resource.resource_type == resource_type, Resource.tenant_id == ctx.tenant_id,
+                Resource.project_ref == ctx.project_ref, Resource.resource_id.in_(ids[start:start + 500]))):
+            value = attrs.get(key) if isinstance(attrs, dict) else None
+            if isinstance(value, dict):
+                found[resource_id] = value
+    return found
+
+
 def log_collection_failure(logger: logging.Logger, ctx: RunContext, exc: Exception, *,
                            cloud_service: str, phase: str, **fields: object) -> None:
     """局部采集失败保留安全调用栈；不记录返回正文、headers、事实或认证上下文。"""

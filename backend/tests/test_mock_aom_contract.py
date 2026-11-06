@@ -499,7 +499,7 @@ def test_ecs_aom_stays_disabled_and_gaussdb_keeps_independent_native_source(
     observations = collector().collect(context)
     assert context.errors == [] and context.stats["metrics_source"] == "GAUSSDB"
     assert "aom_matched_resources" not in context.stats
-    assert {row.check_item for row in observations} == {"instance_status", "disk"}
+    assert {row.check_item for row in observations} == {"instance_status", "disk", "components"}
     assert observations[0].metrics["cpu_usage"] is observations[0].metrics["mem_usage"] is None
     assert observations[1].metrics["disk_used_gb"] is not None
     assert observations[1].metrics["disk_total_gb"] > 0

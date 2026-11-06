@@ -3,7 +3,7 @@ import { onMounted, onScopeDispose, shallowRef } from 'vue'
 import type { DcsInstance, DcsMetricKey } from '@/types/dcs'
 import { rawStatusType, statusText } from '@/utils/dict'
 import { fmtTime } from '@/utils/format'
-import { freshnessState, metricText } from './dcs-utils'
+import { freshnessState, metricText, topologyHealth, topologyText } from './dcs-utils'
 
 const props = defineProps<{ instances: DcsInstance[]; loading: boolean; selectedIds?: number[] }>()
 const emit = defineEmits<{ select: [id: number] }>()
@@ -31,7 +31,7 @@ const rowClass = ({ row }: { row: DcsInstance }) => (props.selectedIds?.includes
 
 <template>
   <section class="hi-card current-statistics" aria-label="当前原生统计">
-    <div class="hi-card__title">当前原生统计<span class="sub">源端未提供采样时间；新鲜度按本地获取时间计算 · 点击一行查看该实例趋势</span></div>
+    <div class="hi-card__title">当前原生统计<span class="sub">源端未提供采样时间；新鲜度按本地获取时间计算 · 点击一行查看该实例的分片节点与趋势</span></div>
     <el-table v-loading="props.loading" :data="props.instances" row-key="id" size="small" stripe :row-class-name="rowClass"
               @row-click="(row: DcsInstance) => emit('select', row.id)">
       <el-table-column label="实例" min-width="205" fixed><template #default="{ row }">
@@ -39,6 +39,10 @@ const rowClass = ({ row }: { row: DcsInstance }) => (props.selectedIds?.includes
         <el-tag v-if="row.status_raw" size="small" :type="rawStatusType(row.status_raw)" effect="plain" class="gap">{{ statusText('dcs_instance', row.status_raw) }}</el-tag>
         <el-tag v-if="row.scope_excluded" size="small" type="info" effect="plain" class="gap" title="被采集范围规则排除，不再采集">范围外</el-tag>
         <div class="text-3">{{ row.tenant_name }} · {{ row.project_name ?? row.resource_id }}</div>
+      </template></el-table-column>
+      <el-table-column label="分片 / 节点" min-width="200"><template #default="{ row }">
+        <el-tag size="small" :type="topologyHealth(row.topology).type" effect="plain">{{ topologyHealth(row.topology).text }}</el-tag>
+        <div class="text-3">{{ topologyText(row.topology) }}</div>
       </template></el-table-column>
       <el-table-column label="新鲜度 / 获取时间" min-width="230"><template #default="{ row }">
         <el-tag :type="freshnessState(row as DcsInstance, now) === 'FRESH' ? 'success' : 'info'" size="small" effect="plain">{{ stateLabels[freshnessState(row as DcsInstance, now)] }}</el-tag>

@@ -42,7 +42,8 @@ def test_v2_statistics_preserve_native_units_and_response_time(monkeypatch):
     assert current.metrics["cpu_usage"] is None
     assert current.metric_observed_at == AT
     assert current.attrs["dcs_monitoring"]["api_version"] == "v2"
-    assert calls == [("dcs", "/v2/{project_id}/instances"), ("dcs", "/v2/{project_id}/instances/statistic")]
+    assert calls == [("dcs", "/v2/{project_id}/instances"), ("dcs", "/v2/{project_id}/instances/statistic"),
+                     ("dcs", "/v2/{project_id}/instances-logical-nodes")]
 
 
 

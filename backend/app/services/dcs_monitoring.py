@@ -24,6 +24,8 @@ from app.schemas.dcs import (
     DcsMetricSeries,
     DcsMetricsHistoryOut,
     DcsMetricSummary,
+    DcsNode,
+    DcsTopology,
 )
 
 
@@ -58,6 +60,39 @@ def native_current(resource: Resource, now: datetime | None = None) -> dict[str,
         "time_basis": "RESPONSE_RECEIVED" if native else None, "freshness": state,
         "sample_age_sec": max(0, age) if native and age is not None else None,
         "stale_after_sec": threshold, "warning": warning}
+
+
+TOPOLOGY_STATES = {"AVAILABLE", "NOT_RETURNED", "NOT_SUPPORTED", "STALE", "UNAVAILABLE", "NOT_QUERIED"}
+TOPOLOGY_COUNTS = ("node_count", "shards", "masters", "replicas", "proxies", "inactive", "inactive_masters",
+                   "transitional", "unknown")
+NODE_FIELDS = ("name", "node_name", "role", "kind", "status", "shard", "shard_id", "ip", "port", "az")
+
+
+def topology_out(resource: Resource, now: datetime | None = None) -> DcsTopology | None:
+    """本地保存的节点汇总；过期判断沿用该实例 DCS 统计的有效期，接口失败时的旧汇总一律标为过期。"""
+    attrs = resource.attrs or {}
+    raw = attrs.get("dcs_topology")
+    if not isinstance(raw, dict) or raw.get("state") not in TOPOLOGY_STATES:
+        return None
+    meta = attrs.get("dcs_monitoring")
+    threshold = meta.get("stale_after_sec", 900) if isinstance(meta, dict) else 900
+    if isinstance(threshold, bool) or not isinstance(threshold, int) or threshold < 60:
+        threshold = 900
+    observed = parse_observed_at(raw.get("observed_at"))
+    age = ((now or utcnow()) - observed).total_seconds() if observed else None
+    freshness = ("NO_DATA" if age is None or age < -30 else
+                 "STALE" if raw["state"] == "STALE" or age > threshold else "FRESH")
+    counts = {key: raw.get(key) if type(raw.get(key)) is int and raw[key] >= 0 else None for key in TOPOLOGY_COUNTS}
+    warning = raw.get("warning") if isinstance(raw.get("warning"), str) else None
+    return DcsTopology(state=raw["state"], observed_at=observed, freshness=freshness, warning=warning, **counts)
+
+
+def nodes_out(resource: Resource) -> list[DcsNode]:
+    nodes = (resource.attrs or {}).get("nodes")
+    if not isinstance(nodes, list):
+        return []
+    return [DcsNode(**{key: node.get(key) if isinstance(node.get(key), str) else None for key in NODE_FIELDS})
+            for node in nodes if isinstance(node, dict) and isinstance(node.get("name"), str) and node["name"]]
 
 
 def save_metric_samples(db: Session, groups: dict[tuple[str, str], list[Observation]],

@@ -198,6 +198,14 @@ def dcs_statistics(project_id: str, caller: CALLER):
                            for row in oa.dcs_instances(tenant["ds"]) if row["status"] == "RUNNING"]}
 
 
+@app.get("/v2/{project_id}/instances-logical-nodes")
+def dcs_logical_nodes(project_id: str, caller: CALLER, offset: int = Query(0, ge=0), limit: int = Query(10, ge=1, le=100)):
+    """§4.3.3 批量查询实例节点信息：按实例分页（limit 缺省 10、最大 100），count 为实例总数；创建中实例不返回。"""
+    tenant = _query_tenant(project_id, caller)
+    rows = oa.dcs_logical_nodes(tenant["ds"])
+    return {"count": len(rows), "instances": _offset(rows, offset, limit)}
+
+
 def _require_ces(t: dict) -> None:
     if not has(t, "ces"):
         raise err(404, "The API does not exist or has not been published in the environment (ces)")

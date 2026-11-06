@@ -21,6 +21,7 @@ from app.core.deps import Scope
 from app.core.response import BizError, ErrorCode, not_found
 from app.hcs import HcsClient, HcsError
 from app.hcs.factory import client_for
+from app.hcs.gaussdb_native import components as native_components
 from app.hcs.gaussdb_native import identifier, instance_path, volume_usage
 from app.hcs.query_cache import QueryCache
 from app.hcs.ratelimit import request_budget
@@ -42,7 +43,6 @@ from app.services.inspection_health import current_health
 
 _cache = QueryCache()
 MAX_ROWS = 5000
-MAX_COMPONENT_PAGES = 20
 INSTANCE_RECORD_FIELDS = {"record_id", "instance_id", "instance_name", "inspection_policy", "inspection_scope",
                           "task_name", "start_time", "end_time", "status", "progress", "total_count", "normal_count",
                           "abnormal_count", "failed_count"}
@@ -275,39 +275,7 @@ def _cached_rows(db: Session, target: Target, operation: str, options: object,
 
 
 def _components(client: HcsClient, iid: str) -> list[GaussComponent]:
-    result: list[GaussComponent] = []
-    seen: set[tuple[str, str]] = set()
-    seen_nodes: set[str] = set()
-    offset = 0
-    for _ in range(MAX_COMPONENT_PAGES):
-        body = client.get("gaussdb", instance_path(iid, "components"), params={"offset": offset, "limit": 100})
-        rows, total = _rows(body, "nodes")
-        if not rows:
-            if total is not None and offset < total:
-                raise HcsError(0, "LOCAL.GAUSSDB_RESPONSE", "组件分页提前结束")
-            return result
-        if total is not None and offset + len(rows) > total:
-            raise HcsError(0, "LOCAL.GAUSSDB_RESPONSE", "组件总数与记录不一致")
-        for row in rows:
-            nested = row.get("components")
-            if not isinstance(row.get("id"), str) or not isinstance(nested, list):
-                raise HcsError(0, "LOCAL.GAUSSDB_RESPONSE", "节点组件结构不完整")
-            if row["id"] in seen_nodes:
-                raise HcsError(0, "LOCAL.GAUSSDB_RESPONSE", "组件节点分页重复")
-            seen_nodes.add(row["id"])
-            for item in nested:
-                if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not isinstance(item.get("type"), str):
-                    raise HcsError(0, "LOCAL.GAUSSDB_RESPONSE", "组件标识或类型不完整")
-                pair = (row["id"], item["id"])
-                if pair in seen:
-                    raise HcsError(0, "LOCAL.GAUSSDB_RESPONSE", "组件列表重复")
-                seen.add(pair)
-                result.append(GaussComponent(node_id=row["id"], node_name=row.get("name"), component_id=item["id"],
-                                              component_type=item["type"], role=item.get("role"), status=item.get("status")))
-        offset += len(rows)
-        if (total is not None and offset >= total) or (total is None and len(rows) < 100):
-            return result
-    raise HcsError(0, "LOCAL.GAUSSDB_RESPONSE", "组件记录过多，请核对接口分页")
+    return [GaussComponent.model_validate(item) for item in native_components(client, iid)]
 
 
 def overview(db: Session, scope: Scope, resource_ref: int) -> GaussOverviewOut:

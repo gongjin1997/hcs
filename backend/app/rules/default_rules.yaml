@@ -192,6 +192,20 @@
   for_count: 2
   recover: {below: 70}
   runbook: 清理过期分区与归档日志、排查大表膨胀（VACUUM）；预计 7 天内写满时提交扩容申请。
+# 组件状态取自 §4.3.10 查询实例的组件列表（表 4-80）：Down 为宕机；实例状态仍可能是 ACTIVE（备 DN、CN 故障时）
+- id: R-GS-012
+  name: GaussDB 组件宕机
+  resource_type: gaussdb_instance
+  check_item: components
+  kind: state
+  expr: {when: "down_components > 0", severity: P2, critical_severity: P1, value_field: down_components,
+         title: "{down_components} 个组件宕机：{down_list}"}
+  for_count: 2
+  recover: {when: "down_components == 0"}
+  runbook: |
+    1. 在 GaussDB 控制台打开实例的节点 / 组件信息，确认宕机的组件类型（CN、DN、CMS、GTM、ETCD）及所在节点；
+    2. 备 DN、CN 宕机时实例可能仍显示正常，但冗余或接入能力已下降；主 DN 宕机需确认是否已完成主备切换；
+    3. 联系 DBA 与平台运维修复节点或重建组件，恢复后确认 DN 主备同步正常。
 # 停用：GaussDB 没有实时 CPU 接口（原生接口只有磁盘用量与巡检记录），本规则每轮都缺采；规则页不允许重新启用
 - id: R-GS-007
   name: GaussDB CPU 使用率过高
@@ -294,6 +308,33 @@
     1. 使用 slowlog 和 info commandstats 定位高耗 CPU 的命令（如 KEYS、大 Key 的 HGETALL、Lua 脚本）；
     2. 排查热 Key 与大 Key，通知业务改造访问方式；
     3. 持续高于阈值时评估扩容为集群版或读写分离。
+# 节点规则只看“实例运行中”的节点：实例异常 / 重启 / 扩容时由实例状态规则负责，避免同一事件重复告警
+- id: R-DCS-008
+  name: DCS 主节点故障
+  resource_type: dcs_instance
+  check_item: nodes
+  kind: state
+  expr: {when: "instance_status == 'RUNNING' and inactive_masters > 0", severity: P1, value_field: inactive_masters,
+         title: "{inactive_masters} 个主节点故障：{inactive_list}"}
+  for_count: 2
+  recover: {when: "inactive_masters == 0"}
+  runbook: |
+    1. 在 DCS 控制台打开实例的“节点管理 / 分片与副本”，确认故障主节点所在分片是否已自动倒换（从节点升主）；
+    2. 未完成倒换时该分片不可写，立即评估业务影响，并提交工单联系 HCS 平台运维排查节点所在主机与网络；
+    3. 恢复后核对分片的主从关系与复制状态，需要时在业务低峰把主节点切回原可用区。
+- id: R-DCS-009
+  name: DCS 从节点或 Proxy 节点故障
+  resource_type: dcs_instance
+  check_item: nodes
+  kind: state
+  expr: {when: "instance_status == 'RUNNING' and inactive_other_nodes > 0", severity: P2, critical_severity: P1,
+         value_field: inactive_other_nodes, title: "{inactive_other_nodes} 个从节点 / Proxy 节点故障：{inactive_list}"}
+  for_count: 2
+  recover: {when: "inactive_other_nodes == 0"}
+  runbook: |
+    1. 从节点故障时该分片失去高可用，主节点再出问题就会中断；Proxy 节点故障会减少可用的接入节点；
+    2. 在 DCS 控制台查看故障节点的分片与可用区，提交工单联系平台运维修复或重建副本；
+    3. 修复完成前不要对实例做变更规格、重启等操作。
 # 停用：DCS v2 实例列表 / 统计接口没有实例级连接数与上限（API §4.1.2、§4.2.6）；节点会话数不能当作实例连接数
 - id: R-DCS-007
   name: DCS 连接数使用率过高

@@ -25,7 +25,8 @@ from app.schemas.dcs import (
     DcsMemorySummary,
     IntervalMinutes,
 )
-from app.services.dcs_monitoring import native_current
+from app.services.dcs_monitoring import native_current, nodes_out, topology_out
+from app.services.inspection_health import current_health
 
 
 @dataclass(frozen=True)
@@ -76,15 +77,17 @@ def instance_out(row: Resource, tenants: dict[int, HcsAccount], projects: dict[i
                           project_ref=row.project_ref,
                           project_name=(project.project_name or project.project_id) if project else None,
                           region=row.region, status_raw=row.status_raw,
-                          snapshot_at=row.last_seen, **metrics)
+                          snapshot_at=row.last_seen, health=current_health(row), topology=topology_out(row),
+                          **metrics)
 
 
 def get_instance(db: Session, scope: Scope, resource_ref: int) -> DcsInstanceOut:
+    """单实例详情：在列表字段之外带上逻辑节点清单（本地保存，不请求云）。"""
     row = db.scalar(_resources(scope).where(Resource.id == resource_ref))
     if row is None:
         raise not_found("DCS 实例")
     tenants, projects = _labels(db, [row])
-    return instance_out(row, tenants, projects)
+    return instance_out(row, tenants, projects).model_copy(update={"nodes": nodes_out(row)})
 
 
 def list_instances(db: Session, scope: Scope, *, keyword: str | None = None, tenant_id: int | None = None,

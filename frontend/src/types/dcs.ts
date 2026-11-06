@@ -38,6 +38,48 @@ export interface DcsInstance {
   sample_age_sec?: number | null
   stale_after_sec?: number
   warning?: string | null
+  /** 告警级别优先；巡检证据过期或缺失时为 UNKNOWN */
+  health?: string | null
+  /** 分片 / 主从 / Proxy 汇总（DCS 逻辑节点接口）；从未获取过时为空 */
+  topology?: DcsTopology | null
+  /** 只在单实例详情返回 */
+  nodes?: DcsNode[] | null
+}
+
+export type DcsTopologyState = 'AVAILABLE' | 'NOT_RETURNED' | 'NOT_SUPPORTED' | 'STALE' | 'UNAVAILABLE' | 'NOT_QUERIED'
+
+export interface DcsTopology {
+  state: DcsTopologyState
+  /** 本地收到节点响应的时间 */
+  observed_at: string | null
+  freshness: 'FRESH' | 'STALE' | 'NO_DATA'
+  node_count: number | null
+  shards: number | null
+  masters: number | null
+  replicas: number | null
+  proxies: number | null
+  inactive: number | null
+  inactive_masters: number | null
+  transitional: number | null
+  unknown: number | null
+  warning: string | null
+}
+
+export interface DcsNode {
+  /** IP:端口，主从倒换后不变 */
+  name: string
+  node_name: string | null
+  /** master / slave / proxy */
+  role: string | null
+  /** redis-server / redis-proxy */
+  kind: string | null
+  /** Creating / Active / Inactive / Deleting / AddSharding */
+  status: string | null
+  shard: string | null
+  shard_id: string | null
+  ip: string | null
+  port: string | null
+  az: string | null
 }
 
 export interface DcsInstancesOut {

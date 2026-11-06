@@ -45,10 +45,12 @@ class GaussProjectOption(BaseModel):
 class GaussComponent(BaseModel):
     node_id: str
     node_name: str | None = None
+    availability_zone_id: str | None = None
     component_id: str
     component_type: str
     role: str | None = None
     status: str | None = None
+    distributed_id: str | None = Field(default=None, description="DN 分组（分片）ID；其他组件为空")
 
 
 class GaussDisk(BaseModel):

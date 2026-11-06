@@ -31,5 +31,5 @@ def test_absent_metrics_clear_previous_source_values_but_keep_native_status(coll
     assert all(merged[field] is None for field in fields)
     assert status.facts["status"] == "ACTIVE"
     assert status.attrs["metrics_source"] == ("GAUSSDB" if collector.service == "gaussdb" else "NONE")
-    # 合成磁盘响应不完整时保持缺失；不回退 AOM/CES 或沿用旧值。
-    assert len(calls) == (2 if collector.service == "gaussdb" else 1)
+    # 合成磁盘响应不完整时保持缺失；不回退 AOM/CES 或沿用旧值。GaussDB 另查一次组件（与磁盘互不影响）。
+    assert len(calls) == (3 if collector.service == "gaussdb" else 1)

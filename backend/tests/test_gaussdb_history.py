@@ -148,6 +148,9 @@ class CollectorCloud:
         if path.endswith("/instances"):
             return {"total_count": 1, "instances": [{"id": "same-cloud-instance", "name": "原生实例",
                 "status": self.status, "volume": {"size": 9999}, "flavor_info": {"mem": 8888}, "nodes": []}]}
+        if path.endswith("/components"):        # 组件状态与磁盘历史无关，这里给出一组正常组件
+            return {"total_count": 1, "nodes": [{"id": "node-1", "name": "dn-1", "components": [
+                {"id": "dn_6001", "type": "DN", "role": "master", "status": "Primary"}]}]}
         assert path == "/gaussdb/v3/{project_id}/instances/same-cloud-instance/volume-usage"
         if isinstance(self.volume, Exception):
             raise self.volume

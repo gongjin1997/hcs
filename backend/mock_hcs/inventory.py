@@ -105,14 +105,15 @@ GAUSSDB = [("gs-core-01", "ACTIVE", "Ha", 2000, "10.10.3.11", (62.1, 71.3, 87.4)
            ("gs-crm-01", "STORAGE FULL", "Ha", 500, "10.10.3.13", (41.0, 58.2, 99.1), fixed("2025-02-10 08:30")),
            ("gs-bill-01", "ACTIVE", "Ha", 1000, "10.10.3.14", (31.0, 47.5, 54.3), fixed("2025-05-12 08:00")),
            ("gs-audit-01", "ACTIVE", "Independent", 500, "10.10.3.15", (18.2, 39.9, 41.7), fixed("2025-07-01 08:00"))]
-# DCS：名称, 状态, 版本, 容量 GB, used_memory MB, IP, CES 指标 (cpu, connected_clients), 创建时间
+# DCS：名称, 状态, 版本, 容量 GB, used_memory MB, IP, CES 指标 (cpu, connected_clients), 创建时间；
+# mode 缺省为主备（1 主 1 从），cluster / proxy 按 shards 生成分片、proxy 另有 proxies 个 Proxy 节点（逻辑节点接口用）
 DCS: list[dict[str, Any]] = [
     {"name": "redis-prod-01", "status": "RUNNING", "ver": "5.0", "cap": 16, "used": 15123, "ip": "10.10.3.41",
      "ces": (46.2, 1840), "created": fixed("2025-01-08 06:12")},
     {"name": "redis-session-01", "status": "RUNNING", "ver": "5.0", "cap": 8, "used": 5030, "ip": "10.10.3.42",
-     "ces": (35.0, 920), "created": fixed("2025-01-08 06:20")},
+     "ces": (35.0, 920), "created": fixed("2025-01-08 06:20"), "mode": "proxy", "shards": 2, "proxies": 2},
     {"name": "redis-cache-02", "status": "RUNNING", "ver": "5.0", "cap": 32, "used": 27230, "ip": "10.10.3.43",
-     "ces": (38.5, 2310), "created": fixed("2025-03-15 11:00")},
+     "ces": (38.5, 2310), "created": fixed("2025-03-15 11:00"), "mode": "cluster", "shards": 3},
     {"name": "redis-rank-01", "status": "RUNNING", "ver": "6.0", "cap": 4, "used": 1851, "ip": "10.10.3.44",
      "ces": (12.4, 160), "created": fixed("2025-06-21 15:30")},
     {"name": "redis-lock-01", "status": "RUNNING", "ver": "6.0", "cap": 2, "used": 467, "ip": "10.10.3.45",

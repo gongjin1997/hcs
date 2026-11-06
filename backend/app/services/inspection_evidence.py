@@ -93,8 +93,16 @@ def inspection_ttl(db: Session, ctx: Context, task: InspectionTask | None,
     return max(900, interval * 3)
 
 
+# 按实例汇总的子对象状态：有未识别状态时只允许触发，不允许恢复（未知不等于正常）
+UNKNOWN_COUNTS = {("dcs_instance", "nodes"): "unknown_nodes", ("gaussdb_instance", "components"): "unknown_components"}
+
+
 def state_known(observation: Observation) -> bool:
-    # 状态枚举均来自上传 PDF：DataArts 表 5-178 / 5-182、MRS 集群状态表。
+    # 状态枚举均来自上传 PDF：DataArts 表 5-178 / 5-182、MRS 集群状态表；
+    # DCS 节点状态见 DCS API 表 4-109，GaussDB 组件状态见 GaussDB API 表 4-80（由采集器统计未识别数）。
+    unknown = UNKNOWN_COUNTS.get((observation.resource_type, observation.check_item))
+    if unknown is not None:
+        return observation.facts.get(unknown) == 0
     checks = {
         ("dgc_realtime_job", "job_status"): ("status", REALTIME_STATES),
         ("dgc_realtime_job", "node_status"): ("node_status", REALTIME_STATES),

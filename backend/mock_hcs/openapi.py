@@ -105,11 +105,53 @@ def gaussdb_instances(ds: ModuleType) -> list[dict]:
     return out
 
 
+DCS_SPEC = {"ha": "redis.ha.xu1.large.r2.{cap}", "cluster": "redis.cluster.xu1.large.{cap}",
+            "proxy": "redis.proxy.xu1.large.{cap}"}
+
+
 def dcs_instances(ds: ModuleType) -> list[dict]:
+    # §4.1.2 实例列表不返回 cache_mode / sharding_count；部署形态只体现在规格编码与逻辑节点里
     return [{"instance_id": ds.rid("dcs", d["name"]), "name": d["name"], "status": d["status"], "engine": "Redis",
              "engine_version": d["ver"], "capacity": d["cap"], "used_memory": d["used"], "max_memory": d["cap"] * 1024,
-             "max_clients": 10000, "spec_code": f"redis.ha.xu1.large.r2.{d['cap']}", "ip": d["ip"], "port": 6379,
-             "az_codes": [ds.AZ1, ds.AZ2], "created_at": ds.iso(d["created"])} for d in ds.DCS]
+             "max_clients": 10000, "spec_code": DCS_SPEC[d.get("mode", "ha")].format(cap=d["cap"]), "ip": d["ip"],
+             "port": 6379, "az_codes": [ds.AZ1, ds.AZ2], "created_at": ds.iso(d["created"])} for d in ds.DCS]
+
+
+def _dcs_nodes(ds: ModuleType, d: dict) -> list[dict]:
+    iid = ds.rid("dcs", d["name"])
+    a, b, c, last = d["ip"].split(".")
+    overrides = d.get("node_status") or {}
+    default = "Inactive" if d["status"] == "ERROR" else "Active"
+    mode = d.get("mode", "ha")
+    plan = [(f"group-{g}/{role}", role, "redis-server", g)
+            for g in range(d.get("shards", 1) if mode != "ha" else 1) for role in ("master", "slave")]
+    plan += [(f"proxy-{k}", "proxy", "redis-proxy", None) for k in range(d.get("proxies", 0) if mode == "proxy" else 0)]
+    nodes = []
+    for index, (key, role, kind, group) in enumerate(plan):
+        ip = f"{a}.{b}.{int(c) + 100}.{(int(last) * 8 + index) % 254 + 1}"
+        prefix = {"master": "master", "slave": "replica", "proxy": "proxy"}[role]
+        nodes.append({"logical_node_id": ds.rid("dcs-node", f"{iid}/{key}"), "name": f"({prefix}){ip}",
+                      "status": overrides.get(key, default), "az_code": ds.AZ1 if index % 2 == 0 else ds.AZ2,
+                      "node_role": kind, "node_type": role, "node_ip": ip, "node_port": "6379",
+                      "node_id": ds.rid("dcs-vm", f"{iid}/{key}"), "priority_weight": 100, "is_access": True,
+                      "group_id": ds.rid("dcs-group", f"{iid}/{group}") if group is not None else "",
+                      "group_name": f"group-{group}" if group is not None else "", "is_remove_ip": False,
+                      "replication_id": ds.rid("dcs-replication", f"{iid}/{key}"),
+                      "dimensions": [{"name": "dcs_instance_id", "value": iid},
+                                     {"name": "dcs_cluster_redis_node", "value": ds.rid("dcs-monitor", f"{iid}/{key}")}]})
+    return nodes
+
+
+def dcs_logical_nodes(ds: ModuleType) -> list[dict]:
+    """§4.3.3 批量查询实例节点信息（仅开发 Mock）。主备实例 1 主 1 从；mode=cluster 每个分片 1 主 1 从；
+    mode=proxy 另加 proxies 个 Proxy 节点。节点默认 Active，实例 ERROR 时全部 Inactive；
+    测试可用 node_status={"group-0/master": "Inactive", "proxy-1": "Inactive"} 改单个节点。创建中实例不返回节点。"""
+    out = []
+    for d in ds.DCS:
+        if d["status"] not in ("CREATING", "CREATEFAILED"):
+            nodes = _dcs_nodes(ds, d)
+            out.append({"instance_id": ds.rid("dcs", d["name"]), "node_count": len(nodes), "nodes": nodes})
+    return out
 
 
 def mrs_clusters(ds: ModuleType) -> list[dict]:

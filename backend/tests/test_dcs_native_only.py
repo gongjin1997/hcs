@@ -7,6 +7,9 @@ from app.collectors.dcs import DcsCollector
 from app.core.config import get_settings
 from app.hcs import HcsError
 
+NATIVE_CALLS = [("dcs", "/v2/{project_id}/instances"), ("dcs", "/v2/{project_id}/instances/statistic"),
+                ("dcs", "/v2/{project_id}/instances-logical-nodes")]
+
 
 def collect(values, *, params=None, source="CES"):
     calls = []
@@ -17,6 +20,8 @@ def collect(values, *, params=None, source="CES"):
             assert service == "dcs"
             if path == "/v2/{project_id}/instances/statistic":
                 return {"statistics": [{"instance_id": "one", **values}]}
+            if path == "/v2/{project_id}/instances-logical-nodes":     # 本文件只测实例与统计，节点见 test_dcs_nodes
+                return {"count": 0, "instances": []}
             assert path == "/v2/{project_id}/instances"
             return {"instance_num": 1, "instances": [{"instance_id": "one", "name": "one", "status": "RUNNING", **values}]}
 
@@ -30,7 +35,7 @@ def test_dcs_reads_only_native_api_even_when_legacy_tenant_says_ces(monkeypatch)
     monkeypatch.setattr(get_settings(), "hcs_ces_enabled", True)
     rows, calls = collect({"used_memory": "200", "max_memory": "1000", "cpu_usage": 12.5,
                           "connected_clients": "7", "max_clients": 100})
-    assert calls == [("dcs", "/v2/{project_id}/instances"), ("dcs", "/v2/{project_id}/instances/statistic")]
+    assert calls == NATIVE_CALLS
     facts = {r.check_item: r.facts for r in rows}
     assert facts["memory"] == {"memory_usage": 20, "used_memory_mb": 200, "max_memory_mb": 1000}
     assert "cpu" not in facts and "connections" not in facts
@@ -104,7 +109,7 @@ def test_legacy_aom_metrics_cannot_trigger_extra_dcs_collection_requests(source)
                           source=source, params={"aom": {"namespace": "CUSTOM.DcsTest", "dimension": "cache_id",
                           "metrics": {"memory_usage": "memory_percent", "cpu_usage": "cpu_percent",
                                       "connected_clients": "client_count"}}})
-    assert calls == [("dcs", "/v2/{project_id}/instances"), ("dcs", "/v2/{project_id}/instances/statistic")]
+    assert calls == NATIVE_CALLS
     assert [r.check_item for r in rows] == ["instance_status", "memory"]
     assert rows[1].facts["memory_usage"] == 20
     assert rows[0].metrics["cpu_usage"] is rows[0].metrics["connected_clients"] is None

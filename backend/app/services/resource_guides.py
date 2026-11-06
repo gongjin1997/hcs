@@ -49,6 +49,10 @@ def _number(
 _CES_LIMIT = ("AOM 已停用；可选 Prometheus，CES 仅供旧部署显式启用；无数据或权限不足不等于 0。",)
 _EVENT_LIMIT = ("按本地已采集事件的 count 汇总，不是完整审计记录；漏采、事件过期和重复来源可能影响结果。",)
 _STALE = "last_seen 不是指标时间；ECS 区分求值/源时间，DCS/GaussDB 使用响应接收时间，作业/容器使用本地采集证据及有效期。"
+_DCS_NODE_LIMIT = ("Memcached 与 Redis 3.0 没有逻辑节点，按不适用给 0；"
+                   "接口失败或源端未返回该实例时没有 nodes 观测，按缺采处理、不恢复告警。",)
+_GAUSS_COMPONENT_LIMIT = ("只查询 ACTIVE、STORAGE FULL、BACKING UP 的实例；"
+                          "其他状态或接口失败时没有 components 观测，按缺采处理。",)
 _NO_DATA = "未知、null、缺失和未采集表示没有证据，不等于 0、健康或采集成功。"
 
 
@@ -209,7 +213,8 @@ _METRICS: dict[str, list[GuideField]] = {
         _field(
             "cpu_usage", "CPU 使用率（折算）", "%",
             "每个主节点的 CPU 占用：两次 used_cpu 累计秒数之差 ÷ 间隔秒数 ÷ 主节点数 × 100。",
-            "DCS v2 instances/statistic.used_cpu（累计秒）与实例列表 cache_mode / sharding_count", "number",
+            "DCS v2 instances/statistic.used_cpu（累计秒）；主节点数取逻辑节点（§4.3.3）中的主节点，"
+            "节点接口拿不到时用实例返回的 cache_mode / sharding_count", "number",
             availability="derived",
             limitations=("折算值，不是 Redis 监控口径的 CPU 使用率；首次采样、实例重启（计数器回退）、"
                          "间隔小于 20 秒或大于 30 分钟、拿不到主节点数时不输出，不补零、不沿用旧值，也不使用 AOM",
@@ -407,6 +412,16 @@ _FACTS: dict[str, list[GuideField]] = {
                "GaussDB 原生巡检报告", "number", ("cpu",), availability="not_collected"),
         _field("mem_usage", "内存使用率（实时未采集）", "%", "旧规则兼容，不把配置容量当内存使用率。",
                "GaussDB 原生巡检报告", "number", ("memory",), availability="not_collected"),
+        _field("down_components", "宕机组件数", "个",
+               "组件列表中 status=Down 的组件数（CN、DN、CMS、GTM、ETCD 均计入）。",
+               "GET /gaussdb/v3/{project_id}/instances/{instance_id}/components（§4.3.10 表 4-80）", "integer",
+               ("components",), limitations=_GAUSS_COMPONENT_LIMIT),
+        _field("unknown_components", "状态未识别组件数", "个",
+               "status 不是 Primary、Normal、Down、Standby、StateFollower、StateLeader、StateCandidate 的组件数；"
+               "大于 0 时组件告警只触发、不恢复。",
+               "GaussDB components（§4.3.10 表 4-80）", "integer", ("components",)),
+        _state("down_list", "宕机组件清单", "组件类型、组件 ID 与所在节点，最多列 5 个；没有宕机组件时为空字符串。",
+               "collectors/gaussdb.py: component_summary", "components"),
     ],
     "dcs_instance": [
         _state(
@@ -429,6 +444,23 @@ _FACTS: dict[str, list[GuideField]] = {
                "实例属性仍保留原生 max_clients；没有连接数时不产生 connections 观测。",
                "DCS instances.max_clients", "number", ("connections",),
                availability="not_collected"),
+        _state("instance_status", "实例状态（节点检查项）",
+               "nodes 观测携带的实例 status 原值；内置节点规则只在 RUNNING 时判定，实例异常、重启、扩容由实例状态规则负责。",
+               "DCS /v2/{project_id}/instances", "nodes"),
+        _field("inactive_masters", "故障主节点数", "个",
+               "本轮逻辑节点中 node_role=redis-server、node_type=master 且 status=Inactive 的节点数。",
+               "DCS v2 instances-logical-nodes（§4.3.3 表 4-109）", "integer", ("nodes",),
+               limitations=_DCS_NODE_LIMIT),
+        _field("inactive_other_nodes", "故障从节点 / Proxy 数", "个",
+               "status=Inactive 的其他节点：从节点、Proxy 节点，以及缺少角色字段的节点。",
+               "DCS v2 instances-logical-nodes（§4.3.3 表 4-109）", "integer", ("nodes",),
+               limitations=_DCS_NODE_LIMIT),
+        _field("unknown_nodes", "状态未识别节点数", "个",
+               "status 不是 Creating、Active、Inactive、Deleting、AddSharding 的节点数；大于 0 时节点告警只触发、不恢复。",
+               "DCS v2 instances-logical-nodes（§4.3.3 表 4-109）", "integer", ("nodes",)),
+        _state("inactive_list", "故障节点清单",
+               "分片、角色与 IP:端口，最多列 5 个，超出时注明总数；供告警标题使用，没有故障节点时为空字符串。",
+               "collectors/dcs.py: node_summary", "nodes"),
     ],
     "cce_workload": [
         _number(
@@ -664,10 +696,14 @@ _ATTRS: dict[str, list[GuideField]] = {
         _attribute(
             "nodes",
             "节点状态清单",
-            "每节点仅保存 name、role、status；当前未创建独立节点规则检查项。",
+            "每节点仅保存 name、role、status；实例列表的节点 status 没有文档枚举，不单独判定，组件状态见 gaussdb_components。",
             "collectors/gaussdb.py: instances[].nodes",
             data_type="array",
         ),
+        _attribute("gaussdb_components", "组件状态",
+                   "state（AVAILABLE / NO_DATA / STALE / ERROR）、本地接收时间、各类型组件数、宕机与未识别数，以及组件清单"
+                   "（节点、组件 ID、类型、角色、状态、分组）；查询失败时保留上次清单并标为 STALE，没有上次结果时为 ERROR。",
+                   "GaussDB components（§4.3.10）", data_type="object"),
     ],
     "dcs_instance": [
         _attribute("metrics_source", "当前统计来源", "DCS 原生接口获取记录，不请求 AOM 或 CES。",
@@ -676,6 +712,14 @@ _ATTRS: dict[str, list[GuideField]] = {
                    "collectors/dcs.py: dcs_monitoring", data_type="object"),
         _attribute("dcs_cpu_counter", "CPU 折算基线", "上次成功采样的累计 CPU 秒数及响应接收时间；仅用于下一次差值折算。",
                    "collectors/dcs.py: instances/statistic.used_cpu", data_type="object"),
+        _attribute("nodes", "逻辑节点清单",
+                   "每节点 name（IP:端口，主从倒换后不变）、node_name、role（master/slave/proxy）、kind（redis-server/"
+                   "redis-proxy）、status、shard、shard_id、ip、port、az；接口失败时保留上次清单。",
+                   "DCS v2 instances-logical-nodes（§4.3.3）", data_type="array"),
+        _attribute("dcs_topology", "节点汇总",
+                   "state（AVAILABLE / NOT_RETURNED / NOT_SUPPORTED / STALE / UNAVAILABLE / NOT_QUERIED）、本地接收时间、"
+                   "分片 / 主 / 从 / Proxy 数、故障与状态未识别的节点数。",
+                   "collectors/dcs.py: instance_nodes", data_type="object"),
         _attribute("engine", "缓存引擎", "engine 原值。", "DCS instances / ledger.fetch_dcs"),
         _attribute("engine_version", "引擎版本", "engine_version 原值。", "DCS instances / ledger.fetch_dcs"),
         _attribute(
@@ -965,9 +1009,9 @@ _CONTENT: dict[str, tuple[str, list[str], list[str], list[str]]] = {
         ["没有后端逐个健康状态、请求 QPS、HTTP 错误率或时延采集；member_count 缺失时旧实现回退 0。"],
     ),
     "gaussdb_instance": (
-        "原生实例状态、磁盘使用量、慢 SQL、实时会话及原生巡检报告。",
+        "原生实例状态、磁盘使用量、组件状态、慢 SQL、实时会话及原生巡检报告。",
         [
-            "异常先看实例 status、节点和组件状态；磁盘按原生 volume-usage 的 GB 用量查询。",
+            "异常先看实例 status 与组件状态（备 DN、CN 宕机时实例仍可能是 ACTIVE）；磁盘按原生 volume-usage 的 GB 用量查询。",
             "磁盘高时查业务数据、日志、临时文件与容量增长，CPU/内存高再查慢 SQL、会话和执行计划。",
         ],
         [
@@ -977,9 +1021,10 @@ _CONTENT: dict[str, tuple[str, list[str], list[str], list[str]]] = {
         ["会话与慢 SQL 仅查询，不提供终止会话、执行 SQL 或扩容；巡检报告不能当实时性能值。", _STALE],
     ),
     "dcs_instance": (
-        "实例状态、内存、网络、CPU 累计时间及命令计数；历史仅包含实际保存的原生记录。",
+        "实例状态、分片与节点状态、内存、网络、CPU 累计时间及命令计数；历史仅包含实际保存的原生记录。",
         [
             "先核对状态、used_memory/max_memory；内存高排查大 Key、无过期 Key、淘汰策略与容量增长。",
+            "实例显示运行中也要看节点：主节点 Inactive 时该分片可能不可写，从节点或 Proxy Inactive 时失去冗余或接入点。",
             "CPU 使用率由两次累计 CPU 秒折算（近似主线程饱和度）；连接数异常需在上游核对，V2 不提供实例级连接数。",
         ],
         [

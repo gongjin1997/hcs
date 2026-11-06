@@ -5,6 +5,37 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 IntervalMinutes = Literal[5, 10, 15, 30, 60]
+TopologyState = Literal["AVAILABLE", "NOT_RETURNED", "NOT_SUPPORTED", "STALE", "UNAVAILABLE", "NOT_QUERIED"]
+
+
+class DcsTopology(BaseModel):
+    """逻辑节点汇总（DCS API §4.3.3）；observed_at 是本地收到节点响应的时间。"""
+    state: TopologyState
+    observed_at: datetime | None = None
+    freshness: Literal["FRESH", "STALE", "NO_DATA"] = "NO_DATA"
+    node_count: int | None = None
+    shards: int | None = None
+    masters: int | None = None
+    replicas: int | None = None
+    proxies: int | None = None
+    inactive: int | None = None
+    inactive_masters: int | None = None
+    transitional: int | None = None
+    unknown: int | None = None
+    warning: str | None = None
+
+
+class DcsNode(BaseModel):
+    name: str = Field(description="IP:端口（主从倒换后不变）；缺 IP 时为源端节点名")
+    node_name: str | None = None
+    role: str | None = Field(default=None, description="node_type：master / slave / proxy")
+    kind: str | None = Field(default=None, description="node_role：redis-server / redis-proxy")
+    status: str | None = Field(default=None, description="Creating / Active / Inactive / Deleting / AddSharding")
+    shard: str | None = None
+    shard_id: str | None = None
+    ip: str | None = None
+    port: str | None = None
+    az: str | None = None
 
 
 class DcsInstanceOut(BaseModel):
@@ -38,6 +69,9 @@ class DcsInstanceOut(BaseModel):
     sample_age_sec: float | None = None
     stale_after_sec: int = 900
     warning: str | None = None
+    health: str | None = None               # 告警级别优先；巡检证据过期或缺失时为 UNKNOWN
+    topology: DcsTopology | None = None     # 分片 / 主从 / Proxy 汇总；从未获取过节点时为空
+    nodes: list[DcsNode] | None = None      # 只在单实例详情返回
 
 
 class DcsInstancesOut(BaseModel):

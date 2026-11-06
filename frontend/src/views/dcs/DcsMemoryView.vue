@@ -15,6 +15,7 @@ import { DCS_SOURCE_LABELS, INTERVAL_MINUTES, MAX_INSTANCES, metricText } from '
 import { memoryChart } from './memory-chart'
 import { useDcsMemory } from './useDcsMemory'
 import DcsCurrentStatistics from './DcsCurrentStatistics.vue'
+import DcsNodesPanel from './DcsNodesPanel.vue'
 
 const props = defineProps<{ projectRef?: number | null }>()
 const app = useAppStore()
@@ -139,6 +140,7 @@ async function onExport() {
     </section>
 
     <DcsCurrentStatistics :instances="currentInstances" :loading="busy" :selected-ids="selectedIds" @select="id => selectInstances([id])" />
+    <DcsNodesPanel :instance="selectedTarget ?? null" />
     <el-alert v-if="historyError" :title="historyError" type="error" show-icon :closable="false">
       <el-button link type="primary" :loading="historyLoading" @click="queryHistory">重试查询</el-button>
     </el-alert>
