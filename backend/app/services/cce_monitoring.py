@@ -7,6 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.collectors.base import Observation, RunContext, log_collection_failure
+from app.collectors.scope import ledger_subject
 from app.core.deps import Scope
 from app.core.response import not_found
 from app.hcs import HcsError
@@ -16,6 +17,7 @@ from app.k8s.native_capabilities import collect_resource_metrics, resolve_pod_ow
 from app.models import CceClusterSnapshot, HcsAccount, HcsProject, Resource
 from app.models.base import utcnow
 from app.services import cce_settings, collect_switch
+from app.services.catalog import LEDGER_SCOPE_DIMS
 
 log = logging.getLogger(__name__)
 
@@ -41,7 +43,7 @@ class CceHealthCollector:
         existing = {row.cluster_id: row for row in db.scalars(select(CceClusterSnapshot).where(
             CceClusterSnapshot.tenant_id == ctx.tenant_id, CceClusterSnapshot.project_ref == ctx.project_ref))}
         try:
-            listed = clusters(ctx.client)
+            listed = [cluster_info(item) for item in clusters(ctx.client)]
         except HcsError as exc:
             for cached in existing.values():
                 previous = cached.sources.get("cluster", {})
@@ -52,12 +54,24 @@ class CceHealthCollector:
             return []
         seen = set()
         scope = ctx.scope("cce_cluster")
+        ledger_fields: dict[str, dict] = {}
+        if scope.dims.intersection(LEDGER_SCOPE_DIMS):
+            # 只读当前租户项目、本次清单中尚可能纳入范围的集群；不按节点或集群逐条查库。
+            ids = [info["cluster_id"] for info in listed
+                   if scope.keep({"cluster": (info["cluster_id"], info["name"])})]
+            for start in range(0, len(ids), 500):
+                rows = db.execute(select(Resource.resource_id, Resource.env_type, Resource.business,
+                                         Resource.owner, Resource.critical).where(
+                    Resource.tenant_id == ctx.tenant_id, Resource.project_ref == ctx.project_ref,
+                    Resource.resource_type == "cce_cluster", Resource.lifecycle == "ACTIVE",
+                    Resource.resource_id.in_(ids[start:start + 500])))
+                ledger_fields.update((row.resource_id, ledger_subject(row.env_type, row.business, row.owner,
+                                                                     row.critical)) for row in rows)
         counts = {"clusters": len(listed), "nodes": 0, "nodepools": 0, "source_failures": 0}
-        for cluster in listed:
-            info = cluster_info(cluster)
+        for info in listed:
             cid = info["cluster_id"]
             seen.add(cid)          # 范围外的集群仍然存在，不能被标记为缺失
-            if not scope.keep({"cluster": (cid, info["name"])}):
+            if not scope.keep({"cluster": (cid, info["name"]), **ledger_fields.get(cid, ledger_subject())}):
                 counts["clusters"] -= 1
                 continue           # 采集范围：范围外的集群不查询节点、节点池与原生指标，旧快照原样保留
             row = existing.get(cid)

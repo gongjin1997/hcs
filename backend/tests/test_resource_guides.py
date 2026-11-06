@@ -162,6 +162,16 @@ def test_guides_cover_every_actual_collector_and_ledger_key(world, mem_db, mock_
     baseline_rows, _, _ = collect_batch(monkeypatch, [success(index + 1, index + 1) for index in range(5)])
     assert baseline_rows[0].metrics["p90_minutes"] == 5
     seen_metrics["dgc_batch_job"].update(baseline_rows[0].metrics)
+    # 首次采样没有 CPU 观测；用两次累计值的正向样例核对新增派生检查项，不能把未知补成 0。
+    from tests.test_dcs_cpu_rate import collect as collect_cpu
+    from tests.test_dcs_cpu_rate import counter
+
+    with monkeypatch.context() as patched:
+        cpu_rows = collect_cpu(patched, {"one": counter(100, 60)}, cache_mode="ha")
+    cpu_observation = next(row for row in cpu_rows if row.check_item == "cpu")
+    assert cpu_observation.facts == {"cpu_usage": 50.0}
+    seen_metrics["dcs_instance"].update(cpu_observation.metrics)
+    seen_checks["dcs_instance"].add(cpu_observation.check_item)
     for guide in list_resource_guides():
         # 反向也对照：没有真实输出的遗留展示字段必须明确 not_collected。
         assert seen_metrics[guide.resource_type] == {f.key for f in guide.metrics if f.availability != "not_collected"}

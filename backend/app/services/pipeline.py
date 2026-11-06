@@ -273,7 +273,8 @@ def process_observations(db: Session, service: str, observations: list[Observati
                 Resource.id).with_for_update().execution_options(populate_existing=True)):
             known[(res.resource_type, res.resource_id)] = res
     # 采集范围的最终判定：范围外的对象不评估、不告警；已有记录的就地标记并关闭活动告警。
-    in_scope = collect_scope.filter_groups(db, ctx.tenant_id, groups, known, ctx.scopes or collect_scope.load(db))
+    # 云请求可能耗时很久；采集前的快照只用于裁剪，最终判定必须读取管理员最新保存的范围。
+    in_scope = collect_scope.filter_groups(db, ctx.tenant_id, groups, known, collect_scope.load(db))
     if len(in_scope) != len(groups):
         ctx.stats["out_of_scope"] = len(groups) - len(in_scope)
         observations = [o for o in observations if (o.resource_type, o.resource_id) in in_scope]
@@ -513,6 +514,12 @@ def _run_task(db: Session, task_code: str, *, client: HcsClient | None, target: 
             if policy.prometheus is not None:
                 ctx.params["prometheus"] = dict(policy.prometheus.queries)
         observations = collector.collect(ctx)
+        current_scopes = collect_scope.load(db)
+        if ctx.scopes is not None and any(
+                ctx.scopes.rules(target.tenant_id, rtype) != current_scopes.rules(target.tenant_id, rtype)
+                for rtype in collect_switch.TASK_TYPES.get(task_code, [])):
+            # CCE 健康快照不经过 process_observations，也必须丢弃范围变更前的未提交结果。
+            raise _CollectionPolicyChanged()
         if task_code == cce_settings.TASK_CODE and (
                 not collect_switch.load(db).enabled(target.tenant_id, "cce_cluster")
                 or cce_settings.effective(db, target.tenant_id).model_dump() != ctx.params.get("_cce_settings")):

@@ -49,7 +49,7 @@ def test_demo_seed_after_bootstrap_without_admin(demo_template, demo_db):
     assert _count(demo_db, User) >= 10 and seed_demo(demo_db) is False
     assert _count(demo_db, HcsAccount) == 2
     assert _count(demo_db, AlarmRule) == len({r.id for r in demo_db.scalars(select(AlarmRule))})
-    assert _count(demo_db, Resource) > 220 and _count(demo_db, ResourceChange) >= 40
+    assert _count(demo_db, Resource) == 220 and _count(demo_db, ResourceChange) >= 40
     assert _count(demo_db, Report) == 22 and _count(demo_db, PodEvent) > 50 and _count(demo_db, AuditLog) > 100
     # 每条资源 / 告警都归属租户，负责人只留给“新纳管待认领”的少数资源
     assert demo_db.scalar(select(func.count()).select_from(Resource).where(Resource.tenant_id.is_(None))) == 0

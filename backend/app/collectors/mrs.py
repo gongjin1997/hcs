@@ -4,10 +4,12 @@ HCS 8.5.1 的 MRS API 参考只提供集群类查询，作业通过 DataArts Stu
 §5.3.16「查询作业实例列表」+ §5.3.17「查询作业实例详情」返回各节点的 type / status / 起止时间，
 type 为 MRSSpark、MapReduce、MRSFlinkJob、MRSHetuEngine 的节点即 MRS 作业。
 """
+import json
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
+from hashlib import sha256
 from typing import Any
 from urllib.parse import quote
 
@@ -102,13 +104,19 @@ def _detail_nodes(body: dict, job_name: str, instance_id: int) -> list[dict]:
     return nodes
 
 
+def _node_manifest(names: list[str]) -> dict:
+    """过滤前完整 MRS 节点清单的摘要；每个资源只保存固定大小的完整性证据。"""
+    payload = json.dumps(sorted(names), ensure_ascii=False).encode("utf-8")
+    return {"version": 1, "count": len(names), "digest": sha256(payload).hexdigest()}
+
+
 class MrsJobCollector:
     """MRS 作业执行：DataArts 实例列表（§5.3.16）→ 每个作业最新实例的详情（§5.3.17）→ MRS 类节点。
 
     资源 ID 为 [工作空间/]作业名/节点名；执行标识为实例 ID（实例变化时状态持续时间重新计时）。
     参数：window_hours（默认 24，≤72）、max_details（每个工作空间每轮详情上限，默认 500）、hcs_concurrency。
 
-    减少重复查询：实例进入 success / fail / manual-stop 后详情不再变化。含 MRS 节点的终态实例复用本地资源记录；
+    减少重复查询：实例进入 success / fail / manual-stop 后详情不再变化。含 MRS 节点的终态实例仅在本地记录完整时复用；
     不含 MRS 节点的终态实例把 (工作空间/作业名 → 实例 ID) 记入 sys_setting，下一轮不再查询其详情。
     """
 
@@ -206,7 +214,11 @@ class MrsJobCollector:
                     stats["jobs_without_mrs_nodes"] += 1
                     if inst["status"] in TERMINAL_INSTANCE_STATES:
                         seen_keys[f"{ws}/{inst['jobName']}"] = millis(inst["instanceId"])
-                obs.extend(self._observation(ws, inst, n, now_ms, ctx) for n in found)
+                manifest = _node_manifest([n["nodeName"] for n in found])
+                for n in found:
+                    observation = self._observation(ws, inst, n, now_ms, ctx)
+                    observation.attrs["mrs_node_manifest"] = manifest
+                    obs.append(observation)
         if not scope.open:     # 节点级规则：详情与复用的快照里都可能含范围外的节点（"无 MRS 节点"的判断不受影响）
             obs = [o for o in obs if scope.keep(subject_of(o.resource_type, o.resource_id, o.name, o.attrs))]
         stats["mrs_nodes"] = len(obs)
@@ -269,7 +281,7 @@ class MrsJobCollector:
 
     @staticmethod
     def _terminal_snapshots(ctx: RunContext) -> dict[tuple[str, str, int | None], list[Observation]]:
-        """本地已记录且实例已终态的 MRS 节点：同一实例再次出现时复用，避免对不变的详情重复查询。"""
+        """只复用有完整性证据的终态实例；旧记录或范围过滤后的子集须重新查询详情。"""
         if ctx.db is None:
             return {}
         from app.models import Resource
@@ -290,9 +302,14 @@ class MrsJobCollector:
                 facts["run_minutes"] = minutes
             keep = {k: a.get(k) for k in ("workspace", "job_name", "node_name", "node_type", "instance_id", "job_status",
                                           "node_status", "instance_type", "plan_time", "start_time", "end_time",
-                                          "retry_times", "log_path", "source")}
+                                          "retry_times", "log_path", "source", "mrs_node_manifest")}
             out.setdefault((a.get("workspace") or "", a["job_name"], millis(a.get("instance_id"))), []).append(
                 Observation("mrs_job", res.resource_id, res.name, "job_status", facts,
                             status_raw=a.get("node_status") or "UNKNOWN", attrs=keep,
                             metrics={"run_minutes": facts.get("run_minutes"), "retry_times": a.get("retry_times")}))
-        return out
+        complete: dict[tuple[str, str, int | None], list[Observation]] = {}
+        for key, group in out.items():
+            manifest = _node_manifest([o.attrs["node_name"] for o in group])
+            if all(o.attrs.get("mrs_node_manifest") == manifest for o in group):
+                complete[key] = group
+        return complete

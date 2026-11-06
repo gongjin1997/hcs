@@ -271,13 +271,14 @@ def test_downgrade_preserves_users_snapshots_and_links_on_reupgrade(legacy_direc
     command.downgrade(cfg, "0007")
     assert not {"phone", "login_enabled", "notify_enabled"} & {c["name"] for c in inspect(engine).get_columns("sys_user")}
     assert "user_id" not in {c["name"] for c in inspect(engine).get_columns("contact")}
-    assert "owner_user_id" not in {c["name"] for c in inspect(engine).get_columns("resource")}
+    assert not {"owner_user_id", "scope_excluded"} & {c["name"] for c in inspect(engine).get_columns("resource")}
     assert not inspect(engine).get_foreign_keys("contact")
     assert "ix_contact_user_id" not in {i["name"] for i in inspect(engine).get_indexes("contact")}
     assert "ix_resource_owner_user_id" not in {i["name"] for i in inspect(engine).get_indexes("resource")}
     assert rows(engine, "contact") == [{k: v for k, v in c.items() if k != "user_id"} for c in before_contacts]
     assert rows(engine, "contact_group") == before_groups
-    assert rows(engine, "resource") == [{k: v for k, v in r.items() if k != "owner_user_id"} for r in before_resources]
+    assert rows(engine, "resource") == [
+        {k: v for k, v in r.items() if k not in {"owner_user_id", "scope_excluded"}} for r in before_resources]
     retained = {u["id"]: u for u in rows(engine, "sys_user")}
     assert set(retained) == {u["id"] for u in before_users}
     assert all(u["enabled"] is False for u in retained.values())

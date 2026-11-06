@@ -191,7 +191,7 @@ def test_existing_builtin_definitions_still_validate():
 
 @pytest.mark.parametrize("resource_type,check_item,value", [
     ("gaussdb_instance", "cpu", "cpu_usage"), ("gaussdb_instance", "memory", "mem_usage"),
-    ("dcs_instance", "cpu", "cpu_usage"), ("dcs_instance", "connections", "connected_clients"),
+    ("dcs_instance", "connections", "connected_clients"),
 ])
 def test_uncollected_metrics_cannot_create_enabled_rules(rule_api, resource_type, check_item, value):
     payload = body(id="UNAVAILABLE_METRIC", resource_type=resource_type, check_item=check_item,
@@ -202,6 +202,16 @@ def test_uncollected_metrics_cannot_create_enabled_rules(rule_api, resource_type
     target = next(t for t in rule_api.client.get("/api/v1/rules/targets").json()["data"]
                   if (t["resource_type"], t["check_item"]) == (resource_type, check_item))
     assert target["collection_available"] is False
+
+
+def test_dcs_derived_cpu_can_create_enabled_rule(rule_api):
+    payload = body(id="DCS_DERIVED_CPU", resource_type="dcs_instance", check_item="cpu",
+                   expr={"value": "cpu_usage", "levels": [{"severity": "P2", "threshold": 80}]})
+    response = rule_api.client.post("/api/v1/rules", json=payload)
+    assert response.status_code == 201
+    target = next(t for t in rule_api.client.get("/api/v1/rules/targets").json()["data"]
+                  if (t["resource_type"], t["check_item"]) == ("dcs_instance", "cpu"))
+    assert target["collection_available"] is True
 
 
 def test_historical_uncollected_rule_can_be_disabled_but_not_enabled(rule_api):

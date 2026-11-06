@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import cast
 
 from sqlalchemy import case, func, select, update
-from sqlalchemy.orm import Session
+from sqlalchemy.engine import CursorResult
+from sqlalchemy.orm import InstrumentedAttribute, Session
 
 from app.collectors.base import Observation
 from app.collectors.scope import (
@@ -32,7 +34,7 @@ from app.collectors.scope import (
     subject_of,
 )
 from app.core.response import BizError, ErrorCode
-from app.models import AlarmEvent, AlarmEventLog, HcsAccount, Resource, SysSetting
+from app.models import AlarmEvent, AlarmEventLog, EvalState, HcsAccount, Resource, SysSetting
 from app.models.alarm import ACTIVE_STATUSES
 from app.models.base import utcnow
 
@@ -128,10 +130,20 @@ def _group_subject(key: tuple[str, str], group: list[Observation], row: Resource
 
 # ---------------------------------------------------------------- 标记与告警
 def _close_alarms(db: Session, tenant_id: int | None, resource_ids: list[int], operator: str, now: datetime) -> int:
+    """排除时一并中断连续证据，恢复范围后必须重新累计；没有活动告警的资源同样处理。"""
+    from . import inspection_evidence
+
     closed = 0
     for start in range(0, len(resource_ids), PAGE):
+        ids = resource_ids[start:start + PAGE]
+        for state in db.scalars(select(EvalState).join(
+                Resource, EvalState.data[inspection_evidence.META]["resource_ref"].as_integer() == Resource.id).where(
+                    Resource.id.in_(ids), Resource.tenant_id.is_not_distinct_from(tenant_id),
+                    Resource.scope_excluded.is_(True)).order_by(EvalState.fingerprint).with_for_update(of=EvalState)
+                .execution_options(populate_existing=True)):
+            state.data = inspection_evidence.interrupt(dict(state.data or {}), now)
         for alarm in db.scalars(select(AlarmEvent).where(
-                AlarmEvent.resource_ref.in_(resource_ids[start:start + PAGE]),
+                AlarmEvent.resource_ref.in_(ids),
                 AlarmEvent.tenant_id.is_not_distinct_from(tenant_id), AlarmEvent.status.in_(ACTIVE_STATUSES))):
             previous, alarm.status = alarm.status, "CLOSED"
             alarm.resolved_at = alarm.resolved_at or now
@@ -187,8 +199,10 @@ def _resource_conditions(tenant_id: int | None, resource_type: str, project_ref:
 def _scan(db: Session, resource_type: str, *, tenant_ids: list[int | None] | None,
           project_ref: int | None = None, limit: int | None = None) -> Iterator:
     """按主键分页读取活动资源的维度来源列；每页一次查询，不在页间持有游标。"""
-    columns = [Resource.id, Resource.tenant_id, Resource.resource_id, Resource.name, Resource.env_type,
-               Resource.business, Resource.owner, Resource.critical, Resource.scope_excluded]
+    columns: list[InstrumentedAttribute] = [
+        Resource.id, Resource.tenant_id, Resource.resource_id, Resource.name, Resource.env_type,
+        Resource.business, Resource.owner, Resource.critical, Resource.scope_excluded,
+    ]
     if resource_type in _ATTR_TYPES:
         columns.append(Resource.attrs)
     query = select(*columns).where(Resource.resource_type == resource_type, Resource.lifecycle == "ACTIVE")
@@ -231,7 +245,7 @@ def sync_flags(db: Session, tenant_id: int | None, resource_types: list[str], *,
             result = db.execute(update(Resource).where(*_resource_conditions(tenant_id, rtype, project_ref),
                                                        Resource.scope_excluded.is_(True))
                                 .values(scope_excluded=False))
-            out["restored"] += result.rowcount or 0
+            out["restored"] += cast(CursorResult, result).rowcount or 0
             continue
         exclude: list[int] = []
         restore: list[int] = []
@@ -281,7 +295,7 @@ def describe_rules(rules: list[dict]) -> list[str]:
     return lines
 
 
-def normalize_rules(resource_type: str, rules: list[Mapping]) -> list[dict]:
+def normalize_rules(resource_type: str, rules: Sequence[Mapping]) -> list[dict]:
     """校验并规整页面提交的规则：维度必须是该资源类型提供的，模式去空白去重，数量与长度有上限。"""
     meta = RESOURCE_TYPES.get(resource_type)
     if meta is None:
@@ -328,7 +342,7 @@ def affected_tenants(db: Session, tenant_id: int, resource_type: str) -> list[in
             if t is None or scopes.source(t, resource_type) != "tenant"]
 
 
-def save(db: Session, tenant_id: int, resource_type: str, rules: list[Mapping] | None, operator: str) -> dict:
+def save(db: Session, tenant_id: int, resource_type: str, rules: Sequence[Mapping] | None, operator: str) -> dict:
     """保存规则并立即同步标记。rules=None：租户改为跟随全局（删除单独设置）；全局设置为空 = 全部采集。
     调用方负责授权与提交（与审计同一事务）。"""
     if resource_type not in RESOURCE_TYPES:
@@ -361,7 +375,7 @@ def save(db: Session, tenant_id: int, resource_type: str, rules: list[Mapping] |
 
 
 # ---------------------------------------------------------------- 预览与候选值
-def preview(db: Session, tenant_id: int, resource_type: str, rules: list[Mapping] | None,
+def preview(db: Session, tenant_id: int, resource_type: str, rules: Sequence[Mapping] | None,
             visible_tenants: list[int] | None = None) -> dict:
     """保存前预估：这组规则会让多少资源落到范围外、哪些是新排除的、将关闭多少活动告警。
     rules=None 表示租户改为跟随全局，按全局规则估算。"""

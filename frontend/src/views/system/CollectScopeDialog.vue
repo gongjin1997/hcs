@@ -63,7 +63,7 @@
 
       <el-alert v-if="errors.length" type="warning" :closable="false" show-icon class="mt-12" :title="errors.join('；')" />
 
-      <div class="preview" :class="{ stale: previewStale }">
+      <div v-if="canManage" class="preview" :class="{ stale: previewStale }">
         <div class="preview-head">
           <b>影响预估</b>
           <el-button size="small" :loading="previewing" :disabled="!!errors.length" @click="runPreview">重新预估</el-button>
@@ -113,7 +113,29 @@ const previewing = ref(false)
 const saving = ref(false)
 const candidates = reactive<Record<string, ScopeCandidate[]>>({})
 let token = 0
+let contextVersion = 0
+let draftVersion = 0
+let disposed = false
 let timer: ReturnType<typeof setTimeout> | undefined
+
+function requestContext() {
+  if (disposed || !props.modelValue || !props.type) return null
+  return { version: contextVersion, tenantId: props.tenantId, type: props.type.code }
+}
+function isCurrent(context: NonNullable<ReturnType<typeof requestContext>>) {
+  return !disposed && props.modelValue && context.version === contextVersion
+    && context.tenantId === props.tenantId && context.type === props.type?.code
+}
+function invalidatePreview() {
+  ++token
+  clearTimeout(timer)
+  previewing.value = false
+}
+function invalidateContext() {
+  ++contextVersion
+  invalidatePreview()
+  saving.value = false
+}
 
 const dims = computed<ScopeDimension[]>(() => props.type?.dimensions ?? [])
 const labelOf = (dim: string) => dims.value.find((d) => d.key === dim)?.label ?? dim
@@ -132,8 +154,12 @@ const addDim = (draft: RuleDraft, dim: string) => { draft.match[dim] = []; void 
 const removeDim = (draft: RuleDraft, dim: string) => { delete draft.match[dim] }
 
 async function loadCandidates(dim: string) {
-  if (!props.type || !props.canManage || candidates[dim]) return
-  try { candidates[dim] = await collectScopeCandidates(props.tenantId, props.type.code, dim, '', 200) } catch { candidates[dim] = [] }
+  const context = requestContext()
+  if (!context || !props.canManage || candidates[dim]) return
+  try {
+    const result = await collectScopeCandidates(context.tenantId, context.type, dim, '', 200)
+    if (isCurrent(context)) candidates[dim] = result
+  } catch { if (isCurrent(context)) candidates[dim] = [] }
 }
 
 const errors = computed(() => (mode.value === 'own' ? draftErrors(drafts.value, props.limits) : []))
@@ -153,44 +179,58 @@ function reset() {
   previewStale.value = false
   Object.keys(candidates).forEach((k) => delete candidates[k])
 }
-watch(() => props.modelValue, (open) => { if (open) { reset(); void runPreview() } else clearTimeout(timer) }, { immediate: true })
+// 同步作废，避免同一轮关闭重开或租户往返后接纳旧请求。
+watch([() => props.modelValue, () => props.tenantId, () => props.type, () => props.type?.code, () => props.canManage], ([open]) => {
+  invalidateContext()
+  if (open) { reset(); void runPreview() }
+}, { immediate: true, flush: 'sync' })
 
 async function runPreview() {
-  if (!props.type || errors.value.length) return
+  const context = requestContext()
+  if (!context || !props.canManage || errors.value.length) return
+  clearTimeout(timer)
   const mine = ++token
+  const current = () => isCurrent(context) && mine === token
   previewing.value = true
   try {
-    const result = await previewCollectScope(props.tenantId, props.type.code, payload())
-    if (mine === token) { preview.value = result; previewStale.value = false }
-  } catch { if (mine === token) preview.value = null } finally { if (mine === token) previewing.value = false }
+    const result = await previewCollectScope(context.tenantId, context.type, payload())
+    if (current()) { preview.value = result; previewStale.value = false }
+  } catch { if (current()) preview.value = null } finally { if (current()) previewing.value = false }
 }
 watch([drafts, mode], () => {
-  if (!props.modelValue) return
+  ++draftVersion
+  invalidatePreview()
+  if (!props.modelValue || !props.canManage || disposed) return
   previewStale.value = true
-  clearTimeout(timer)
   timer = setTimeout(() => void runPreview(), 700)
-}, { deep: true })
-onBeforeUnmount(() => clearTimeout(timer))
+}, { deep: true, flush: 'sync' })
+onBeforeUnmount(() => { disposed = true; invalidateContext() })
 
 async function save() {
-  if (!props.type || !props.canManage || saving.value || errors.value.length || !dirty.value) return
+  const context = requestContext()
+  if (!context || !props.canManage || saving.value || errors.value.length || !dirty.value) return
   const rules = payload()
+  const revision = draftVersion
+  const current = () => isCurrent(context) && props.canManage && revision === draftVersion && !errors.value.length
   saving.value = true
   try {
-    const latest = await previewCollectScope(props.tenantId, props.type.code, rules)
+    const latest = await previewCollectScope(context.tenantId, context.type, rules)
+    if (!current()) return
     if (latest.closing_alarms > 0) {
       await ElMessageBox.confirm(`保存后将有 ${latest.newly_excluded} 个资源落到范围外，其 ${latest.closing_alarms} 条活动告警会被自动关闭（写入处理记录，不是指标恢复）。`,
         '确认保存采集范围', { type: 'warning', confirmButtonText: '确认保存', cancelButtonText: '取消' })
     }
-    const result = await saveCollectScope(props.tenantId, props.type.code, rules)
+    if (!current()) return
+    const result = await saveCollectScope(context.tenantId, context.type, rules)
+    if (!current()) return
     ElMessage.success(result.changed
       ? `已保存：新排除 ${result.excluded}、恢复 ${result.restored}${result.closed_alarms ? `，自动关闭 ${result.closed_alarms} 条活动告警` : ''}；调度进程下一轮生效`
       : '没有变化')
     visible.value = false
     emit('saved')
   } catch (error) {
-    if (error !== 'cancel') throw error
-  } finally { saving.value = false }
+    if (current() && error !== 'cancel') throw error
+  } finally { if (isCurrent(context)) saving.value = false }
 }
 </script>
 

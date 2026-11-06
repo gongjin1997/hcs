@@ -674,6 +674,8 @@ _ATTRS: dict[str, list[GuideField]] = {
                    "collectors/dcs.py: metrics_source=DCS"),
         _attribute("dcs_monitoring", "原生统计时间与来源", "V2 接口、响应接收时间、过期阈值及错误提示；源端未提供采样时间。",
                    "collectors/dcs.py: dcs_monitoring", data_type="object"),
+        _attribute("dcs_cpu_counter", "CPU 折算基线", "上次成功采样的累计 CPU 秒数及响应接收时间；仅用于下一次差值折算。",
+                   "collectors/dcs.py: instances/statistic.used_cpu", data_type="object"),
         _attribute("engine", "缓存引擎", "engine 原值。", "DCS instances / ledger.fetch_dcs"),
         _attribute("engine_version", "引擎版本", "engine_version 原值。", "DCS instances / ledger.fetch_dcs"),
         _attribute(
@@ -789,6 +791,8 @@ _ATTRS: dict[str, list[GuideField]] = {
             ("node_name", "节点名称", "nodeName 原值；与作业名共同组成资源 ID。"),
             ("node_type", "节点类型", "MRSSpark、MapReduce、MRSFlinkJob 或 MRSHetuEngine。"),
             ("instance_id", "实例 ID", "作业实例 ID；变化即新一轮执行，状态持续时间重新计时。"),
+            ("instance_type", "实例类型", "DataArts 作业实例列表 instanceType 原值。"),
+            ("source", "采集来源", "固定为 dataarts_instance_detail，表示来自 DataArts 作业实例详情。"),
             ("job_status", "实例状态", "所属作业实例的 status 原值。"),
             ("node_status", "节点状态", "节点 status 原值。"),
             ("plan_time", "计划时间", "实例 planTime（毫秒时间戳）。"),
@@ -797,6 +801,10 @@ _ATTRS: dict[str, list[GuideField]] = {
             ("retry_times", "失败重试次数", "节点 retryTimes 原值。"),
             ("log_path", "日志路径", "节点 logPath 原值，只作展示，平台不读取日志内容。"),
         )
+    ] + [
+        _attribute("mrs_node_manifest", "终态节点缓存完整性",
+                   "过滤前 MRS 节点名称集合的版本、数量与摘要；只在本地节点齐全时复用终态详情。",
+                   "collectors/mrs.py: DataArts 实例详情节点集合", data_type="object"),
     ],
     "cce_workload": [
         _attribute(

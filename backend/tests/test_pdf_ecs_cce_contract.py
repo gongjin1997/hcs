@@ -143,6 +143,7 @@ def pod_run(monkeypatch):
     class Run:
         def __init__(self, ctx, now):
             self.clusters, self.finished = [], False
+            self.scope = ctx.scope("cce_workload")
 
         def cluster(self, cid, name):
             self.clusters.append((cid, name))

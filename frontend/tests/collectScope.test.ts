@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ScopeDimension, ScopeRule } from '../src/types'
 import {
-  describeRule, draftErrors, matchesPattern, newDraft, sameRules, scopeSummary, toDrafts, toPayload,
+  describeRule, draftErrors, matchesPattern, newDraft, sameRules, scopeSummary, toDrafts, toPayload, type RuleDraft,
 } from '../src/views/system/collect-scope'
 
 const limits = { rules: 100, patterns: 200, pattern_length: 200 }
@@ -9,7 +9,7 @@ const dims: ScopeDimension[] = [{ key: 'namespace', label: '命名空间' }, { k
 
 describe('采集范围编辑器', () => {
   it('提交内容去空白、去重，丢弃空维度与没有条件的规则', () => {
-    const drafts = [
+    const drafts: RuleDraft[] = [
       { effect: 'exclude' as const, match: { namespace: [' test-* ', 'test-*', '', 'dev'], workload: [] }, note: ' 测试环境 ' },
       { effect: 'include' as const, match: { namespace: ['  '] }, note: '' },
     ]

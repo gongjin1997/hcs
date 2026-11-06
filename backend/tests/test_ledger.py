@@ -11,6 +11,7 @@ from app.hcs import build_client
 from app.ledger.sync import sync_ledger
 from app.models import Resource, ResourceChange
 from app.services.pipeline import run_task
+from app.services.tenancy import Target
 from mock_hcs import inventory
 from mock_hcs.app import app as mock_app
 
@@ -18,6 +19,8 @@ ENDPOINTS = {**{k: "mock" for k in ("dataarts", "mrs", "gaussdb", "dcs", "ces")}
              **{k: f"mock/{k}" for k in ("ecs", "evs", "vpc", "elb", "cce", "dws")}}
 SETTINGS = Settings(hcs_scheme="http", hcs_iam_url="http://mock", hcs_password="pwd", hcs_project_id="p1",
                     hcs_endpoints=ENDPOINTS)
+TARGET = Target(tenant_id=None, code="synthetic", name="synthetic", short_name="synthetic", project_ref=None,
+                project_id="p1", project_name="synthetic", region="")
 
 
 def _client(settings: Settings = SETTINGS):
@@ -55,7 +58,7 @@ def test_list_filters(client, admin):
     assert [r["name"] for r in q(resource_type="ecs_server", keyword="nginx")["items"]] == ["ecs-nginx-01",
                                                                                          "ecs-nginx-02"]
     unassigned = q(category="ledger", unassigned=True, page_size=50)
-    assert unassigned["total"] == 7 and "ecs-portal-03" in {r["name"] for r in unassigned["items"]}
+    assert unassigned["total"] == 6 and "ecs-portal-03" in {r["name"] for r in unassigned["items"]}
     assert q(category="ledger", env_type="TEST")["total"] >= 8 and q(category="ledger", env_type="DEV")["total"] == 2
     assert {r["name"] for r in q(lifecycle="DELETED", page_size=50)["items"]} == {
         "ecs-portal-old-01", "ecs-tmp-build-01", "eip-campaign-01", "eip-web-campaign", "vol-migrate-tmp-02"}
@@ -110,14 +113,14 @@ def test_changes_and_export(client, admin):
 
 # ---------------- 同步比对逻辑（独立内存库） ----------------
 def test_sync_detects_create_update_delete(mem_db, monkeypatch):
-    first = sync_ledger(mem_db, client=_client())
+    first = sync_ledger(mem_db, client=_client(), target=TARGET)
     assert first.status == "SUCCESS" and first.resource_total == 129 and first.abnormal_total == 129
-    assert sync_ledger(mem_db, client=_client()).abnormal_total == 0          # 无变化时不产生变更记录
+    assert sync_ledger(mem_db, client=_client(), target=TARGET).abnormal_total == 0  # 无变化时不产生变更记录
 
     orig = list(inventory.DCS)
     monkeypatch.setitem(inventory.find("dcs", "redis-rank-01"), "cap", 8)       # 扩容 4G → 8G
     monkeypatch.setattr(inventory, "DCS", [d for d in orig if d["name"] != "redis-lock-01"])   # 释放
-    run = sync_ledger(mem_db, client=_client(), types=["dcs_instance"])
+    run = sync_ledger(mem_db, client=_client(), target=TARGET, types=["dcs_instance"])
     assert run.stats["dcs_instance"] == {"total": 5, "created": 0, "updated": 1, "deleted": 1, "skipped_delete": False}
     changes = {c.name: c for c in mem_db.scalars(select(ResourceChange).where(ResourceChange.detected_at >= run.started_at))}
     expand = {x["field"]: (x["old"], x["new"]) for x in changes["redis-rank-01"].changes}
@@ -127,17 +130,17 @@ def test_sync_detects_create_update_delete(mem_db, monkeypatch):
     assert lock.lifecycle == "DELETED" and lock.deleted_at is not None
 
     monkeypatch.setattr(inventory, "DCS", orig)                                  # 同一资源 ID 再次出现
-    back = sync_ledger(mem_db, client=_client(), types=["dcs_instance"])
+    back = sync_ledger(mem_db, client=_client(), target=TARGET, types=["dcs_instance"])
     assert back.stats["dcs_instance"]["created"] == 1 and lock.lifecycle == "ACTIVE" and lock.deleted_at is None
 
 
 def test_sync_guards_against_bad_api(mem_db, monkeypatch):
-    sync_ledger(mem_db, client=_client())
+    sync_ledger(mem_db, client=_client(), target=TARGET)
     monkeypatch.setattr(inventory, "DCS", [])                                     # 接口突然返回空列表
-    run = sync_ledger(mem_db, client=_client(), types=["dcs_instance"])
+    run = sync_ledger(mem_db, client=_client(), target=TARGET, types=["dcs_instance"])
     assert run.stats["dcs_instance"]["skipped_delete"] is True and run.stats["dcs_instance"]["deleted"] == 0
     bad = Settings(**{**SETTINGS.model_dump(), "hcs_endpoints": {**ENDPOINTS, "dws": "mock/not-exist"}})
-    run = sync_ledger(mem_db, client=_client(bad), types=["dws_cluster", "mrs_cluster"])
+    run = sync_ledger(mem_db, client=_client(bad), target=TARGET, types=["dws_cluster", "mrs_cluster"])
     assert run.status == "PARTIAL" and "DWS" in run.error_summary               # 某类失败：跳过该类，不做释放判定
     dws = mem_db.scalars(select(Resource).where(Resource.resource_type == "dws_cluster")).all()
     assert len(dws) == 1 and all(r.lifecycle == "ACTIVE" for r in dws)
@@ -145,5 +148,5 @@ def test_sync_guards_against_bad_api(mem_db, monkeypatch):
 
 @pytest.mark.parametrize("task", ["ledger_sync"])
 def test_ledger_sync_runs_as_task(mem_db, task):
-    run = run_task(mem_db, task, client=_client(), trigger="MANUAL")
+    run = run_task(mem_db, task, client=_client(), target=TARGET, trigger="MANUAL")
     assert run.task_code == "ledger_sync" and run.status == "SUCCESS" and run.stats["ecs_server"]["total"] == 34
