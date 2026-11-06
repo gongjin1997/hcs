@@ -99,11 +99,6 @@ EIPS = [("eip-nginx-01", "203.0.113.11", "ACTIVE", "10.10.1.11", 100, None, fixe
 EIP_BY_IP = {e[3]: e for e in EIPS if e[3]}
 
 # ---------------- 数据库与缓存 ----------------
-# 名称, 引擎, 版本, 部署, vCPU, 内存, 磁盘 GB, IP, 规格, 创建时间
-RDS = [("rds-mysql-crm", "MySQL", "8.0", "Ha", 4, 16, 500, "10.10.3.21", "rds.mysql.x1.xlarge.4.ha", fixed("2025-02-11 03:22")),
-       ("rds-mysql-portal", "MySQL", "5.7", "Ha", 2, 8, 200, "10.10.3.22", "rds.mysql.x1.large.4.ha", fixed("2025-02-11 03:40")),
-       ("rds-pg-gis", "PostgreSQL", "14", "Ha", 4, 16, 300, "10.10.3.23", "rds.pg.x1.xlarge.4.ha", fixed("2025-06-18 09:10")),
-       ("rds-mysql-test", "MySQL", "8.0", "Single", 2, 4, 100, "10.30.1.31", "rds.mysql.x1.large.2", fixed("2025-04-10 12:00"))]
 # 名称, 状态, 部署形态, 磁盘 GB, IP, CES 指标 (cpu, mem, disk), 创建时间
 GAUSSDB = [("gs-core-01", "ACTIVE", "Ha", 2000, "10.10.3.11", (62.1, 71.3, 87.4), fixed("2025-02-10 08:00")),
            ("gs-report-01", "ACTIVE", "Independent", 1000, "10.10.3.12", (83.5, 64.0, 66.2), fixed("2025-03-01 08:00")),
@@ -126,11 +121,7 @@ DCS: list[dict[str, Any]] = [
      "ces": (21.3, 610), "created": fixed("2025-04-08 10:00")},
 ]
 
-# ---------------- 大数据与中间件 ----------------
-# 名称, 规格, 版本, 存储 GB, 已用 GB, 分区数, 地址, 创建时间
-KAFKA = [("kafka-prod-01", "kafka.2u4g.cluster", "2.7", 600, 312, 300, "10.10.4.21", fixed("2025-02-20 10:00")),
-         ("kafka-log-01", "kafka.4u8g.cluster", "2.7", 1200, 1003, 600, "10.10.4.24", fixed("2025-05-08 10:00")),
-         ("kafka-test-01", "kafka.2u4g.cluster", "2.7", 300, 41, 100, "10.30.1.41", fixed("2025-04-10 13:00"))]
+# ---------------- 大数据 ----------------
 MRS = [("mrs-prod-01", "MRS 3.2.0-LTS.1", 23, "10.10.4.11", fixed("2025-02-15 09:00")),
        ("mrs-prod-02", "MRS 3.2.0-LTS.1", 15, "10.10.4.12", fixed("2025-02-16 09:00")),
        ("mrs-rt-01", "MRS 3.1.5-LTS", 9, "10.10.4.13", fixed("2025-03-05 09:00"))]
@@ -139,8 +130,7 @@ MRS_COMPONENTS = {"mrs-rt-01": ["Zookeeper", "HDFS", "Yarn", "Flink", "Kafka"],
 CCE = [("cce-prod-01", "v1.25", "cce.s2.medium", "10.10.8.10", "cce-prod-node-", fixed("2025-03-20 09:00")),
        ("cce-test-01", "v1.23", "cce.s1.small", "10.30.8.10", "cce-test-node-", fixed("2025-04-12 09:00"))]
 DWS = [("dws-prod-01", "8.1.3", "dws.m3.xlarge", 3, "10.10.4.31", fixed("2025-02-20 08:00"))]
-CSS = [("css-log-01", "7.10.2", "ess.spec-4u16g", 3, "10.10.4.41", fixed("2025-03-01 08:00")),
-       ("css-search-01", "7.10.2", "ess.spec-2u8g", 2, "10.10.4.42", ago(3))]
+
 
 
 def find(kind: str, name: str) -> dict:
@@ -253,7 +243,7 @@ K8S_EVENTS: dict[str, list[dict]] = {
     ],
 }
 
-# ---------------- DataArts Studio 作业、MRS 作业执行（巡检） ----------------
+# ---------------- DataArts Studio 作业（巡检；MRS 作业经作业实例节点获取） ----------------
 RT_JOBS = {"rt_order_sync": "NORMAL", "rt_payment_risk": "EXCEPTION", "rt_inventory_cdc": "STOPPED",
            "rt_user_behavior": "NORMAL"}                   # rt_user_behavior 作业正常但聚合节点异常
 BATCH_JOBS = [  # 作业名, 实例状态, 计划时间距今分钟, 运行分钟（None = 运行中）
@@ -261,9 +251,11 @@ BATCH_JOBS = [  # 作业名, 实例状态, 计划时间距今分钟, 运行分�
     ("dws_settle_daily", "success", 1500, 15), ("dws_settle_daily", "fail", 55, 12),
     ("ads_report_gen", "running", 110, None), ("dim_product_refresh", "success", 30, 6),
 ]
-MRS_JOBS = {  # 集群 → [(作业名, 类型, 状态, 结果, 提交距今分钟, 耗时毫秒)]
-    "mrs-prod-01": [("hive_agg_hourly", "HiveSql", "FAILED", "FAILED", 10, 372_000),
-                    ("spark_etl_daily", "SparkSubmit", "FINISHED", "SUCCEEDED", 15, 2_310_000)],
-    "mrs-prod-02": [("spark_feature_gen", "SparkSubmit", "FINISHED", "SUCCEEDED", 70, 3_060_000)],
-    "mrs-rt-01": [("flink_cdc_order", "Flink", "RUNNING", "UNDEFINED", 4320, 259_200_000)],
+# 批作业实例内的节点：作业名 → [(节点名, 节点类型)]。type 为 MRSSpark / MapReduce / MRSFlinkJob / MRSHetuEngine 的节点
+# 即 MRS 作业（数据治理中心 API §5.3.17 表 5-182）；其余类型只用于验证采集器会过滤非 MRS 节点。
+JOB_NODES = {
+    "ods_crm_customer_sync": [("cdm_sync", "CDMJob")],
+    "dwd_order_detail_daily": [("prepare", "Shell"), ("spark_etl", "MRSSpark")],
+    "dws_settle_daily": [("hive_agg", "SparkSQL"), ("spark_settle", "MRSSpark"), ("mr_export", "MapReduce")],
+    "ads_report_gen": [("flink_report", "MRSFlinkJob")],
 }

@@ -106,7 +106,7 @@ ALARM_AGE = {("R-ECS-002", "ecs-app-04"): 45, ("R-ECS-001", "ecs-search-01"): 11
              ("R-CCE-POD-003", "trade/payment-gateway"): 31, ("R-CCE-POD-005", "trade/report-export"): 38,
              ("R-DGC-RT-001", "rt_payment_risk"): 128, ("R-DGC-RT-002", "rt_inventory_cdc"): 362,
              ("R-DGC-RT-005", "rt_user_behavior"): 41, ("R-DGC-BAT-001", "dws_settle_daily"): 42,
-             ("R-DGC-BAT-003", "ads_report_gen"): 48, ("R-MRS-JOB-001", "hive_agg_hourly"): 4,
+             ("R-DGC-BAT-003", "ads_report_gen"): 48, ("R-MRS-JOB-001", "dws_settle_daily / mr_export"): 4,
              ("R-DCS-005", "redis-prod-01"): 186, ("R-GS-006", "gs-core-01"): 240}
 # 已认领的活动告警：(规则, 资源名) → (认领人, 发生后几分钟认领, 备注)
 ACKS = {("R-DGC-RT-002", "rt_inventory_cdc"): ("张伟", 9, "已联系作业负责人：计划内停机维护，预计 18:00 前恢复"),
@@ -175,7 +175,7 @@ def _notify(db: Session, tenants: dict[str, HcsAccount]) -> None:
     for name, prio, match, group, esc, cont in [
         ("P1 紧急 → 运维负责人（抄送）", 5, {"severities": ["P1"]}, "leaders", [], True),
         ("租户B 告警 → 互联网运维组", 10, {"tenant_ids": [b]}, "ops-web", ESCALATE, False),
-        ("数据库 / 缓存 → DBA 组（抄送）", 20, {"services": ["gaussdb", "rds", "dcs"]}, "dba", [], True),
+        ("数据库 / 缓存 → DBA 组（抄送）", 20, {"services": ["gaussdb", "dcs"]}, "dba", [], True),
         ("大数据作业 → 大数据组（抄送）", 30, {"services": ["dataarts", "mrs"]}, "bigdata", [], True),
         ("默认 → 核心运维组", 100, {}, "ops-core", ESCALATE, False),
     ]:

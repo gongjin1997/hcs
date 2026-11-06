@@ -17,8 +17,7 @@ TENANT_A: dict = {
     "project_id": "0a1b2c3d4e5f40718293a4b5c6d7e8f9", "project_name": f"{REGION}_core-prod",
     "workspaces": ["ws-bigdata"], "metrics_source": "AUTO", "prometheus_url": None,
     "report_mail_to": ["ops-core@example.com"],
-    "services": ["iam", "ecs", "evs", "vpc", "elb", "rds", "gaussdb", "dcs", "dms", "mrs", "dataarts", "cce", "dws",
-                 "css", "aom"],
+    "services": ["iam", "ecs", "evs", "vpc", "elb", "gaussdb", "dcs", "mrs", "dataarts", "cce", "dws", "aom"],
     "remark": "核心交易、会员、大数据平台；IAM Token 缓存；AOM 自定义指标仅用于开发联调，无 CES",
     "ds": inventory,
 }
@@ -29,7 +28,7 @@ TENANT_B: dict = {
     "project_id": "9f8e7d6c5b4a4c3d8e2f1a0b9c8d7e6f", "project_name": f"{REGION}_web-biz",
     "workspaces": [], "metrics_source": "PROMETHEUS", "prometheus_url": "http://prometheus.web.example.internal:9090",
     "report_mail_to": ["ops-web@example.com"],
-    "services": ["iam", "ecs", "evs", "vpc", "elb", "rds", "dcs", "dms", "cce", "css", "aom"],  # 没有 CES/MRS/DataArts
+    "services": ["iam", "ecs", "evs", "vpc", "elb", "dcs", "cce", "aom"],  # 没有 CES/MRS/DataArts
     "remark": "门户、CMS、站内搜索；AK/SK 签名接入；局点未部署 CES，ECS 使用率来自租户 Prometheus（node_exporter）",
     "ds": inventory_b,
 }

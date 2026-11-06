@@ -22,7 +22,7 @@ afterEach(() => {
 function job(id = 1, overrides: Partial<JobReportRow> = {}): JobReportRow {
   return {
     id, resource_id: `job-${id}`, name: `作业 ${id}`, service: 'dataarts', resource_type: 'dgc_realtime_job',
-    job_type: null, engine: null, status_raw: 'running', execution_state: 'running', execution_result: null,
+    job_type: null, engine: null, status_raw: 'running', execution_state: 'running',
     display_status: 'RUNNING', status_label: '运行中', status_known: true, health: 'HEALTHY', lifecycle: 'ACTIVE',
     tenant_id: 7, tenant_name: '租户七', project_ref: null, project_id: null, project_name: null, region: null,
     updated_at: observedAt, status_since: null, status_details: {}, metrics: {}, active_alarms: 0,
@@ -447,23 +447,23 @@ describe('job report fact formatting', () => {
     expect(factText({ count: null, nodes: [0, false] })).toBe('{"count":null,"nodes":[0,false]}')
   })
 
-  it('chooses only the duration metric belonging to the resource type', () => {
+  it('reads run_minutes for every job type and ignores the retired elapsed_min metric', () => {
     const metrics = { run_minutes: 2.5, elapsed_min: 9 }
     expect(durationText(job(1, { metrics }))).toBe('2.5 分钟')
     expect(durationText(job(1, { resource_type: 'dgc_batch_job', metrics }))).toBe('2.5 分钟')
-    expect(durationText(job(1, { resource_type: 'mrs_job', metrics }))).toBe('9 分钟')
+    expect(durationText(job(1, { resource_type: 'mrs_job', metrics }))).toBe('2.5 分钟')
     expect(durationText(job(1, { metrics: { elapsed_min: 9 } }))).toBe('未采集')
-    expect(durationText(job(1, { resource_type: 'mrs_job', metrics: { run_minutes: 2.5 } }))).toBe('未采集')
+    expect(durationText(job(1, { resource_type: 'mrs_job', metrics: { elapsed_min: 9 } }))).toBe('未采集')
   })
 
   it.each([undefined, null, '', '3', -1, NaN, Infinity, -Infinity])('does not fabricate a numeric duration from %j', value => {
     expect(durationText(job(1, { metrics: { run_minutes: value } }))).toBe('未采集')
-    expect(durationText(job(1, { resource_type: 'mrs_job', metrics: { elapsed_min: value } }))).toBe('未采集')
+    expect(durationText(job(1, { resource_type: 'mrs_job', metrics: { run_minutes: value } }))).toBe('未采集')
   })
 
   it.each([0, 0.25, 60])('preserves a saved duration of %s minutes without unit conversion', value => {
     expect(durationText(job(1, { metrics: { run_minutes: value } }))).toBe(`${value} 分钟`)
-    expect(durationText(job(1, { resource_type: 'mrs_job', metrics: { elapsed_min: value } }))).toBe(`${value} 分钟`)
+    expect(durationText(job(1, { resource_type: 'mrs_job', metrics: { run_minutes: value } }))).toBe(`${value} 分钟`)
   })
 
   it.each(['start_time', 'end_time', 'plan_time', 'submitted_time'])('formats %s as milliseconds in the local timezone', key => {

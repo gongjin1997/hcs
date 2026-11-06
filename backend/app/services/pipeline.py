@@ -99,7 +99,7 @@ def upsert_resource(db: Session, service: str, group: list[Observation], now: da
     if ctx is not None:
         res.region = res.region or ctx.region or None
     status = next((o.status_raw for o in group if o.status_raw), None)
-    identity = {"mrs_job": "job_id", "dgc_batch_job": "instance_id"}.get(first.resource_type)
+    identity = inspection_evidence.EXECUTION_ID_FIELDS.get(first.resource_type)
     changed_execution = identity is not None and any(
         identity in o.attrs and str(o.attrs[identity]) != str((res.attrs or {}).get(identity)) for o in group)
     if changed_execution:

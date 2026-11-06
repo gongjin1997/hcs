@@ -1,4 +1,7 @@
-"""仅修复未经自定义的内置恢复条件，并保留精确降级备份。"""
+"""仅修复未经自定义的内置恢复条件，并保留精确降级备份。
+
+R-MRS-JOB-* 的旧补丁已随 MRS 作业改由 DataArts 节点采集而移除（见迁移 0018）；迁移 0014 保持历史原样。
+"""
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -77,37 +80,8 @@ PATCHES: dict[str, dict[str, Any]] = {'R-DGC-RT-003': {'match': {'name': '实时
                                     '   不使用上游p90_minutes扩展；\n'
                                     '   不使用executeTime猜单位。\n'
                                     '3. 检查当前节点日志、锁与资源队列。\n'
-                                    '   核对24h真实样本和下游时间窗。\n'},
- 'R-MRS-JOB-001': {'match': {'name': 'MRS 作业执行失败',
-                             'resource_type': 'mrs_job',
-                             'check_item': 'job_status',
-                             'kind': 'state',
-                             'expr': {'when': "job_state == 'FAILED' or job_result == 'FAILED'",
-                                      'severity': 'P2',
-                                      'critical_severity': 'P1',
-                                      'value_field': 'job_result',
-                                      'title': '作业执行失败（{job_result}）'},
-                             'for_count': 1,
-                             'scope': {},
-                             'enabled': True,
-                             'repeat_interval_sec': None},
-                   'before': {'when': "job_result == 'SUCCEEDED'"},
-                   'after': {'when': "job_state in ('FINISHED', 'SUCCEEDED') and job_result == 'SUCCEEDED'"}},
- 'R-MRS-JOB-003': {'match': {'name': 'MRS 作业排队超时',
-                             'resource_type': 'mrs_job',
-                             'check_item': 'job_status',
-                             'kind': 'state',
-                             'expr': {'when': "job_state == 'ACCEPTED' and status_duration_min > 15",
-                                      'severity': 'P3',
-                                      'value_field': 'job_state',
-                                      'title': '作业排队已 {status_duration_min} 分钟'},
-                             'for_count': 1,
-                             'scope': {},
-                             'enabled': True,
-                             'repeat_interval_sec': None},
-                   'before': {'when': "job_state != 'ACCEPTED'"},
-                   'after': {'when': "job_state in ('RUNNING', 'FINISHED', 'FAILED', 'SUCCEEDED', "
-                                     "'KILLED')"}}}
+                                    '   核对24h真实样本和下游时间窗。\n'}}
+
 
 
 def upgrade_default(db: Session, row: AlarmRule) -> bool:

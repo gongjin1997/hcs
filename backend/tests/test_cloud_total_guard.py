@@ -33,8 +33,8 @@ def isolated_total(monkeypatch):
 
 def hcs(http, auth=None):
     return HcsClient(http, auth or AkSkAuth("synthetic-ak", "synthetic-sk"),
-                     EndpointResolver({s: "https://cloud.invalid" for s in ("dcs", "ecs", "rds")}, "test", "invalid"),
-                     "project", qps={"dcs": 1000, "ecs": 1000, "rds": 1000}, max_retries=0)
+                     EndpointResolver({s: "https://cloud.invalid" for s in ("dcs", "ecs", "dws")}, "test", "invalid"),
+                     "project", qps={"dcs": 1000, "ecs": 1000, "dws": 1000}, max_retries=0)
 
 
 def test_two_services_share_default_ten_qps_without_initial_burst():
@@ -69,7 +69,7 @@ def test_three_services_share_four_inflight_and_keep_two_per_service(monkeypatch
         return httpx.Response(200, json={})
     with httpx.Client(transport=httpx.MockTransport(respond)) as http, ThreadPoolExecutor(max_workers=12) as pool:
         current = hcs(http)
-        services = ["dcs", "ecs", "rds"] * 4
+        services = ["dcs", "ecs", "dws"] * 4
         list(pool.map(lambda s: current.get(s, "/" + s), services))
     assert active == 0 and peak == 4 and all(v <= 2 for v in peaks.values())
     assert not total_limiter()._active and all(not service_limiter(s)._active for s in services)

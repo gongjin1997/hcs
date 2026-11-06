@@ -29,18 +29,18 @@ from app.models import (
     User,
 )
 from app.models.base import utcnow
+from app.services import collect_switch, platform_watch, settings_service, silence_service
+from app.services.cleanup import CLEANUP_TASK
+from app.services.pipeline import run_cleanup_task
 
-from . import collect_switch, platform_watch, settings_service, silence_service
-from .cleanup import CLEANUP_TASK
-from .pipeline import run_cleanup_task
 from .seed_history import IPS, message_id
 
 log = logging.getLogger(__name__)
 WEEKDAY = "一二三四五六日"
 # 租户B 没有开通 DataArts / MRS / GaussDB / DWS：关闭采集后这些巡检对租户B 不再执行
 OFF_B = ["dgc_realtime_job", "dgc_batch_job", "mrs_cluster", "mrs_job", "gaussdb_instance", "dws_cluster"]
-MRS_TIMEOUT = ("[504] APIGW.0201: Backend timeout（MRS 作业接口 /v2/{project_id}/clusters/{cluster_id}/job-executions，"
-               "已重试 3 次）")
+MRS_TIMEOUT = ("[504] APIGW.0201: Backend timeout（DataArts 作业实例详情 "
+               "/v1/{project_id}/jobs/{job_name}/instances/{instance_id}，已重试 3 次）")
 OFF_B_TASKS = ["dgc_realtime_status", "dgc_batch_instance", "mrs_cluster_status", "mrs_job_status", "gaussdb_status"]
 BIZ_REMARK = {"电商交易": "订单、支付、库存", "电商门户": "PC / H5 门户", "数据平台": "实时 + 离线数仓",
               "容器平台": "CCE 集群与公共组件", "运维监控": "Prometheus / 日志", "测试环境": "非生产，告警降级"}
@@ -261,7 +261,7 @@ def _cleanup(db: Session, now: datetime) -> None:
 def _import(db: Session, a: HcsAccount, users: dict[str, User], now: datetime) -> None:
     at = now - timedelta(days=10, hours=1, minutes=48)
     rows = list(db.scalars(select(Resource).where(Resource.tenant_id == a.id, Resource.lifecycle == "ACTIVE",
-                                                  Resource.resource_type.in_(("ecs_server", "rds_instance")),
+                                                  Resource.resource_type.in_(("ecs_server", "dcs_instance")),
                                                   Resource.owner.is_not(None)).order_by(Resource.name).limit(6)))
     for i, r in enumerate(rows):
         changes = [{"field": "owner", "label": LABEL["owner"], "old": None if i % 2 else "陈静", "new": r.owner}]

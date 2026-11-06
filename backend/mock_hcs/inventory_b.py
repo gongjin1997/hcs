@@ -46,8 +46,6 @@ EIPS = [("eip-elb-portal", "198.51.100.11", "ACTIVE", "10.20.1.100", 300, None, 
         ("eip-ops-01", "198.51.100.21", "ACTIVE", "10.20.9.11", 10, None, fixed("2025-05-08 09:10")),
         ("eip-web-spare", "198.51.100.31", "DOWN", None, 50, None, fixed("2025-08-21 10:00"))]
 EIP_BY_IP = {e[3]: e for e in EIPS if e[3]}
-RDS = [("rds-mysql-cms", "MySQL", "8.0", "Ha", 4, 16, 500, "10.20.3.21", "rds.mysql.x1.xlarge.4.ha", fixed("2025-05-09 10:00")),
-       ("rds-pg-portal", "PostgreSQL", "14", "Ha", 2, 8, 200, "10.20.3.22", "rds.pg.x1.large.4.ha", fixed("2025-05-09 10:30"))]
 GAUSSDB: list[tuple] = []
 DCS: list[dict[str, Any]] = [
     {"name": "redis-portal-01", "status": "RUNNING", "ver": "5.0", "cap": 8, "used": 6011, "ip": "10.20.3.41",
@@ -55,12 +53,10 @@ DCS: list[dict[str, Any]] = [
     {"name": "redis-cms-01", "status": "RUNNING", "ver": "6.0", "cap": 4, "used": 1630, "ip": "10.20.3.42",
      "ces": (12.0, 380), "created": fixed("2025-05-09 11:00")},
 ]
-KAFKA = [("kafka-web-01", "kafka.2u4g.cluster", "2.7", 600, 188, 150, "10.20.3.51", fixed("2025-05-12 10:00"))]
 MRS: list[tuple] = []
 MRS_COMPONENTS: dict[str, list[str]] = {"default": []}
 CCE = [("cce-web-01", "v1.25", "cce.s2.small", "10.20.8.10", "cce-web-node-", fixed("2025-05-11 09:00"))]
 DWS: list[tuple] = []
-CSS = [("css-web-search", "7.10.2", "ess.spec-4u16g", 3, "10.20.3.61", fixed("2025-06-12 10:00"))]
 
 # ---------------- 运行态（Prometheus node_exporter 提供使用率与开机时间） ----------------
 AGENT_PREFIXES = ("ecs-", "cce-web-node-")       # node_exporter：ECS 用 systemd 部署，CCE 节点用 DaemonSet
@@ -130,4 +126,4 @@ K8S_EVENTS: dict[str, list[dict]] = {
 # ---------------- 巡检：租户B 没有 DataArts / MRS ----------------
 RT_JOBS: dict[str, str] = {}
 BATCH_JOBS: list[tuple] = []
-MRS_JOBS: dict[str, list[tuple]] = {}
+JOB_NODES: dict[str, list[tuple]] = {}

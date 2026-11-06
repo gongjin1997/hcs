@@ -8,7 +8,7 @@ from openpyxl import load_workbook
 
 from app.collectors.base import RunContext
 from app.collectors.dataarts import DataArtsBatchCollector, DataArtsRealtimeCollector
-from app.collectors.mrs import MrsClusterCollector, MrsJobCollector
+from app.collectors.mrs import MrsClusterCollector
 from app.services.job_report_service import _status_details
 from tests.test_job_reports import report, resource
 from tests.test_job_reports import report_api as report_fixture
@@ -39,21 +39,6 @@ def test_equivalent_batch_instance_ids_cannot_evade_duplicate_page_detection():
     assert ctx.errors
 
 
-def test_mrs_changed_duplicate_execution_is_not_a_complete_cluster_snapshot():
-    rows = [{"job_name": "same", "job_id": "same-execution", "submitted_time": 1000,
-             "job_state": state, "job_result": "UNDEFINED"} for state in ("RUNNING", "FINISHED")]
-
-    def respond(service, path, kwargs):
-        if path.endswith("cluster_infos"):
-            return {"clusterTotal": "1", "clusters": [{"clusterId": "cluster-a", "clusterName": "A"}]}
-        page = kwargs["params"]["offset"]
-        return {"job_list": [rows[page - 1]], "total_record": 2}
-
-    ctx = context(LocalClient(respond))
-    assert MrsJobCollector().collect(ctx) == []
-    assert ctx.errors
-
-
 @pytest.mark.parametrize("state", [None, "", "FUTURE_STATE"])
 def test_missing_unknown_cluster_state_is_not_a_successful_measurement(state):
     ctx = context(LocalClient(lambda *_: {"clusterTotal": "1", "clusters": [
@@ -68,11 +53,10 @@ def test_missing_nodes_remains_missing_in_report_detail_contract():
     assert _status_details({"nodes": []}) == {"nodes": []}
 
 
-@pytest.mark.parametrize("kind,panel", [("mrs_job", "mrs"), ("dgc_realtime_job", "realtime")])
-def test_excel_does_not_invent_millisecond_units_for_unverified_numeric_dates(mem_db, report_api, kind, panel):
+def test_excel_does_not_invent_millisecond_units_for_unverified_numeric_dates(mem_db, report_api):
     client, _, _ = report_api
-    resource(mem_db, kind, "RUNNING", attrs={"start_time": 1792886400, "end_time": 1792886460})
-    response = client.get(f"/api/v1/job-reports/{panel}/export")
+    resource(mem_db, "dgc_realtime_job", "RUNNING", attrs={"start_time": 1792886400, "end_time": 1792886460})
+    response = client.get("/api/v1/job-reports/realtime/export")
     assert response.status_code == 200
     ws = load_workbook(BytesIO(response.content))["作业明细"]
     values = dict(zip((cell.value for cell in ws[1]), next(ws.iter_rows(min_row=2, values_only=True)), strict=True))
@@ -89,14 +73,25 @@ def test_explicit_missing_job_state_does_not_reuse_legacy_snapshot_timestamp(mem
     assert row["status_since"] is None
 
 
-def test_mrs_contract_limitation_is_visible_in_report_and_workbook(mem_db, report_api):
+def test_mrs_node_millisecond_timestamps_are_dates_in_the_workbook(mem_db, report_api):
     client, _, _ = report_api
-    resource(mem_db, "mrs_job", "RUNNING", attrs={"job_state": "RUNNING", "job_result": "UNDEFINED"})
+    resource(mem_db, "mrs_job", "running", attrs={"node_status": "running", "node_type": "MRSSpark",
+                                                 "start_time": 1792886400000, "end_time": 1792886460000})
+    response = client.get("/api/v1/job-reports/mrs/export")
+    ws = load_workbook(BytesIO(response.content))["作业明细"]
+    values = dict(zip((cell.value for cell in ws[1]), next(ws.iter_rows(min_row=2, values_only=True)), strict=True))
+    assert isinstance(values["开始时间"], datetime) and isinstance(values["结束时间"], datetime)
+    assert values["节点类型"] == "MRSSpark"
+
+
+def test_mrs_data_source_is_stated_in_report_and_workbook(mem_db, report_api):
+    client, _, _ = report_api
+    resource(mem_db, "mrs_job", "running", attrs={"node_status": "running"})
     data = report(client, "mrs")
-    assert any("PDF" in note and "MRS" in note for note in data["data_notes"])
+    assert any("DataArts" in note and "MRS" in note for note in data["data_notes"])
     response = client.get("/api/v1/job-reports/mrs/export")
     summary = dict(load_workbook(BytesIO(response.content))["汇总"].iter_rows(min_row=2, values_only=True))
-    assert "PDF" in str(summary.get("数据说明")) and "MRS" in str(summary["数据说明"])
+    assert "DataArts" in str(summary.get("数据说明")) and "MRS" in str(summary["数据说明"])
 
 
 def test_realtime_workspaces_and_batch_missing_duration_keep_independent_facts(monkeypatch):

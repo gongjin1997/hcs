@@ -372,7 +372,7 @@ def test_dataarts_detail_failures_are_bounded_and_thread_context_reaches_http(lo
 @pytest.mark.parametrize("collector,phase", [
     (dataarts.DataArtsRealtimeCollector, "job_list"),
     (dataarts.DataArtsBatchCollector, "batch_instances"),
-    (mrs.MrsJobCollector, "job_executions"),
+    (mrs.MrsJobCollector, "mrs_job_instances"),
 ])
 def test_partial_list_failures_keep_scope_and_trace(collector, phase, logged):
     raw = "unstructured-private-response"
@@ -390,24 +390,23 @@ def test_partial_list_failures_keep_scope_and_trace(collector, phase, logged):
     assert "Traceback" in failure["exc"] and raw not in json.dumps(logged)
 
 
-def test_mrs_unverified_duration_is_logged_as_counted_data_gap(logged):
+def test_mrs_job_detail_failures_keep_scope_and_trace(logged):
+    raw = "unstructured-private-response"
+
     def get(service, path, **_kwargs):
-        assert service == "mrs"
-        if path.endswith("cluster_infos"):
-            return {"clusters": [{"clusterId": "cluster-one", "clusterName": "one"}], "clusterTotal": 1}
-        return {"job_list": [{"job_name": "job-one", "submitted_time": 1710000000000,
-                              "job_state": "RUNNING", "elapsed_time": 120000}], "total_record": 1}
+        assert service == "dataarts"
+        if path.endswith("/instances/detail"):
+            return {"instances": [{"jobName": "job-one", "instanceId": 5, "status": "success", "planTime": 1000}],
+                    "total": 1}
+        raise HcsError(503, "TEST.FAILURE", raw)
 
     context = RunContext(client=SimpleNamespace(get=get), account="logs", project_id="test-project",
                          tenant_id=101, project_ref=201)
     with log_context(run_id=19):
-        rows = mrs.MrsJobCollector().collect(context)
-
-    warning = next(row for row in logged if row.get("event") == "collection_data_unavailable")
-    assert len(rows) == 1 and rows[0].metrics["elapsed_min"] is None
-    assert context.stats["jobs_duration_unit_unverified"] == 1
-    assert warning["reason"] == "elapsed_time_unit_unverified" and warning["affected_count"] == 1
-    assert warning["run_id"] == 19
+        assert mrs.MrsJobCollector().collect(context) == []
+    failure = next(row for row in logged if row.get("event") == "collection_partial_failure")
+    assert failure["phase"] == "mrs_job_detail" and failure["run_id"] == 19 and failure["project_ref"] == 201
+    assert failure["upstream_status"] == 503 and raw not in json.dumps(logged)
 
 
 def test_optional_prometheus_not_configured_does_not_log_failure(monkeypatch, logged):

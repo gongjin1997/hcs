@@ -39,7 +39,7 @@ def create_app() -> FastAPI:
         if settings.demo_seed and settings.env == "prod":
             log.warning("INSPECTOR_DEMO_SEED is ignored in prod; use python -m app.workers.bootstrap")
         elif settings.demo_seed:
-            from app.services.seed import seed_demo
+            from app.demo.seed import seed_demo
             with SessionLocal() as db:
                 if seed_demo(db):
                     log.info("demo data seeded")

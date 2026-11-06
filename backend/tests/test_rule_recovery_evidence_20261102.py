@@ -64,8 +64,6 @@ def test_unknown_state_or_missing_result_never_recovers_builtin_alarm(code):
     facts = {"status": "FUTURE_STATE", "last_status": "FUTURE_STATE", "job_state": "FUTURE_STATE",
              "job_result": "SUCCEEDED", "status_duration_min": 20}
     assert evaluate_rule(rule, facts, {}, "P3").action != "RESOLVE"
-    if code == "R-MRS-JOB-001":
-        assert evaluate_rule(rule, {"job_result": "SUCCEEDED"}, {}, "P2").action != "RESOLVE"
 
 
 def test_migration_restores_owned_changes_and_preserves_custom_rule(migration_url):
@@ -111,13 +109,13 @@ def test_downgrade_does_not_touch_rules_created_after_migration(migration_url):
     engine = create_engine(migration_url)
     try:
         with Session(engine) as db:
-            row = legacy("R-MRS-JOB-003")
+            row = legacy("R-DGC-BAT-002")
             row.recover = PATCHES[row.id]["after"]
             db.add(row)
             db.commit()
         command.downgrade(cfg, "0013")
         with Session(engine) as db:
-            assert db.get(AlarmRule, "R-MRS-JOB-003").recover == PATCHES["R-MRS-JOB-003"]["after"]
+            assert db.get(AlarmRule, "R-DGC-BAT-002").recover == PATCHES["R-DGC-BAT-002"]["after"]
     finally:
         engine.dispose()
 
@@ -128,14 +126,14 @@ def test_migration_recognizes_startup_repair_backup(migration_url):
     engine = create_engine(migration_url)
     try:
         with Session(engine) as db:
-            db.add(legacy("R-MRS-JOB-003"))
+            db.add(legacy("R-DGC-BAT-002"))
             db.commit()
-            original_updated_at = db.get(AlarmRule, "R-MRS-JOB-003").updated_at
+            original_updated_at = db.get(AlarmRule, "R-DGC-BAT-002").updated_at
             sync_default_rules(db)
         command.upgrade(cfg, "0014")
         command.downgrade(cfg, "0013")
         with Session(engine) as db:
-            row = db.get(AlarmRule, "R-MRS-JOB-003")
+            row = db.get(AlarmRule, "R-DGC-BAT-002")
             assert row.recover == PATCHES[row.id]["before"] and row.version == 1 and row.updated_by == "system"
             assert row.updated_at == original_updated_at
     finally:

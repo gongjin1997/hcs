@@ -6,7 +6,7 @@ BIN     := $(VENV)/bin
 WEB_PORT ?= 8080
 COMPOSE  := WEB_PORT=$(WEB_PORT) docker-compose --project-directory deploy -f deploy/docker-compose.yml -f deploy/docker-compose.demo.yml -f deploy/docker-compose.build.yml
 
-.PHONY: help init dev-api dev-mock dev-web scheduler notifier run-once ledger-sync report migrate bootstrap status probe revision apidoc lock lint test cov check build up down logs
+.PHONY: help init dev-api dev-mock dev-web scheduler notifier run-once ledger-sync report migrate bootstrap status probe revision apidoc guides lock lint test cov check build up down logs
 .PHONY: test-pg test-web test-lan test-offline test-code lan lan-status lan-stop diagnostics
 
 help:            ## 显示帮助
@@ -56,6 +56,9 @@ probe:           ## HCS 接口探测（只读），例：make probe args="--tena
 
 apidoc:          ## 根据代码重新生成接口清单 docs/接口清单.md（方法 / 路径 / 说明 / 所需权限点）
 	cd backend && .venv/bin/python -m app.tools.apidoc > ../docs/接口清单.md
+
+guides:          ## 根据 resource_guides.py 重新生成 docs/资源与指标指南.md（tests/test_resource_guides.py 逐字校验）
+	cd backend && .venv/bin/python -m app.tools.guides > ../docs/资源与指标指南.md
 
 lock:            ## 升级依赖后重新生成 backend/constraints.txt（镜像构建 / CI 按此锁定版本）
 	cd backend && { sed -n '1,2p' constraints.txt; .venv/bin/pip freeze --exclude-editable | grep -viE '^hcs[-_]inspector'; } > constraints.txt.new && mv constraints.txt.new constraints.txt

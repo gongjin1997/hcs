@@ -12,7 +12,8 @@ export const ATTR_LABEL: Record<string, string> = {
   partition_num: '分区数', storage_usage: '存储使用率(%)', components: '组件', az: '可用区', node_type: '节点规格',
   volume_gb: '存储(GB)', workspace: '工作空间', path: '作业路径', priority: '优先级', restarts_24h: '24h 重启次数',
   owner: '作业负责人', schedule: '调度周期', instance_id: '实例 ID', cluster: '所属集群', job_type: '作业类型',
-  job_state: '作业状态', job_result: '作业结果', queue: '队列', user: '提交用户',
+  job_name: '所属作业', node_name: '节点名称', node_status: '节点状态', retry_times: '失败重试次数', log_path: '日志路径',
+  user: '提交用户',
   metrics_source: '指标来源', task_state: '任务状态', power_state: '电源状态', cluster_id: '集群 ID', namespace: '命名空间',
   kind: '工作负载类型', workload: '工作负载', pods: 'Pod 数', ready_pods: '就绪 Pod', image: '镜像', status_raw: 'HCS 原始状态',
 }
@@ -22,7 +23,7 @@ export const METRIC_LABEL: Record<string, string> = {
   cpu_usage: 'CPU 使用率(%)', mem_usage: '内存使用率(%)', disk_usage: '磁盘使用率(%)', memory_usage: '内存使用率(%)',
   used_memory_mb: '已用内存(MB)', connected_clients: '连接数', pods: 'Pod 数', ready_pods: '就绪 Pod', restarts_24h: '24h 重启次数',
   backpressure_min: '背压持续(分钟)', crashloop_pods: 'CrashLoop Pod', nodes: '节点数', bad_nodes: '异常节点', run_minutes: '本次耗时(分钟)',
-  p90_minutes: 'P90 基线(分钟)', elapsed_min: '运行耗时(分钟)',
+  p90_minutes: 'P90 基线(分钟)',
 }
 export const CHARGING: Record<string, string> = { '0': '按需', '1': '包周期' }
 const METRICS_SRC: Record<string, string> = { CES: '云监控 CES', PROMETHEUS: 'Prometheus', NONE: '仅服务原生' }
@@ -52,8 +53,8 @@ export const MONITOR_COLUMNS: Record<string, MonitorCol[]> = {
     { label: '实例 ID', width: 100, mono: true, value: (r) => r.attrs.instance_id },
   ],
   mrs_job: [
-    { label: '队列', width: 120, mono: true, value: (r) => r.attrs.queue },
-    { label: '运行耗时', width: 96, value: (r) => (r.metrics.elapsed_min != null ? `${r.metrics.elapsed_min} 分钟` : '-') },
+    { label: '所属作业', width: 150, value: (r) => r.attrs.job_name },
+    { label: '运行耗时', width: 96, value: (r) => (r.metrics.run_minutes != null ? `${r.metrics.run_minutes} 分钟` : '-') },
   ],
   gaussdb_instance: [
     { label: '磁盘使用率', width: 150, usage: true, value: (r) => r.metrics.disk_usage, sub: (r) => `存储 ${r.attrs.volume_gb ?? '-'} GB` },

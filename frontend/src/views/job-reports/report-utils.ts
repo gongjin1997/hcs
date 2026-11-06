@@ -7,9 +7,9 @@ export function factText(value: unknown): string {
   return String(value)
 }
 
-/** 仅批实例字段确认毫秒单位；实时 Date 和 MRS 兼容时间保持源值。 */
+/** 批实例与 MRS 节点的时间字段为毫秒时间戳（DataArts 表 5-178 / 5-182）；实时 Date 保持源值。 */
 export function detailText(key: string, value: unknown, resourceType: JobReportRow['resource_type'] = 'dgc_batch_job'): string {
-  if (resourceType === 'dgc_batch_job' && ['start_time', 'end_time', 'plan_time', 'submitted_time'].includes(key)
+  if ((resourceType === 'dgc_batch_job' || resourceType === 'mrs_job') && ['start_time', 'end_time', 'plan_time', 'submitted_time'].includes(key)
     && typeof value === 'number' && value > 0) {
     const date = new Date(value)
     if (!Number.isNaN(date.getTime())) return `${fmtTime(date.toISOString(), 'YYYY-MM-DD HH:mm:ss')}（本地）`
@@ -18,7 +18,7 @@ export function detailText(key: string, value: unknown, resourceType: JobReportR
 }
 
 export function durationText(row: JobReportRow): string {
-  const value = row.resource_type === 'mrs_job' ? row.metrics.elapsed_min : row.metrics.run_minutes
+  const value = row.metrics.run_minutes
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? `${value} 分钟` : '未采集'
 }
 

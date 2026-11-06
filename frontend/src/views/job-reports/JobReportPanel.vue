@@ -109,14 +109,14 @@
             </template>
 
             <template v-else-if="panel === 'mrs'">
-              <el-table-column label="执行结果" min-width="125"><template #default="{ row }">
-                <span class="mono cell-fact">{{ factText(row.execution_result) }}</span><div v-if="row.execution_result?.trim().toUpperCase() === 'UNDEFINED'" class="text-3">结果未定义</div>
+              <el-table-column label="所属作业 / 工作空间" min-width="190"><template #default="{ row }">
+                <div class="cell-fact">{{ factText(row.status_details.job_name) }}</div><div class="text-3 cell-fact">工作空间：{{ factText(row.status_details.workspace) }}</div>
               </template></el-table-column>
-              <el-table-column label="集群 / 队列" min-width="165"><template #default="{ row }">
-                <div class="cell-fact">{{ factText(row.status_details.cluster) }}</div><div class="text-3 cell-fact">队列：{{ factText(row.status_details.queue) }}</div>
+              <el-table-column label="节点 / 类型" min-width="170"><template #default="{ row }">
+                <div class="cell-fact">{{ factText(row.status_details.node_name) }}</div><div class="text-3 cell-fact">{{ row.job_type ?? '类型未采集' }} · {{ row.engine ?? '未识别引擎' }}</div>
               </template></el-table-column>
-              <el-table-column label="执行 ID / 类型" min-width="160"><template #default="{ row }">
-                <div class="mono cell-fact">{{ factText(row.status_details.job_id) }}</div><div class="text-3 cell-fact">{{ row.job_type ?? '类型未采集' }} · {{ row.engine ?? '未识别引擎' }}</div>
+              <el-table-column label="实例 / 重试" min-width="150"><template #default="{ row }">
+                <div class="mono cell-fact">{{ factText(row.status_details.instance_id) }}</div><div class="text-3 cell-fact">重试 {{ factText(row.status_details.retry_times) }} 次</div>
               </template></el-table-column>
               <el-table-column label="实际执行 / 时长" min-width="195"><template #default="{ row }">
                 <div>始 {{ detailText('start_time', row.status_details.start_time, row.resource_type) }}</div><div class="text-3">终 {{ detailText('end_time', row.status_details.end_time, row.resource_type) }}</div><div class="text-3">持续 {{ row.duration }}</div>
@@ -126,7 +126,7 @@
             <template v-else>
               <el-table-column :label="panel === 'dgc' ? '类型 / 工作空间' : '来源 / 引擎'" min-width="165"><template #default="{ row }">
                 <div>{{ row.sourceLabel }}</div>
-                <div v-if="row.resource_type !== 'mrs_job'" class="text-3 cell-fact">工作空间：{{ factText(row.status_details.workspace) }}</div>
+                <div class="text-3 cell-fact">工作空间：{{ factText(row.status_details.workspace) }}</div>
                 <div class="text-3 cell-fact">{{ row.engine ?? '未识别引擎' }} · {{ row.job_type ?? '类型未采集' }}</div>
               </template></el-table-column>
               <el-table-column label="节点 / 最近实例 / 执行" min-width="230"><template #default="{ row }">
@@ -139,8 +139,8 @@
                   <div class="cell-fact">实例 <span class="mono">{{ factText(row.status_details.instance_id) }}</span></div><div class="text-3">持续 {{ row.duration }}</div>
                 </template>
                 <template v-else>
-                  <div class="cell-fact">执行 <span class="mono">{{ factText(row.status_details.job_id) }}</span></div>
-                  <div class="cell-fact">独立结果：<span class="mono">{{ factText(row.execution_result) }}</span></div>
+                  <div class="cell-fact">节点 <span class="mono">{{ factText(row.status_details.node_name) }}</span> · 实例 <span class="mono">{{ factText(row.status_details.instance_id) }}</span></div>
+                  <div class="text-3">持续 {{ row.duration }}</div>
                 </template>
               </template></el-table-column>
               <el-table-column :label="panel === 'dgc' ? '节点指标 / 实例时间' : '运行详情'" min-width="225"><template #default="{ row }">
@@ -151,7 +151,7 @@
                   <div>计划 {{ detailText('plan_time', row.status_details.plan_time, row.resource_type) }}</div><div class="text-3">始 {{ detailText('start_time', row.status_details.start_time, row.resource_type) }}</div><div class="text-3">终 {{ detailText('end_time', row.status_details.end_time, row.resource_type) }}</div>
                 </template>
                 <template v-else>
-                  <div class="cell-fact">{{ factText(row.status_details.cluster) }} · 队列 {{ factText(row.status_details.queue) }}</div><div class="text-3">持续 {{ row.duration }}</div><div class="text-3">始 {{ detailText('start_time', row.status_details.start_time, row.resource_type) }}</div>
+                  <div class="cell-fact">{{ factText(row.status_details.job_name) }} / {{ factText(row.status_details.node_name) }}</div><div class="text-3">持续 {{ row.duration }}</div><div class="text-3">始 {{ detailText('start_time', row.status_details.start_time, row.resource_type) }}</div>
                 </template>
               </template></el-table-column>
             </template>

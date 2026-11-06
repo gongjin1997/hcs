@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app.alarms.fingerprint import fingerprint
 from app.collectors.base import Observation, RunContext
 from app.collectors.dataarts import BATCH_STATES, REALTIME_STATES
-from app.collectors.mrs import CLUSTER_STATES
+from app.collectors.mrs import CLUSTER_STATES, NODE_STATES
 from app.core.config import get_settings
 from app.metrics.dcs_samples import parse_observed_at
 from app.models import AlarmEvent, EvalState, InspectionTask, Resource
@@ -23,17 +23,10 @@ from app.rules.model import Rule
 from app.schemas.collection_policy import CollectionPolicy
 
 from . import collect_switch, collection_policy
+from .catalog import TASK_CHECKS
 
-# 只用于无归属元数据的老状态恢复。未知/自定义任务不猜测其他任务的归属。
-TASK_CHECKS = {
-    "dgc_realtime_status": {"job_status", "node_status"}, "dgc_batch_instance": {"instance_status"},
-    "mrs_cluster_status": {"cluster_status"}, "mrs_job_status": {"job_status"},
-    "gaussdb_status": {"instance_status", "cpu", "memory", "disk"},
-    "dcs_status": {"instance_status", "memory"},
-    "ecs_status": {"instance_status", "cpu", "memory", "disk", "reboot"},
-    "ecs_metrics": set(), "ecs_quota": set(),
-    "cce_pod_events": {"pod_restart", "pod_oom", "pod_crashloop", "pod_backpressure", "pod_evicted"},
-}
+# TASK_CHECKS（任务 → 负责的检查项）由 catalog.TASK_SPECS 派生，只用于无归属元数据的老状态恢复。
+# 未知/自定义任务不猜测其他任务的归属。
 META = "_inspection_evidence"
 SCOPE = "_evidence_scope"
 
@@ -101,15 +94,13 @@ def inspection_ttl(db: Session, ctx: Context, task: InspectionTask | None,
 
 
 def state_known(observation: Observation) -> bool:
-    # MRS 作业沿用现有兼容适配中已识别的文本，不把它声明为上传 PDF 的正式契约。
+    # 状态枚举均来自上传 PDF：DataArts 表 5-178 / 5-182、MRS 集群状态表。
     checks = {
         ("dgc_realtime_job", "job_status"): ("status", REALTIME_STATES),
         ("dgc_realtime_job", "node_status"): ("node_status", REALTIME_STATES),
         ("dgc_batch_job", "instance_status"): ("last_status", BATCH_STATES),
         ("mrs_cluster", "cluster_status"): ("cluster_state", CLUSTER_STATES),
-        ("mrs_job", "job_status"): ("job_state", frozenset(
-            "NEW SUBMITTED ACCEPTED RUNNING FINISHED FAILED KILLED KILLING WAITING QUEUED PENDING "
-            "STARTING STOPPING STOPPED CANCELED CANCELLED SUCCEEDED SUCCESS".split())),
+        ("mrs_job", "job_status"): ("node_status", NODE_STATES),
     }
     contract = checks.get((observation.resource_type, observation.check_item))
     if contract is None:
@@ -119,15 +110,19 @@ def state_known(observation: Observation) -> bool:
     return isinstance(value, str) and value in states
 
 
+# 一次执行的标识：标识变化即新一轮执行，状态持续时间与连续命中重新计算（流水线 upsert 共用）
+EXECUTION_ID_FIELDS = {"mrs_job": "instance_id", "dgc_batch_job": "instance_id"}
+
+
 def execution_id(observation: Observation) -> str | None:
-    field = {"mrs_job": "job_id", "dgc_batch_job": "instance_id"}.get(observation.resource_type)
+    field = EXECUTION_ID_FIELDS.get(observation.resource_type)
     value = observation.attrs.get(field) if field else None
     return str(value) if type(value) is int or isinstance(value, str) and value.strip() else None
 
 
 def _state(observation: Observation) -> Any:
     keys = (("node_status",) if observation.sub_object else
-            ("job_state", "last_status", "status", "cluster_state", "node_status"))
+            ("last_status", "status", "cluster_state", "node_status"))
     return next((observation.facts[key] for key in keys if observation.facts.get(key) is not None), None)
 
 
@@ -164,7 +159,7 @@ def evidence_facts(observation: Observation, resource: Resource, rule: Rule, ctx
         value = facts["status_duration_min"]
         if type(value) not in (int, float) or value < 0 or isinstance(value, float) and not math.isfinite(value):
             facts.pop("status_duration_min")
-    elif state is not None and (observation.resource_type != "mrs_job" or execution is not None):
+    elif state is not None and (observation.resource_type not in EXECUTION_ID_FIELDS or execution is not None):
         facts["status_duration_min"] = int((now - since).total_seconds() // 60)
     return facts
 

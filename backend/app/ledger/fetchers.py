@@ -9,7 +9,6 @@ import re
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from ipaddress import ip_address
 from urllib.parse import urlsplit
 
 from app.core.config import get_settings
@@ -18,7 +17,7 @@ from app.hcs.cce_api import management_items
 from app.hcs.cce_inventory import cluster_info
 from app.hcs.gaussdb_api import gaussdb_instances_path
 from app.hcs.pager import page_all, response_items, response_total
-from app.services.catalog import GAUSSDB_DEPLOY
+from app.services.catalog import GAUSSDB_DEPLOY, LEDGER_TYPES
 
 
 @dataclass
@@ -165,31 +164,6 @@ def remember_owners(ctx: dict, kind: str, bindings: list[tuple[str, str, list[st
                     ports.setdefault(port, {})[identity] = label
     ctx["ip_owner"] = {ip: next(iter(owners.values())) for ip, owners in ips.items() if len(owners) == 1}
     ctx["port_owner"] = {port: next(iter(owners.values())) for port, owners in ports.items() if len(owners) == 1}
-
-
-def _connection_host(value: str | None) -> str | None:
-    """连接列表可为纯 IP，不能把 IPv6 的末段当成端口裁掉。"""
-    if value is None or value == "":
-        return None
-    if not isinstance(value, str):
-        raise HcsError(0, "LOCAL.INVALID_RESPONSE", "实例连接地址格式不正确")
-    first = value.split(",", 1)[0].strip()
-    if not first:
-        return None
-    try:
-        ip_address(first)
-        return first
-    except ValueError:
-        pass
-    try:
-        address = urlsplit(f"//{first}")
-        if (not address.hostname or address.username is not None or address.password is not None
-                or address.path or address.query or address.fragment):
-            raise ValueError("invalid connection address")
-        _ = address.port
-        return address.hostname
-    except ValueError as exc:
-        raise HcsError(0, "LOCAL.INVALID_RESPONSE", "实例连接地址格式不正确") from exc
 
 
 # ---------------- 计算 ----------------
@@ -409,28 +383,6 @@ def fetch_eip(c: HcsClient, ctx: dict) -> list[LedgerRecord]:
 
 
 # ---------------- 数据库与缓存 ----------------
-RDS_DEPLOY = {"Ha": "主备", "Single": "单机", "Replica": "只读"}
-
-
-def fetch_rds(c: HcsClient, ctx: dict) -> list[LedgerRecord]:
-    out = []
-    for i in page_all(lambda p: c.get("rds", "/v3/{project_id}/instances", params=p), "instances",
-                      total_key="total_count"):
-        ds, vol = i.get("datastore") or {}, i.get("volume") or {}
-        cpu, mem, size = _num(i.get("cpu")), _num(i.get("mem")), _num(vol.get("size"))
-        vcpus = int(cpu) if cpu is not None and cpu > 0 and cpu.is_integer() else None
-        az = (i.get("nodes") or [{}])[0].get("availability_zone")
-        out.append(LedgerRecord(i["id"], i["name"], i.get("status"), az, (i.get("private_ips") or [None])[0],
-                                f"{_fmt(vcpus)} vCPU | {_fmt(mem)} GB | {_fmt(size)} GB",
-                                vcpus, mem, size, parse_time(i.get("created")),
-                                {"engine": f"{ds.get('type')} {ds.get('version')}", "ha": RDS_DEPLOY.get(i.get("type") or "",
-                                 i.get("type")), "flavor": i.get("flavor_ref")},
-                                clear_fields=tuple(k for k, value in {
-                                    "vcpus": vcpus, "memory_gb": mem, "storage_gb": size
-                                }.items() if value is None)))
-    return out
-
-
 def gaussdb_attrs(i: dict) -> dict:
     """GaussDB 实例属性（巡检采集 collectors/gaussdb.py 也用这个函数，两边口径一致）。"""
     ver = (i.get("datastore") or {}).get("version")
@@ -488,34 +440,7 @@ def fetch_dcs(c: HcsClient, ctx: dict) -> list[LedgerRecord]:
     return out
 
 
-# ---------------- 大数据与中间件 ----------------
-def fetch_kafka(c: HcsClient, ctx: dict) -> list[LedgerRecord]:
-    def fetch(params: dict) -> dict:
-        # DMS 2.3.0.7 for 8.5.1 未定义 instance_num 为全量总数；不能用它提前停止分页。
-        return c.get("dms", "/v2/{project_id}/instances", params={"engine": "kafka", **params})
-
-    out = []
-    for i in page_all(fetch, "instances", limit=50, total_key=None):
-        total, used = _num(i.get("storage_space")), _num(i.get("used_storage_space"))
-        ratio = _num(used / total * 100) if total and used is not None else None
-        usage = round(ratio, 1) if ratio is not None else None
-        addr = _connection_host(i.get("connect_address"))
-        partitions = _count(i.get("partition_num"))
-        spec = " | ".join(part for part in (i.get("specification"), f"{total:g} GB" if total is not None else None)
-                          if part) or None
-        out.append(LedgerRecord(i["instance_id"], i["name"], i.get("status"), ",".join(i.get("available_zones") or [])
-                                or None, addr or None,
-                                spec, storage_gb=total,
-                                created_time=parse_time(i.get("created_at")),
-                                attrs={"engine_version": i.get("engine_version"), "partition_num": partitions,
-                                       "storage_usage": usage, "specification": i.get("specification")},
-                                clear_fields=("storage_gb",) if total is None else (),
-                                clear_attrs=tuple(k for k, value in {
-                                    "storage_usage": usage, "partition_num": partitions
-                                }.items() if value is None)))
-    return out
-
-
+# ---------------- 大数据 ----------------
 def fetch_mrs(c: HcsClient, ctx: dict) -> list[LedgerRecord]:
     def fetch(params: dict) -> dict:
         data = c.get("mrs", "/v1.1/{project_id}/cluster_infos", params=params)
@@ -580,38 +505,12 @@ def fetch_dws(c: HcsClient, ctx: dict) -> list[LedgerRecord]:
     return out
 
 
-CSS_STATUS = {"100": "CREATING", "200": "AVAILABLE", "303": "UNAVAILABLE"}
-
-
-def fetch_css(c: HcsClient, ctx: dict) -> list[LedgerRecord]:
-    # 未认证的历史兼容实现：当前 start 按页号推进，不是已确认的 HCS 8.5.1 契约。
-    # 其他版次的同名 start 可表示记录索引；未补现场契约前不据此改参或自动回退 offset。
-    rows = page_all(lambda p: c.get("css", "/v1.0/{project_id}/clusters", params=p), "clusters", mode="page",
-                    start=1, total_key="totalSize", offset_param="start", limit=10)
-    out = []
-    for cl in rows:
-        ds, inst = cl.get("datastore") or {}, cl.get("instances")
-        inst = response_items({"instances": inst}, "instances") if inst is not None else None
-        spec = (inst[0].get("specCode") if inst else None) or "-"
-        status = cl.get("status")
-        if status is not None and (isinstance(status, bool) or not isinstance(status, str | int)):
-            raise HcsError(0, "LOCAL.INVALID_RESPONSE", "CSS 集群状态格式不正确")
-        status = CSS_STATUS.get(str(status), str(status)) if status is not None else None
-        out.append(LedgerRecord(cl["id"], cl["name"], status,
-                                (inst[0].get("azCode") if inst else None), (cl.get("endpoint") or "").split(":")[0] or None,
-                                f"{spec} × {len(inst)}" if inst is not None else None,
-                                created_time=parse_time(cl.get("created")),
-                                attrs={"version": f"{ds.get('type')} {ds.get('version')}",
-                                       "node_count": len(inst) if inst is not None else None, "spec_code": spec},
-                                clear_fields=("spec",) if inst is None else (),
-                                clear_attrs=("node_count",) if inst is None else ()))
-    return out
-
-
 # 同步顺序有依赖：ECS 在 EVS / EIP 之前（挂载与绑定关系），VPC 在子网之前，ELB 在 EIP 之前
 FETCHERS: dict[str, Fetcher] = {
     "ecs_server": fetch_ecs, "cce_cluster": fetch_cce, "evs_volume": fetch_evs, "vpc": fetch_vpc,
-    "vpc_subnet": fetch_subnet, "elb": fetch_elb, "eip": fetch_eip, "rds_instance": fetch_rds,
-    "gaussdb_instance": fetch_gaussdb, "dcs_instance": fetch_dcs, "kafka_instance": fetch_kafka,
-    "mrs_cluster": fetch_mrs, "dws_cluster": fetch_dws, "css_cluster": fetch_css,
+    "vpc_subnet": fetch_subnet, "elb": fetch_elb, "eip": fetch_eip,
+    "gaussdb_instance": fetch_gaussdb, "dcs_instance": fetch_dcs,
+    "mrs_cluster": fetch_mrs, "dws_cluster": fetch_dws,
 }
+if set(FETCHERS) != set(LEDGER_TYPES):  # 台账类型以 catalog 为准，增删类型须同时提供 / 移除抓取函数
+    raise RuntimeError(f"台账抓取函数与 catalog.LEDGER_TYPES 不一致：{sorted(set(FETCHERS) ^ set(LEDGER_TYPES))}")

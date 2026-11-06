@@ -19,7 +19,7 @@ from app.services.tenancy import Target
 TARGET = Target(101, "review", "review", "review", 1001, "project-a", "review", "region")
 TYPES = tuple(fetchers.FETCHERS)
 LIST_KEYS = dict(zip(TYPES, ("servers", "items", "volumes", "vpcs", "subnets", "loadbalancers", "publicips",
-                           "instances", "instances", "instances", "instances", "clusters", "clusters", "clusters"),
+                           "instances", "instances", "clusters", "clusters"),
                      strict=True))
 
 
@@ -55,7 +55,7 @@ def inventory(rtype, **changes):
     item = {"id": "one", "name": "one", **changes}
     if rtype == "cce_cluster":
         item = {"metadata": {"uid": "one", "name": "one"}, "spec": {}, **changes}
-    elif rtype in ("kafka_instance", "dcs_instance"):
+    elif rtype == "dcs_instance":
         item["instance_id"] = "one"
     elif rtype == "eip":
         item["public_ip_address"] = "198.51.100.10"
@@ -169,10 +169,7 @@ def test_evs_multiattach_counts_one_volume_once_per_server():
 @pytest.mark.parametrize("value", [-1, "-1", "NaN", "Infinity", float("inf"), True])
 @pytest.mark.parametrize("rtype,changes,field", [
     ("evs_volume", {"size": None}, "storage_gb"),
-    ("rds_instance", {"mem": None}, "memory_gb"),
-    ("rds_instance", {"volume": {"size": None}}, "storage_gb"),
     ("dcs_instance", {"capacity": None}, "memory_gb"),
-    ("kafka_instance", {"storage_space": None}, "storage_gb"),
 ])
 def test_invalid_native_capacity_does_not_keep_known_capacity(mem_db, rtype, changes, field, value):
     changes = deepcopy(changes)
@@ -197,12 +194,6 @@ def test_eip_bandwidth_is_finite_nonnegative_and_zero_is_retained(value, expecte
     record, = fetchers.fetch_eip(ReviewClient(inventory("eip", bandwidth_size=value)), {})
     assert record.attrs["bandwidth"] == expected
     assert record.spec == (None if expected is None else f"{expected} Mbit/s")
-
-
-def test_kafka_capacity_arithmetic_cannot_create_infinity():
-    record, = fetchers.fetch_kafka(ReviewClient(inventory("kafka_instance", storage_space=1e308,
-                                                        used_storage_space=1e308)), {})
-    assert record.attrs["storage_usage"] == 100
 
 
 def test_elb_missing_operating_state_is_not_provisioning_active():
@@ -303,11 +294,6 @@ def test_evs_record_does_not_hide_other_native_attachments():
 def test_invalid_service_status_never_becomes_a_string_or_silent_unknown(rtype, value):
     field = {"elb": "operating_status", "mrs_cluster": "clusterState"}.get(rtype, "status")
     change = {field: value} if rtype != "cce_cluster" else {"status": {"phase": value}}
-    if rtype == "css_cluster" and type(value) is int:
-        # CSS 旧接口已有数字状态；未知数字仍保留，不发明其健康含义。
-        record, = fetchers.FETCHERS[rtype](ReviewClient(inventory(rtype, **change)), {})
-        assert record.status == str(value)
-        return
     with pytest.raises(HcsError):
         fetchers.FETCHERS[rtype](ReviewClient(inventory(rtype, **change)), {})
 
@@ -318,8 +304,7 @@ def test_cce_invalid_status_container_is_an_explicit_error(value):
         fetchers.fetch_cce(ReviewClient(inventory("cce_cluster", status=value)), {})
 
 
-@pytest.mark.parametrize("rtype,changes,field", [("evs_volume", {"size": 0}, "storage_gb"),
-    ("rds_instance", {"mem": 0}, "memory_gb"), ("kafka_instance", {"storage_space": 0}, "storage_gb")])
+@pytest.mark.parametrize("rtype,changes,field", [("evs_volume", {"size": 0}, "storage_gb")])
 def test_native_zero_capacity_is_preserved_in_snapshot(mem_db, rtype, changes, field):
     record, = fetchers.FETCHERS[rtype](ReviewClient(inventory(rtype, **changes)), {})
     sync.apply_snapshot(mem_db, rtype, [record], tenant_id=101, project_ref=1001)
@@ -338,7 +323,7 @@ def test_evs_unattached_or_unknown_attachment_clears_stale_ownership(mem_db):
 
 
 @pytest.mark.parametrize("rtype,raw_field,attr", [("dws_cluster", "number_of_node", "node_count"),
-    ("mrs_cluster", "totalNodeNum", "nodes"), ("kafka_instance", "partition_num", "partition_num")])
+    ("mrs_cluster", "totalNodeNum", "nodes")])
 @pytest.mark.parametrize("value", [None, -1, True, "NaN", "Infinity", 1.5])
 def test_unavailable_native_counts_are_unknown_instead_of_invalid_quantities(rtype, raw_field, attr, value):
     record, = fetchers.FETCHERS[rtype](ReviewClient(inventory(rtype, **{raw_field: value})), {})
@@ -346,14 +331,6 @@ def test_unavailable_native_counts_are_unknown_instead_of_invalid_quantities(rty
     assert "None" not in (record.spec or "")
     assert "nan" not in (record.spec or "").lower()
     assert "inf" not in (record.spec or "").lower()
-
-
-@pytest.mark.parametrize("instances,expected", [(None, None), ([], 0), ([{"specCode": "legacy"}], 1)])
-def test_css_missing_native_node_list_is_not_zero_nodes(instances, expected):
-    record, = fetchers.fetch_css(ReviewClient(inventory("css_cluster", instances=instances)), {})
-    assert record.attrs["node_count"] == expected
-    if expected is None:
-        assert record.spec is None
 
 
 @pytest.mark.parametrize("field,source", [("memory_size", "flavor_info"), ("volume_size", "volume")])

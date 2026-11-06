@@ -18,16 +18,15 @@ class DetailClient:
                  "planTime": 1000, "startTime": 2000, "endTime": 122000},
                 {"jobName": "batch-waiting", "instanceId": 82, "status": "waiting", "planTime": 1000},
             ], "total": 2}
-        if path.endswith("/cluster_infos"):
-            return {"clusters": [{"clusterId": "cluster-a", "clusterName": "MRS A"}], "clusterTotal": 1}
-        if path.endswith("/job-executions"):
-            return {"job_list": [
-                {"job_name": "flink-a", "job_id": "execution-a", "job_type": "Flink",
-                 "job_state": "RUNNING", "job_result": "UNDEFINED", "submitted_time": 1000,
-                 "elapsed_time": 120000, "queue": "production"},
-                {"job_name": "spark-a", "job_id": "execution-b", "job_type": "Spark",
-                 "job_state": "FINISHED", "job_result": "FAILED", "submitted_time": 1000},
-            ], "total_record": 2}
+        tail = path.rsplit("/", 1)[1]
+        if "/instances/" in path and tail.isdigit():
+            if tail == "81":
+                nodes = [{"nodeName": "spark", "type": "MRSSpark", "status": "fail", "startTime": 2000, "endTime": 62000,
+                          "retryTimes": 2, "logPath": "obs://logs/spark"},
+                         {"nodeName": "notify", "type": "SMN", "status": "success", "startTime": 62000}]
+            else:
+                nodes = [{"nodeName": "flink", "type": "MRSFlinkJob", "status": "waiting"}]
+            return {"jobName": path.split("/jobs/")[1].split("/")[0], "instanceId": int(tail), "nodes": nodes}
         raise AssertionError(path)
 
 
@@ -59,19 +58,13 @@ def test_batch_instance_times_and_missing_duration_are_distinct():
     assert waiting.attrs["engine"] is None  # 不从作业名字或实时/批分类猜测引擎。
 
 
-def test_mrs_running_state_is_not_hidden_by_undefined_result():
-    ctx = context()
-    ctx.params["elapsed_time_unit"] = "milliseconds"  # 本测试替身明确使用毫秒，不推广到未知局点。
-    running, failed = MrsJobCollector().collect(ctx)
-    assert running.status_raw == "RUNNING"
-    assert running.attrs["job_result"] == "UNDEFINED"
-    assert running.attrs["job_state"] == "RUNNING"
-    assert running.attrs["cluster_id"] == "cluster-a"
-    assert running.attrs["job_id"] == "execution-a"
-    assert running.attrs["job_type"] == "Flink"
-    assert running.attrs["submitted_time"] == 1000
-    assert running.metrics["elapsed_min"] == 2.0
-    assert failed.status_raw == "FINISHED"
-    assert failed.attrs["job_result"] == "FAILED"
-    assert failed.metrics["elapsed_min"] is None
-    assert failed.facts["job_result"] == "FAILED"  # 巡检规则仍按原事实判定。
+def test_mrs_nodes_keep_node_status_instance_status_and_retry_facts():
+    failed, waiting = MrsJobCollector().collect(context())
+    assert failed.resource_id == "workspace-a/batch-a/spark" and failed.attrs["node_type"] == "MRSSpark"
+    assert failed.status_raw == "fail" and failed.facts["node_status"] == "fail"
+    assert failed.facts["job_status"] == "success"  # 节点失败不改写所属实例状态
+    assert failed.attrs["instance_id"] == 81 and failed.attrs["retry_times"] == 2
+    assert failed.attrs["start_time"] == 2000 and failed.attrs["end_time"] == 62000
+    assert failed.metrics["run_minutes"] == 1.0 and failed.attrs["log_path"] == "obs://logs/spark"
+    assert waiting.status_raw == "waiting" and waiting.attrs["node_type"] == "MRSFlinkJob"
+    assert waiting.metrics["run_minutes"] is None and "run_minutes" not in waiting.facts

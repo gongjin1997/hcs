@@ -15,7 +15,7 @@ from mock_hcs import inventory
 from mock_hcs.app import app as mock_app
 
 ENDPOINTS = {**{k: "mock" for k in ("dataarts", "mrs", "gaussdb", "dcs", "ces")},
-             **{k: f"mock/{k}" for k in ("ecs", "evs", "vpc", "elb", "rds", "dms", "cce", "dws", "css")}}
+             **{k: f"mock/{k}" for k in ("ecs", "evs", "vpc", "elb", "cce", "dws")}}
 SETTINGS = Settings(hcs_scheme="http", hcs_iam_url="http://mock", hcs_password="pwd", hcs_project_id="p1",
                     hcs_endpoints=ENDPOINTS)
 
@@ -36,14 +36,14 @@ def test_types_and_summary(client, admin, tenant_ids):
     assert [c["label"] for c in types["evs_volume"]["columns"]] == ["磁盘类型", "挂载云服务器", "系统盘"]
     assert [c["label"] for c in types["ecs_server"]["columns"]][-3:] == ["CPU(%)", "内存(%)", "磁盘(%)"]
     s = client.get("/api/v1/resources/summary", headers=admin).json()["data"]
-    assert s["total"] == 196 and s["type_count"] == 14 and s["unassigned"] == 7
+    assert s["total"] == 183 and s["type_count"] == 11 and s["unassigned"] == 6
     assert s["idle"] == {"evs_available": 4, "eip_unbound": 2, "ecs_stopped": 4}
     assert s["compute"]["ecs"] == 49 and s["compute"]["vcpus"] > 300 and s["storage_gb"] > 10000
     assert s["ecs_status"] == {"ACTIVE": 43, "SHUTOFF": 4, "ERROR": 1}
     assert {"STATUS", "REBOOT"} <= set(s["changes_7d"]) and s["last_sync"]["status"] == "SUCCESS"
     a = client.get("/api/v1/resources/summary", headers={**admin, "X-Tenant-Id": str(tenant_ids["tenant-a"])})
     b = client.get("/api/v1/resources/summary", headers={**admin, "X-Tenant-Id": str(tenant_ids["tenant-b"])})
-    assert (a.json()["data"]["total"], b.json()["data"]["total"]) == (138, 58)
+    assert (a.json()["data"]["total"], b.json()["data"]["total"]) == (129, 54)
     assert (a.json()["data"]["compute"]["ecs"], b.json()["data"]["compute"]["ecs"]) == (34, 15)
 
 
@@ -101,7 +101,7 @@ def test_changes_and_export(client, admin):
     r = client.get("/api/v1/resources/export", headers=admin)
     assert r.status_code == 200 and r.headers["content-type"].startswith("application/vnd.openxmlformats")
     wb = load_workbook(io.BytesIO(r.content))
-    assert wb.sheetnames[0] == "汇总" and "云服务器 ECS" in wb.sheetnames and len(wb.sheetnames) == 15
+    assert wb.sheetnames[0] == "汇总" and "云服务器 ECS" in wb.sheetnames and len(wb.sheetnames) == 12
     assert wb["云服务器 ECS"].max_row == 50
     one = load_workbook(io.BytesIO(client.get("/api/v1/resources/export", params={"resource_type": "eip"},
                                               headers=admin).content))
@@ -111,7 +111,7 @@ def test_changes_and_export(client, admin):
 # ---------------- 同步比对逻辑（独立内存库） ----------------
 def test_sync_detects_create_update_delete(mem_db, monkeypatch):
     first = sync_ledger(mem_db, client=_client())
-    assert first.status == "SUCCESS" and first.resource_total == 138 and first.abnormal_total == 138
+    assert first.status == "SUCCESS" and first.resource_total == 129 and first.abnormal_total == 129
     assert sync_ledger(mem_db, client=_client()).abnormal_total == 0          # 无变化时不产生变更记录
 
     orig = list(inventory.DCS)
@@ -136,11 +136,11 @@ def test_sync_guards_against_bad_api(mem_db, monkeypatch):
     monkeypatch.setattr(inventory, "DCS", [])                                     # 接口突然返回空列表
     run = sync_ledger(mem_db, client=_client(), types=["dcs_instance"])
     assert run.stats["dcs_instance"]["skipped_delete"] is True and run.stats["dcs_instance"]["deleted"] == 0
-    bad = Settings(**{**SETTINGS.model_dump(), "hcs_endpoints": {**ENDPOINTS, "css": "mock/not-exist"}})
-    run = sync_ledger(mem_db, client=_client(bad), types=["css_cluster", "dws_cluster"])
-    assert run.status == "PARTIAL" and "CSS" in run.error_summary               # 某类失败：跳过该类，不做释放判定
-    css = mem_db.scalars(select(Resource).where(Resource.resource_type == "css_cluster")).all()
-    assert len(css) == 2 and all(r.lifecycle == "ACTIVE" for r in css)
+    bad = Settings(**{**SETTINGS.model_dump(), "hcs_endpoints": {**ENDPOINTS, "dws": "mock/not-exist"}})
+    run = sync_ledger(mem_db, client=_client(bad), types=["dws_cluster", "mrs_cluster"])
+    assert run.status == "PARTIAL" and "DWS" in run.error_summary               # 某类失败：跳过该类，不做释放判定
+    dws = mem_db.scalars(select(Resource).where(Resource.resource_type == "dws_cluster")).all()
+    assert len(dws) == 1 and all(r.lifecycle == "ACTIVE" for r in dws)
 
 
 @pytest.mark.parametrize("task", ["ledger_sync"])

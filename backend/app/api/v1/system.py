@@ -32,7 +32,7 @@ from app.models.alarm import ACTIVE_STATUSES
 from app.models.base import utcnow
 from app.schemas.alarm import AlarmOut
 from app.schemas.system import TaskRunOut, TaskScopeOut
-from app.services import collect_switch, pipeline, platform_watch, settings_service, silence_service
+from app.services import catalog, collect_switch, pipeline, platform_watch, settings_service, silence_service
 from app.services.cleanup import CLEANUP_TASK
 from app.services.tenancy import tenant_map
 
@@ -72,17 +72,7 @@ SETTING_PERMS = {"retention": ("setting:manage", "setting:manage"), "platform_al
                  "report": ("report:view", "report:config"), "ledger_dict": ("ledger:view", "ledger:edit"),
                  "collect": ("setting:manage", "setting:manage")}
 MIN_INTERVAL = {LEDGER_TASK: 600}
-TASK_NOTES = {
-    LEDGER_TASK: "同步 14 类资源的台账（新增 / 变更 / 释放），关闭采集的资源类型会跳过",
-    CLEANUP_TASK: "按“系统设置 → 数据保留”删除过期的运行记录、通知、已恢复告警、审计、变更记录等",
-    "cce_pod_events": "采集 CCE 集群 Kubernetes Events，汇总容器重启 / OOM / 背压等事件",
-    "cce_cluster_health": "只读采集 CCE 集群节点、节点池健康与显式启用的 Kubernetes 原生指标",
-    "mrs_job_status": "作业 API 与时长单位需按局点 MRS 组件版本确认",
-    "ecs_status": "ECS 状态与告警判定；使用独立指标采样点，不重复查询指标源。各租户频率在 ECS 采集策略配置",
-    "ecs_metrics": "按租户策略采样 CPU、内存等指标；只查询纳入范围的本地实例，缺失不补零",
-    "ecs_quota": "查询各项目实际配额；独立启停与周期，不调用云端配额修改接口",
-    "gaussdb_status": "使用 GaussDB 原生接口只读采集，不使用 AOM 映射；磁盘、慢 SQL、会话等见 GaussDB 面板",
-}
+TASK_NOTES = catalog.TASK_NOTES   # 任务说明与任务定义同处 catalog.TASK_SPECS
 AOM_MAPPING_FIELDS = {"namespace", "dimension", "metrics", "units", "period", "window_sec", "prometheus_instance_id"}
 
 

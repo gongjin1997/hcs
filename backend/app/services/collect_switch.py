@@ -14,22 +14,11 @@ from app.models import AlarmEvent, AlarmEventLog, CollectSwitch, HcsAccount, Res
 from app.models.alarm import ACTIVE_STATUSES
 from app.models.base import utcnow
 
-from .catalog import CATEGORIES, RESOURCE_TYPES, SERVICES
+from .catalog import CATEGORIES, RESOURCE_TYPES, SERVICES, TASK_TYPES, TYPE_TASKS
 
 GLOBAL = 0
-# 巡检任务 → 采集的资源类型（任务的全部类型都关闭时，该任务对该租户跳过）
-TASK_TYPES: dict[str, list[str]] = {
-    "dgc_realtime_status": ["dgc_realtime_job"], "dgc_batch_instance": ["dgc_batch_job"],
-    "mrs_cluster_status": ["mrs_cluster"], "mrs_job_status": ["mrs_job"], "gaussdb_status": ["gaussdb_instance"],
-    "dcs_status": ["dcs_instance"], "ecs_status": ["ecs_server"], "ecs_metrics": ["ecs_server"],
-    "ecs_quota": ["ecs_server"], "cce_pod_events": ["cce_workload"],
-    "cce_cluster_health": ["cce_cluster"],
-}
-TYPE_TASKS: dict[str, list[str]] = {}
-for _task, _types in TASK_TYPES.items():
-    for _t in _types:
-        TYPE_TASKS.setdefault(_t, []).append(_task)
-SWITCH_TYPES = list(RESOURCE_TYPES)          # 14 类台账资源 + 4 类只巡检对象（作业 / 容器工作负载）
+# 巡检任务 → 采集的资源类型（任务的全部类型都关闭时，该任务对该租户跳过）；定义见 catalog.TASK_SPECS
+SWITCH_TYPES = list(RESOURCE_TYPES)          # 全部台账资源 + 只巡检对象（作业 / 容器工作负载）
 
 
 @dataclass

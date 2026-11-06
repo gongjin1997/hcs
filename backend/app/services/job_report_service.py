@@ -1,6 +1,6 @@
 """基于已持久化资源的作业报表，不访问 HCS、不补写状态、不把健康度当作执行结果。
 
-状态口径来自 collectors/dataarts.py、collectors/mrs.py 和对应规则。
+状态口径来自 collectors/dataarts.py、collectors/mrs.py 和对应规则；MRS 作业即 DataArts 作业实例中的 MRS 类节点。
 Observation.facts 并非历史观测表，未保存的事实不能从告警缺失或作业名称推断。
 """
 
@@ -44,12 +44,9 @@ STATUS_MAPS = {
         "starting": "STARTING", "stopping": "STOPPING", "stopped": "STOPPED", "finished": "FINISHED",
         "pause": "PAUSED", "manual-stop": "CANCELED",
     },
-    "mrs_job": {
-        "running": "RUNNING", "accepted": "QUEUED", "failed": "FAILED", "succeeded": "SUCCEEDED",
-        "finished": "FINISHED", "undefined": "UNKNOWN",
-        "success": "SUCCEEDED", "submitted": "SUBMITTED", "new": "NEW", "killed": "KILLED", "killing": "KILLING",
-        "waiting": "WAITING", "queued": "QUEUED", "pending": "PENDING", "starting": "STARTING",
-        "stopping": "STOPPING", "stopped": "STOPPED", "canceled": "CANCELED", "cancelled": "CANCELED",
+    "mrs_job": {   # DataArts 表 5-182 Node.status
+        "waiting": "WAITING", "running": "RUNNING", "success": "SUCCEEDED", "fail": "FAILED", "skip": "SKIPPED",
+        "pause": "PAUSED", "manual-stop": "CANCELED",
     },
 }
 STATUS_LABELS = {
@@ -58,7 +55,7 @@ STATUS_LABELS = {
     "FINISHED": "执行结束（结果未确认）", "UNKNOWN": "结果未定义",
     "WAITING": "等待中", "PENDING": "待处理", "SUBMITTED": "已提交", "NEW": "新建",
     "CANCELED": "已取消", "KILLED": "已终止", "KILLING": "终止中", "NO_DATA": "暂无状态",
-    "PAUSED": "暂停",
+    "PAUSED": "暂停", "SKIPPED": "已跳过",
 }
 PDF_STATUS_MAPS = {
     "dgc_realtime_job": {"NORMAL": "RUNNING", "EXCEPTION": "EXCEPTION", "STARTING": "STARTING",
@@ -66,18 +63,23 @@ PDF_STATUS_MAPS = {
     "dgc_batch_job": {"success": "SUCCEEDED", "fail": "FAILED", "running": "RUNNING",
                       "running-exception": "EXCEPTION", "waiting": "WAITING", "pause": "PAUSED",
                       "manual-stop": "CANCELED"},
+    "mrs_job": {"waiting": "WAITING", "running": "RUNNING", "success": "SUCCEEDED", "fail": "FAILED",
+                "skip": "SKIPPED", "pause": "PAUSED", "manual-stop": "CANCELED"},
 }
 UNRECOGNIZED_PREFIX = "UNRECOGNIZED:"
-DETAIL_FIELDS = ("workspace", "nodes", "instance_id", "instance_type", "batch_baseline", "cluster_id", "cluster",
-                 "job_type", "queue", "job_id",
-                 "job_state", "job_result", "job_status", "instance_status", "plan_time", "submitted_time",
-                 "start_time", "end_time")
+# 作业 / 节点类型（小写）→ 引擎展示名；MRS 作业的 node_type 来自 DataArts 节点类型（表 5-182）
+ENGINE_BY_TYPE = {"flink": "Flink", "sparksubmit": "Spark", "hivesql": "Hive", "mrsflinkjob": "Flink",
+                  "mrsspark": "Spark", "mapreduce": "MapReduce", "mrshetuengine": "HetuEngine"}
+DETAIL_FIELDS = ("workspace", "nodes", "instance_id", "instance_type", "batch_baseline", "job_name", "node_name",
+                 "node_type", "retry_times", "log_path", "job_type", "job_status", "node_status", "instance_status",
+                 "plan_time", "submitted_time", "start_time", "end_time")
 DATA_NOTES = [
     "展示各作业最近一次采集数据，统计按当前筛选条件汇总。",
     "最后观测时间为最近采集时间。",
     "执行状态与执行结果分别展示；未返回的字段显示为未采集。",
-    "上传的 MRS API PDF 未列出 V2 作业查询接口；MRS 作业仅为既有兼容快照，不代表正式 API 契约已确认。",
-    "DataArts 实时 Date 及 MRS 作业时间字段未确认数值单位时保留原文；仅批实例毫秒时间戳转为日期。",
+    "MRS 作业取自 DataArts 作业实例详情中类型为 MRSSpark、MapReduce、MRSFlinkJob、MRSHetuEngine 的节点；"
+    "只覆盖 DataArts 编排的作业，不包含直接在 MRS 控制台提交的作业。",
+    "DataArts 实时 Date 字段未确认数值单位时保留原文；批实例与 MRS 节点的毫秒时间戳转为日期。",
     ("批作业 P90 取本轮完整 24h 列表中同工作空间同作业的成功实例起止时长，按 nearest-rank 计算；"
      "默认至少 5 条独立有效实例（本地策略，p90_min_samples 可配），不足时无基线；"
      "不使用 executeTime 或上游未定义的 p90_minutes。"),
@@ -109,16 +111,15 @@ def _has_attr(key: str, dialect: str):
 
 
 def _snapshot_query(scope: Scope, panel: JobPanel, dialect: str):
-    state_keys = {"mrs_job": "job_state", "dgc_realtime_job": "job_status", "dgc_batch_job": "instance_status"}
+    state_keys = {"mrs_job": "node_status", "dgc_realtime_job": "job_status", "dgc_batch_job": "instance_status"}
     state = case(
         *[(Resource.resource_type == kind, cast(Resource.attrs[key].as_string(), String))
           for kind, key in state_keys.items()],
     )
     has_state = case(*[(Resource.resource_type == kind, _has_attr(key, dialect))
                        for kind, key in state_keys.items()], else_=False)
-    result = case((Resource.resource_type == "mrs_job", cast(Resource.attrs["job_result"].as_string(), String)))
     # 新快照显式保存空状态时，不能复用流水线未覆盖的旧 status_raw 并显示历史成功。
-    source = case((has_state, func.coalesce(state, result)), else_=func.coalesce(Resource.status_raw, result))
+    source = case((has_state, state), else_=Resource.status_raw)
     raw = func.lower(func.trim(source))
     fallback = case((or_(raw.is_(None), raw == ""), "NO_DATA"), else_=source)
     mapped = case(*[(Resource.resource_type == kind, case(mapping, value=raw, else_=fallback))
@@ -133,19 +134,9 @@ def _snapshot_query(scope: Scope, panel: JobPanel, dialect: str):
                   else_=mapped)
     mapped_known = case(*[(and_(Resource.resource_type == kind, has_state), source.in_(tuple(mapping)))
                           for kind, mapping in PDF_STATUS_MAPS.items()], else_=mapped_known)
-    # 与现有 MRS 规则一致：状态或结果失败均异常；只有明确结果才把 FINISHED 细化为成功。
-    result_key = func.lower(func.trim(result))
-    mrs_failed = and_(Resource.resource_type == "mrs_job", or_(raw == "failed", result_key == "failed"))
-    mrs_finished = and_(Resource.resource_type == "mrs_job", raw == "finished",
-                        result.is_not(None), result_key.notin_(("undefined", "")))
-    display = case((mrs_failed, "FAILED"),
-                   (mrs_finished, case({"succeeded": "SUCCEEDED", "success": "SUCCEEDED"},
-                                       value=result_key, else_=result)),
-                   else_=mapped)
-    known = case((mrs_failed, True), (mrs_finished, result_key.in_(("succeeded", "success"))), else_=mapped_known)
-    job_type = func.coalesce(_attr_text("job_type"), _attr_text("type"))
-    engine = func.coalesce(_attr_text("engine"), case(
-        {"flink": "Flink", "sparksubmit": "Spark", "hivesql": "Hive"}, value=func.lower(job_type)))
+    display, known = mapped, mapped_known
+    job_type = func.coalesce(_attr_text("job_type"), _attr_text("type"), _attr_text("node_type"))
+    engine = func.coalesce(_attr_text("engine"), case(ENGINE_BY_TYPE, value=func.lower(job_type)))
     # 预聚合避免节点级多告警将资源重复成多行；同时按租户关联，防御历史错误关联。
     alarms = scope.apply(select(AlarmEvent.resource_ref, AlarmEvent.tenant_id,
                                 func.count().label("active_alarms")), AlarmEvent.tenant_id).where(
@@ -153,14 +144,15 @@ def _snapshot_query(scope: Scope, panel: JobPanel, dialect: str):
     q = scope.apply(select(
         Resource.id, Resource.service, Resource.resource_type, Resource.status_raw, Resource.last_seen.label("updated_at"),
         display.label("display_status"), func.coalesce(known, False).label("status_known"),
-        state.label("execution_state"), result.label("execution_result"),
+        state.label("execution_state"),
         job_type.label("job_type"), engine.label("engine"),
         func.coalesce(alarms.c.active_alarms, 0).label("active_alarms"),
     ).outerjoin(alarms, and_(alarms.c.resource_ref == Resource.id,
                             alarms.c.tenant_id.is_not_distinct_from(Resource.tenant_id))), Resource.tenant_id)
     q = q.where(Resource.resource_type.in_(PANEL_TYPES[panel]))
     if panel == "flink":
-        q = q.where(or_(*(func.lower(_attr_text(key)) == "flink" for key in ("engine", "job_type", "type"))))
+        q = q.where(or_(*(func.lower(_attr_text(key)) == "flink" for key in ("engine", "job_type", "type")),
+                        func.lower(_attr_text("node_type")) == "mrsflinkjob"))
     return q, display, engine, job_type, alarms
 
 
@@ -249,7 +241,7 @@ def list_job_report_rows(db: Session, scope: Scope, panel: JobPanel,
 def _read_rows(db: Session, selected) -> list[JobReportRow]:
     rows = db.execute(select(
         Resource, selected.c.display_status, selected.c.status_known, selected.c.job_type, selected.c.engine,
-        selected.c.execution_state, selected.c.execution_result,
+        selected.c.execution_state,
         selected.c.active_alarms, HcsAccount.name.label("tenant_name"),
         HcsProject.project_id, HcsProject.project_name,
     ).join(selected, Resource.id == selected.c.id).outerjoin(HcsAccount, HcsAccount.id == Resource.tenant_id).outerjoin(
@@ -264,7 +256,7 @@ def _read_rows(db: Session, selected) -> list[JobReportRow]:
         items.append(JobReportRow(
             id=res.id, resource_id=res.resource_id, name=res.name, service=res.service, resource_type=res.resource_type,
             job_type=row.job_type, engine=row.engine, status_raw=res.status_raw, display_status=row.display_status,
-            execution_state=row.execution_state, execution_result=row.execution_result,
+            execution_state=row.execution_state,
             status_label=label, status_known=row.status_known, health=current_health(res, now), lifecycle=res.lifecycle,
             tenant_id=res.tenant_id, tenant_name=row.tenant_name, project_ref=res.project_ref,
             project_id=row.project_id, project_name=row.project_name, region=res.region,

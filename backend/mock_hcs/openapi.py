@@ -88,15 +88,6 @@ def loadbalancers(ds: ModuleType) -> list[dict]:
              "created_at": ds.iso(c)} for n, vip, subnet, ded, listeners, members, c in ds.ELBS]
 
 
-def rds_instances(ds: ModuleType) -> list[dict]:
-    return [{"id": ds.rid("rds", n).replace("-", "") + "in01", "name": n, "status": "ACTIVE", "type": ha,
-             "datastore": {"type": eng, "version": ver}, "volume": {"type": "CLOUDSSD", "size": gb},
-             "cpu": str(cpu), "mem": str(mem), "private_ips": [ip], "flavor_ref": flavor,
-             "nodes": [{"availability_zone": ds.AZ1, "role": "master"}] + ([{"availability_zone": ds.AZ2, "role": "slave"}]
-                                                                          if ha == "Ha" else []),
-             "created": c.strftime("%Y-%m-%dT%H:%M:%S+0000")} for n, eng, ver, ha, cpu, mem, gb, ip, flavor, c in ds.RDS]
-
-
 def gaussdb_id(ds: ModuleType, name: str) -> str:
     return ds.rid("gaussdb", name).replace("-", "") + "in14"
 
@@ -119,13 +110,6 @@ def dcs_instances(ds: ModuleType) -> list[dict]:
              "engine_version": d["ver"], "capacity": d["cap"], "used_memory": d["used"], "max_memory": d["cap"] * 1024,
              "max_clients": 10000, "spec_code": f"redis.ha.xu1.large.r2.{d['cap']}", "ip": d["ip"], "port": 6379,
              "az_codes": [ds.AZ1, ds.AZ2], "created_at": ds.iso(d["created"])} for d in ds.DCS]
-
-
-def kafka_instances(ds: ModuleType) -> list[dict]:
-    return [{"instance_id": ds.rid("kafka", n), "name": n, "engine": "kafka", "engine_version": ver, "status": "RUNNING",
-             "specification": spec, "storage_space": gb, "used_storage_space": used, "partition_num": str(parts),
-             "available_zones": [ds.AZ1], "connect_address": f"{ip}:9092,{ip[:-1]}{int(ip[-1]) + 1}:9092",
-             "created_at": str(int(c.timestamp() * 1000))} for n, spec, ver, gb, used, parts, ip, c in ds.KAFKA]
 
 
 def mrs_clusters(ds: ModuleType) -> list[dict]:
@@ -154,13 +138,6 @@ def dws_clusters(ds: ModuleType) -> list[dict]:
              "number_of_node": num, "availability_zone": ds.AZ1, "port": 8000,
              "endpoints": [{"connect_info": f"{ip}:8000"}], "created": ds.iso(c)}
             for n, ver, nt, num, ip, c in ds.DWS]
-
-
-def css_clusters(ds: ModuleType) -> list[dict]:
-    return [{"id": ds.rid("css", n), "name": n, "status": "200", "datastore": {"type": "elasticsearch", "version": ver},
-             "instances": [{"name": f"{n}-ess-esn-{k}-1", "specCode": spec, "azCode": ds.AZ1, "status": "200"}
-                           for k in range(1, num + 1)], "endpoint": f"{ip}:9200", "created": ds.iso(c)}
-            for n, ver, spec, num, ip, c in ds.CSS]
 
 
 # ---------------- ECS 监控数据（CES / Prometheus 共用同一份基准值） ----------------

@@ -71,7 +71,7 @@ def test_dataarts_and_mrs_pipeline(mem_db):
     assert got[("rt_payment_risk", "R-DGC-RT-001", "")] == "P1"
     assert got[("rt_inventory_cdc", "R-DGC-RT-002", "")] == "P1"
     assert got[("rt_user_behavior", "R-DGC-RT-005", "rt_user_behavior_agg")] == "P2"
-    assert got[("hive_agg_hourly", "R-MRS-JOB-001", "")] == "P2"
+    assert got[("dws_settle_daily / mr_export", "R-MRS-JOB-001", "")] == "P2"
 
 
 def test_hcs_failure_marks_run_failed(mem_db):

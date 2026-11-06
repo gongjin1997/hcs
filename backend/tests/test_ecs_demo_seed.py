@@ -7,10 +7,10 @@ from sqlalchemy import select
 
 from app.collectors import ecs_metrics
 from app.core.config import get_settings
+from app.demo import seed
 from app.metrics.ecs_readings import collect_readings
 from app.models import AlarmEvent, AlarmRule, EcsMetricSample, EvalState, HcsAccount, InspectionTask, Resource
 from app.models.base import utcnow
-from app.services import seed
 
 
 def test_demo_ecs_history_has_three_distinct_past_samples_with_scope_and_latest_snapshot(demo_db):

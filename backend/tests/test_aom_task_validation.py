@@ -11,7 +11,7 @@ from .test_user_tenant_review import management_api as management_api
     ("ecs_status", {"cpu_usage": "remote_cpu"}, {}),
     ("dcs_status", {"password": "forbidden-value"}, {}),
     ("ecs_status", {"cpu_util": "remote_cpu"}, {"other": "Percent"}),
-    ("mrs_job_status", {"elapsed_min": "remote_elapsed"}, {}),
+    ("mrs_job_status", {"run_minutes": "remote_elapsed"}, {}),
     ("data_cleanup", {"cpu_util": "remote_cpu"}, {}),
 ])
 def test_unknown_task_aliases_are_rejected_before_any_edit_or_audit(mem_db, management_api, code, metrics, units):

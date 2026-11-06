@@ -12,7 +12,6 @@ export interface JobReportRow {
   engine: string | null
   status_raw: string | null
   execution_state: string | null
-  execution_result: string | null
   display_status: string
   status_label: string
   status_known: boolean

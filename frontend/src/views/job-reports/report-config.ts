@@ -16,6 +16,7 @@ export const JOB_STATUSES: Record<string, StatusMeta> = {
   STOPPING: { label: '停止中', color: '#a96f29', type: 'warning' },
   STOPPED: { label: '已停止', color: '#697586', type: 'info' },
   PAUSED: { label: '暂停', color: '#a07726', type: 'warning' },
+  SKIPPED: { label: '已跳过', color: '#697586', type: 'info' },
   CANCELED: { label: '已取消', color: '#697586', type: 'info' },
   KILLED: { label: '已终止', color: '#697586', type: 'info' },
   KILLING: { label: '终止中', color: '#a96f29', type: 'warning' },
@@ -43,10 +44,8 @@ const DGC_STATUSES = [
   'RUNNING', 'STARTING', 'WAITING', 'QUEUED', 'PENDING', 'SUBMITTED', 'STOPPING', 'STOPPED', 'PAUSED',
   'SUCCEEDED', 'FAILED', 'EXCEPTION', 'CANCELED', 'FINISHED', 'UNKNOWN', 'NO_DATA',
 ]
-const MRS_STATUSES = [
-  'NEW', 'SUBMITTED', 'QUEUED', 'WAITING', 'PENDING', 'STARTING', 'RUNNING', 'STOPPING', 'STOPPED',
-  'KILLING', 'KILLED', 'CANCELED', 'SUCCEEDED', 'FAILED', 'FINISHED', 'UNKNOWN', 'NO_DATA',
-]
+// DataArts 节点状态（数据治理中心 API 表 5-182）：waiting / running / success / fail / skip / pause / manual-stop
+const MRS_STATUSES = ['WAITING', 'RUNNING', 'SUCCEEDED', 'FAILED', 'SKIPPED', 'PAUSED', 'CANCELED', 'UNKNOWN', 'NO_DATA']
 
 export const PANEL_CONFIG: Record<JobPanel, PanelConfig> = {
   dgc: {
@@ -66,24 +65,25 @@ export const PANEL_CONFIG: Record<JobPanel, PanelConfig> = {
     focus: ['SUCCEEDED', 'FAILED', 'RUNNING'], statuses: DGC_STATUSES,
   },
   mrs: {
-    title: 'MRS 作业报表', desc: 'MRS 作业、集群与执行结果', totalLabel: 'MRS 作业总数',
-    focus: ['RUNNING', 'QUEUED', 'FAILED'], statuses: MRS_STATUSES,
+    title: 'MRS 作业报表', desc: 'DataArts 作业中的 MRS 节点 · 状态与运行时长', totalLabel: 'MRS 作业节点总数',
+    focus: ['RUNNING', 'WAITING', 'FAILED'], statuses: MRS_STATUSES,
   },
 }
 
 export const SOURCE_FACTS: Record<JobResourceType, { title: string; fields: string[] }> = {
   dgc_realtime_job: { title: '运行时间', fields: ['start_time', 'end_time'] },
   dgc_batch_job: { title: '最新批作业实例', fields: ['instance_id', 'instance_type', 'plan_time', 'submitted_time', 'start_time', 'end_time', 'batch_baseline'] },
-  mrs_job: { title: '最新 MRS 执行', fields: ['cluster', 'cluster_id', 'queue', 'job_id', 'submitted_time', 'start_time', 'end_time'] },
+  mrs_job: { title: '最新 MRS 节点执行', fields: ['workspace', 'job_name', 'node_name', 'node_type', 'instance_id', 'job_status', 'node_status', 'plan_time', 'start_time', 'end_time', 'retry_times', 'log_path'] },
 }
 
 export const DETAIL_LABELS: Record<string, string> = {
-  batch_baseline: '近24小时基线元信息', workspace: '工作空间', nodes: '节点状态', instance_id: '实例 ID', instance_type: '调度方式（原始值）', cluster: '集群', cluster_id: '集群 ID',
-  job_type: '作业类型', queue: '队列', job_id: '执行 ID', job_state: '执行状态', job_status: '作业状态',
-  instance_status: '实例执行状态', job_result: '独立执行结果', start_time: '实际开始时间', end_time: '实际结束时间',
+  batch_baseline: '近24小时基线元信息', workspace: '工作空间', nodes: '节点状态', instance_id: '实例 ID', instance_type: '调度方式（原始值）',
+  job_type: '作业类型', job_name: '所属作业', node_name: '节点名称', node_type: '节点类型', node_status: '节点状态',
+  retry_times: '失败重试次数', log_path: '日志路径', job_status: '作业状态',
+  instance_status: '实例执行状态', start_time: '实际开始时间', end_time: '实际结束时间',
   plan_time: '计划时间', submitted_time: '提交时间', engine: '引擎',
 }
 
 export const METRIC_LABELS: Record<string, string> = {
-  p90_minutes: '近24小时成功实例 P90（分钟）', run_minutes: '运行时长（分钟）', elapsed_min: '持续时长（分钟）', nodes: '节点数', bad_nodes: '异常节点数',
+  p90_minutes: '近24小时成功实例 P90（分钟）', run_minutes: '运行时长（分钟）', retry_times: '失败重试次数', nodes: '节点数', bad_nodes: '异常节点数',
 }

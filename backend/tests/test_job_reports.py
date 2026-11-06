@@ -87,14 +87,13 @@ def report(client, panel="dgc", **params):
     ("dgc_batch_job", "SUBMITTED", "SUBMITTED", "已提交"),
     ("dgc_batch_job", "CANCELED", "CANCELED", "已取消"),
     ("dgc_batch_job", "CANCELLED", "CANCELED", "已取消"),
-    ("mrs_job", "ACCEPTED", "QUEUED", "排队中"),
-    ("mrs_job", "SUBMITTED", "SUBMITTED", "已提交"),
-    ("mrs_job", "NEW", "NEW", "新建"),
-    ("mrs_job", "KILLED", "KILLED", "已终止"),
-    ("mrs_job", "KILLING", "KILLING", "终止中"),
-    ("mrs_job", "SUCCEEDED", "SUCCEEDED", "成功"),
-    ("mrs_job", "SUCCESS", "SUCCEEDED", "成功"),
-    ("mrs_job", "FINISHED", "FINISHED", "执行结束（结果未确认）"),
+    ("mrs_job", "waiting", "WAITING", "等待中"),
+    ("mrs_job", "running", "RUNNING", "运行中"),
+    ("mrs_job", "success", "SUCCEEDED", "成功"),
+    ("mrs_job", "fail", "FAILED", "失败"),
+    ("mrs_job", "skip", "SKIPPED", "已跳过"),
+    ("mrs_job", "pause", "PAUSED", "暂停"),
+    ("mrs_job", "manual-stop", "CANCELED", "已取消"),
 ])
 def test_known_text_states(mem_db, report_api, kind, raw, display, label):
     client, _, _ = report_api
@@ -107,26 +106,27 @@ def test_known_text_states(mem_db, report_api, kind, raw, display, label):
     assert data["summary"]["unknown_total"] == 0
 
 
-@pytest.mark.parametrize(("state", "result", "display", "known"), [
-    ("RUNNING", "UNDEFINED", "RUNNING", True),
-    ("ACCEPTED", "UNDEFINED", "QUEUED", True),
-    ("FINISHED", "SUCCEEDED", "SUCCEEDED", True),
-    ("FINISHED", "FAILED", "FAILED", True),
-    ("FINISHED", "UNDEFINED", "FINISHED", True),
-    ("FINISHED", None, "FINISHED", True),
-    ("FINISHED", "new-result", "new-result", False),
-    ("FAILED", "SUCCEEDED", "FAILED", True),
-    ("RUNNING", "SUCCEEDED", "RUNNING", True),
-    (None, "UNDEFINED", "UNKNOWN", True),
-    (None, None, "NO_DATA", False),
+@pytest.mark.parametrize(("state", "display", "known"), [
+    ("waiting", "WAITING", True), ("running", "RUNNING", True), ("success", "SUCCEEDED", True),
+    ("fail", "FAILED", True), ("skip", "SKIPPED", True), ("pause", "PAUSED", True),
+    ("manual-stop", "CANCELED", True), ("FUTURE_STATE", "FUTURE_STATE", False), (None, "NO_DATA", False),
 ])
-def test_mrs_execution_state_and_result(mem_db, report_api, state, result, display, known):
+def test_mrs_node_state_uses_the_exact_dataarts_node_enum(mem_db, report_api, state, display, known):
     client, _, _ = report_api
-    resource(mem_db, "mrs_job", state, attrs={"job_state": state, "job_result": result})
+    resource(mem_db, "mrs_job", state, attrs={"node_status": state, "node_type": "MRSSpark"})
     row = report(client, "mrs")["items"][0]
-    assert row["execution_state"] == state and row["execution_result"] == result
-    assert row["status_raw"] == state
+    assert row["execution_state"] == state and row["status_raw"] == state
     assert (row["display_status"], row["status_known"]) == (display, known)
+
+
+def test_mrs_node_type_defines_engine_and_flink_panel_membership(mem_db, report_api):
+    client, _, _ = report_api
+    flink = resource(mem_db, "mrs_job", "running", attrs={"node_type": "MRSFlinkJob", "node_status": "running"})
+    spark = resource(mem_db, "mrs_job", "success", attrs={"node_type": "MRSSpark", "node_status": "success"})
+    assert {row["id"] for row in report(client, "flink")["items"]} == {flink.id}
+    rows = {row["id"]: row for row in report(client, "mrs")["items"]}
+    assert (rows[flink.id]["engine"], rows[spark.id]["engine"]) == ("Flink", "Spark")
+    assert rows[spark.id]["job_type"] == "MRSSpark"
 
 
 def test_unknown_missing_legacy_and_empty_data_are_not_success(mem_db, report_api):
@@ -140,10 +140,10 @@ def test_unknown_missing_legacy_and_empty_data_are_not_success(mem_db, report_ap
     data = report(client, "mrs")
     assert data["summary"]["unknown_total"] == 3
     assert data["summary"]["no_data_total"] == 3
-    assert data["summary"]["status_counts"] == {"VendorCustom": 1, "42": 1, "UNKNOWN": 1, "NO_DATA": 3}
+    assert data["summary"]["status_counts"] == {"VendorCustom": 1, "42": 1, "UNDEFINED": 1, "NO_DATA": 3}
     for row in data["items"]:
         assert row["health"] == "UNKNOWN" and row["display_status"] != "SUCCEEDED"
-        assert row["execution_state"] is None and row["execution_result"] is None
+        assert row["execution_state"] is None
         if row["status_raw"] in ("VendorCustom", "42"):
             assert row["display_status"] == row["status_label"] == row["status_raw"]
             assert row["status_known"] is False

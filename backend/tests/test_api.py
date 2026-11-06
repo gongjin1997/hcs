@@ -27,7 +27,7 @@ def test_dashboard(client, admin, tenant_ids):
     assert data["kpis"]["active_alarms"] == active["total"]
     assert data["kpis"]["p1"] == sum(row["severity"] == "P1" for row in active["items"])
     assert data["kpis"]["resources"] == 97
-    assert data["ledger"]["total"] == 196 and len(data["ledger"]["by_category"]) == 5
+    assert data["ledger"]["total"] == 183 and len(data["ledger"]["by_category"]) == 5
     tenants = {t["code"]: t for t in data["tenants"]}
     assert set(tenants) == {"tenant-a", "tenant-b"}
     assert (tenants["tenant-a"]["auth_type"], tenants["tenant-a"]["metrics_source"]) == ("PASSWORD", "AUTO")
@@ -44,7 +44,7 @@ def test_dashboard(client, admin, tenant_ids):
     assert sum(item["count"] for item in top) <= data["pods"]["restarts_24h"]
     # 顶部切换到租户A：只统计租户A 的数据
     a = client.get("/api/v1/dashboard/summary", headers={**admin, "X-Tenant-Id": str(tenant_ids["tenant-a"])}).json()
-    assert a["data"]["ledger"]["total"] == 138 and a["data"]["kpis"]["active_alarms"] == 20   # 含 1 条平台告警
+    assert a["data"]["ledger"]["total"] == 129 and a["data"]["kpis"]["active_alarms"] == 20   # 含 1 条平台告警
     assert [t["code"] for t in a["data"]["tenants"]] == ["tenant-a"]
 
 

@@ -174,7 +174,6 @@ SPEC_CHANGES: list[tuple[str, str, str, int, int, int, str]] = [
     ("tenant-a", "gaussdb_instance", "gs-report-01", 25, 22, 30, "storage"),
     ("tenant-a", "eip", "eip-elb-web", 33, 20, 0, "spec"),
     ("tenant-b", "ecs_server", "ecs-portal-02", 6, 23, 20, "ecs"),
-    ("tenant-b", "rds_instance", "rds-mysql-cms", 15, 22, 0, "storage"),
 ]
 # 已释放的资源：(租户, 类型, 名称, 创建于几天前, 释放于几天前, 台账字段, (业务系统, 负责人), 备注)
 GONE: list[tuple[str, str, str, int, int, dict[str, Any], tuple[str, str], str]] = [
@@ -200,7 +199,7 @@ MANUAL: list[tuple[str, str, str, int, int, int, str, list[tuple[str, str, Any, 
      [("expected_state.running", "预期状态", RUN_LABEL[True], RUN_LABEL[False])]),
     ("tenant-a", "ecs_server", "ecs-dev-01", 26, 15, 22, "oncall",
      [("expected_state.running", "预期状态", RUN_LABEL[True], RUN_LABEL[False])]),
-    ("tenant-b", "rds_instance", "rds-mysql-cms", 15, 22, 30, "wangfang", [("critical", "核心资源", False, True)]),
+    ("tenant-b", "cce_cluster", "cce-web-01", 15, 22, 30, "wangfang", [("critical", "核心资源", False, True)]),
     ("tenant-b", "ecs_server", "ecs-stage-01", 12, 11, 5, "wangfang",
      [("expected_state.running", "预期状态", RUN_LABEL[True], RUN_LABEL[False])]),
     ("tenant-a", "ecs_server", "ecs-api-gw-01", 8, 14, 0, "oncall", [("remark", "备注", None, "API 网关主节点（双活）")]),
@@ -319,8 +318,8 @@ POOLS: dict[str, list[tuple[str, str, dict[str, Any], float, str, tuple[int, int
         ("R-DGC-BAT-001", "dwd_order_detail_daily", {"last_status": "fail"}, 1, "", NIGHT),
         ("R-DGC-BAT-003", "ads_report_gen", {"last_status": "running", "run_minutes": (100, 160), "p90_minutes": 45},
          2, "", NIGHT),
-        ("R-MRS-JOB-001", "hive_agg_hourly", {"job_state": "FINISHED", "job_result": "FAILED"}, 2, "", DAY),
-        ("R-MRS-JOB-001", "spark_etl_daily", {"job_state": "FINISHED", "job_result": "FAILED"}, 1, "", NIGHT),
+        ("R-MRS-JOB-001", "dws_settle_daily / mr_export", {"node_status": "fail"}, 2, "", DAY),
+        ("R-MRS-JOB-001", "dwd_order_detail_daily / spark_etl", {"node_status": "fail"}, 1, "", NIGHT),
         ("R-MRS-CLU-001", "mrs-prod-02", {"cluster_state": "abnormal"}, 0.3, "", NIGHT),
         ("R-CCE-POD-001", "trade/order-service", {"restarts_10m": (3, 7)}, 2, "", DAY),
         ("R-CCE-POD-001", "member/member-api", {"restarts_10m": (3, 5)}, 1, "", DAY),

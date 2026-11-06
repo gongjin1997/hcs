@@ -47,7 +47,7 @@ filterwarnings = [
 
 [tool.coverage.run]
 source = ["app"]
-omit = ["app/services/seed*.py"]        # 演示数据只服务开发 / 演示环境，不计入覆盖率
+omit = ["app/demo/*"]                   # 演示数据只服务开发 / 演示环境，不计入覆盖率
 
 [tool.coverage.report]
 show_missing = true

@@ -177,7 +177,7 @@ def _ledger(db: Session, start: datetime, end: datetime, tenant_ids: list[int] |
 
 def _capacity(db: Session, tenant_ids: list[int] | None = None) -> list[dict]:
     rows = db.scalars(_in(select(Resource).where(Resource.lifecycle == "ACTIVE", Resource.resource_type.in_(
-        ("dcs_instance", "gaussdb_instance", "kafka_instance", "ecs_server"))), Resource.tenant_id, tenant_ids)).all()
+        ("dcs_instance", "gaussdb_instance", "ecs_server"))), Resource.tenant_id, tenant_ids)).all()
     snapshots = ecs_snapshots(db, rows)
     out = []
     for r in rows:

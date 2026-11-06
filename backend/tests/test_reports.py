@@ -38,13 +38,13 @@ def test_generate_daily_and_overwrite(client, admin, tenant_ids):
     assert {"overview", "compare", "by_service", "top_resources", "top_rules", "key_alarms", "tasks", "capacity",
             "ledger", "ecs", "pods", "by_tenant", "conclusion"} <= set(d)
     assert d["overview"]["new_alarms"] == sum(sum(v) for v in d["trend"]["series"].values())
-    assert d["conclusion"] and d["ledger"]["total"] == 196 and len(d["by_tenant"]) == 2
+    assert d["conclusion"] and d["ledger"]["total"] == 183 and len(d["by_tenant"]) == 2
     r2 = client.post("/api/v1/reports", json={"kind": "DAILY"}, headers=admin).json()["data"]
     assert r2["id"] == r1["id"]
     tb = client.post("/api/v1/reports", json={"kind": "DAILY", "tenant_id": tenant_ids["tenant-b"]},
                      headers=admin).json()["data"]
     assert tb["id"] != r1["id"] and tb["tenant_id"] == tenant_ids["tenant-b"] and "租户B" in tb["title"]
-    assert tb["data"]["ledger"]["total"] == 58 and tb["data"]["by_tenant"] == []
+    assert tb["data"]["ledger"]["total"] == 54 and tb["data"]["by_tenant"] == []
     assert client.post("/api/v1/reports", json={"kind": "DAILY", "date": "2099-01-01"}, headers=admin).status_code == 400
     assert client.post("/api/v1/reports", json={"kind": "YEARLY"}, headers=admin).status_code == 400
 

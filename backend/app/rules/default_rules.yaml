@@ -124,22 +124,13 @@
   resource_type: mrs_job
   check_item: job_status
   kind: state
-  expr: {when: "job_state == 'FAILED' or job_result == 'FAILED'", severity: P2, critical_severity: P1,
-         value_field: job_result, title: "作业执行失败（{job_result}）"}
-  recover: {when: "job_state in ('FINISHED', 'SUCCEEDED') and job_result == 'SUCCEEDED'"}
-  runbook: 通过 MRS Manager / Yarn 查看 application 日志；资源不足时调整队列配额后重新提交。
-- id: R-MRS-JOB-003
-  name: MRS 作业排队超时
-  resource_type: mrs_job
-  check_item: job_status
-  kind: state
-  expr: {when: "job_state == 'ACCEPTED' and status_duration_min > 15", severity: P3, value_field: job_state,
-         title: "作业排队已 {status_duration_min} 分钟"}
-  recover: {when: "job_state in ('RUNNING', 'FINISHED', 'FAILED', 'SUCCEEDED', 'KILLED')"}
+  expr: {when: "node_status == 'fail'", severity: P2, critical_severity: P1,
+         value_field: node_status, title: "MRS 作业节点执行失败（{node_status}）"}
+  recover: {when: "node_status == 'success'"}
   runbook: |
-    1. 在 YARN ResourceManager 查看作业所在队列的资源使用率与排队作业数；
-    2. 资源不足时与业务协商错峰运行，或临时调整队列容量；
-    3. 排查是否有长时间运行的异常作业占用资源，必要时终止。
+    1. 在 DataArts Studio 实例监控中打开该作业实例，查看失败 MRS 节点的日志（logPath）；
+    2. 跳转 MRS Manager / YARN 查看对应 application 的错误与资源队列，资源不足时调整队列配额；
+    3. 修复后在 DataArts 重跑失败实例，下一次实例中该节点成功即自动恢复。
 - id: R-GS-001
   name: GaussDB 实例故障
   resource_type: gaussdb_instance

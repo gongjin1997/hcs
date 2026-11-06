@@ -103,10 +103,10 @@ def test_password_and_aksk_tenants_sync_separately(world, mem_db, mock_http):
     assert checks["tenant-b"]["checks"][0]["name"] == "IAM 认证（AK/SK 签名）"
     assert all(c["ok"] for r in checks.values() for c in r["checks"] if c["kind"] != "capability")
     runs = {code: _sync(mem_db, code, mock_http) for code in world}
-    assert {c: (r.status, r.resource_total) for c, r in runs.items()} == {"tenant-a": ("SUCCESS", 138),
-                                                                        "tenant-b": ("SUCCESS", 58)}
+    assert {c: (r.status, r.resource_total) for c, r in runs.items()} == {"tenant-a": ("SUCCESS", 129),
+                                                                        "tenant-b": ("SUCCESS", 54)}
     counts = dict(mem_db.execute(select(Resource.tenant_id, func.count()).group_by(Resource.tenant_id)).all())
-    assert counts == {world["tenant-a"].id: 138, world["tenant-b"].id: 58}
+    assert counts == {world["tenant-a"].id: 129, world["tenant-b"].id: 54}
 
 
 def test_wrong_secret_fails_only_that_tenant(world, mem_db, mock_http):

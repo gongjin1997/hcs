@@ -24,7 +24,7 @@ from app.models import AlarmEvent, InspectionRun, Resource, ResourceChange
 from app.models.alarm import ACTIVE_STATUSES
 from app.models.base import utcnow
 from app.services import collect_switch, collection_policy, platform_watch, settings_service
-from app.services.catalog import RESOURCE_TYPES, type_name
+from app.services.catalog import LEDGER_TASK_CODE, RESOURCE_TYPES, type_name
 from app.services.tenancy import Target, legacy_target, resolve_targets
 
 from .fetchers import FETCHERS, LedgerRecord, remember_owners
@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 class _InventoryPolicyChanged(Exception):
     pass
 
-LEDGER_TASK = "ledger_sync"
+LEDGER_TASK = LEDGER_TASK_CODE
 EMPTY_GUARD = 3
 _SQLSTATE = re.compile(r"[A-Z0-9]{5}\Z")
 _DB_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}\Z")

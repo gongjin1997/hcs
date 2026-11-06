@@ -114,59 +114,6 @@ def test_evs_bootable_bool_string_variants_and_unsupported_encryption_are_not_fa
     assert record.attrs["encrypted"] is None and record.attrs["encrypted_reported"] is False
 
 
-def rds_instance(identity, **changes):
-    # RDS EDOC1100458141 51d21a18#EN-US_TOPIC_0000002342919457；实例级，不乘节点数。
-    return {"id": identity, "name": identity, "status": "ACTIVE", "cpu": "4", "mem": "16",
-            "volume": {"type": "CLOUDSSD", "size": 40}, "datastore": {"type": "MySQL", "version": "8.0"},
-            "nodes": [{"availability_zone": "az-1"}, {"availability_zone": "az-2"}],
-            "private_ips": ["192.0.2.30"], "type": "Ha", "created": "2026-01-02T03:04:05+0000", **changes}
-
-
-def test_rds_851_cpu_ram_and_volume_are_instance_level_units_and_offset_counts_records():
-    client = OfficialResponses({("rds", "/v3/{project_id}/instances"): [
-        {"instances": [rds_instance("rds-one")], "total_count": 3},
-        {"instances": [rds_instance("rds-two"), rds_instance("rds-three")], "total_count": 3}]})
-    records = fetchers.fetch_rds(client, {})
-    assert len(records) == 3
-    assert all(record.vcpus == 4 and record.memory_gb == 16 and record.storage_gb == 40 for record in records)
-    assert [params for _, _, params in client.calls] == [{"offset": 0, "limit": 100}, {"offset": 1, "limit": 100}]
-
-
-def kafka_instance(index):
-    # DMS EDOC1100450009 bd0a2e6b#ListInstances：engine=kafka；storage_* 为 GB。
-    return {"instance_id": f"kafka-{index}", "name": f"kafka-{index}", "status": "RUNNING",
-            "storage_space": 2000, "used_storage_space": 500, "engine_version": "2.7",
-            "available_zones": ["az-1"], "connect_address": "192.0.2.40:9092,192.0.2.41:9092",
-            "created_at": "1767225600000", "partition_num": "1000", "specification": "contract-spec"}
-
-
-def test_kafka_851_uses_maximum_50_record_offset_and_does_not_trust_instance_num_as_total():
-    client = OfficialResponses({("dms", "/v2/{project_id}/instances"): [
-        {"instances": [kafka_instance(i) for i in range(50)], "instance_num": 50},
-        {"instances": [kafka_instance(i) for i in range(50, 52)], "instance_num": 2}]})
-    records = fetchers.fetch_kafka(client, {})
-    assert len(records) == 52 and len({record.resource_id for record in records}) == 52
-    assert all(record.storage_gb == 2000 and record.attrs["storage_usage"] == 25 for record in records)
-    assert all(record.ip == "192.0.2.40" for record in records)
-    assert [params for _, _, params in client.calls] == [
-        {"engine": "kafka", "offset": 0, "limit": 50}, {"engine": "kafka", "offset": 50, "limit": 50}]
-
-
-def test_kafka_exact_full_page_requires_a_following_empty_page_instead_of_count_guessing():
-    client = OfficialResponses({("dms", "/v2/{project_id}/instances"): [
-        {"instances": [kafka_instance(i) for i in range(50)], "instance_num": 50},
-        {"instances": [], "instance_num": 0}]})
-    assert len(fetchers.fetch_kafka(client, {})) == 50 and len(client.calls) == 2
-
-
-def test_kafka_later_page_failure_does_not_return_a_partial_inventory():
-    client = OfficialResponses({("dms", "/v2/{project_id}/instances"): [
-        {"instances": [kafka_instance(i) for i in range(50)], "instance_num": 50},
-        HcsError(503, "DMS.UNAVAILABLE", "unavailable")]})
-    with pytest.raises(HcsError):
-        fetchers.fetch_kafka(client, {})
-
-
 def gaussdb_instance(**changes):
     # EDOC1100457467 k001 §4.3.4，PDF 物理页91–107，表4-56/57没有内存/磁盘单位。
     return {"id": "gauss-contractin14", "name": "contract", "status": "ACTIVE", "type": "centralization_standard",
@@ -318,9 +265,9 @@ def test_fetcher_auth_and_service_errors_are_never_converted_to_an_empty_invento
 
 @pytest.mark.parametrize("resource_type,key", [
     ("ecs_server", "servers"), ("cce_cluster", "items"), ("evs_volume", "volumes"), ("vpc", "vpcs"),
-    ("vpc_subnet", "subnets"), ("elb", "loadbalancers"), ("eip", "publicips"), ("rds_instance", "instances"),
-    ("gaussdb_instance", "instances"), ("dcs_instance", "instances"), ("kafka_instance", "instances"),
-    ("mrs_cluster", "clusters"), ("dws_cluster", "clusters"), ("css_cluster", "clusters"),
+    ("vpc_subnet", "subnets"), ("elb", "loadbalancers"), ("eip", "publicips"),
+    ("gaussdb_instance", "instances"), ("dcs_instance", "instances"),
+    ("mrs_cluster", "clusters"), ("dws_cluster", "clusters"),
 ])
 def test_malformed_list_is_not_treated_as_zero_resources(resource_type, key):
     class Client:

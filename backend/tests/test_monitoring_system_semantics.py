@@ -165,7 +165,7 @@ def test_manual_close_refreshes_health_without_claiming_cloud_recovery(mem_db, m
 
 
 @pytest.mark.parametrize("kind,metric", [("cce_workload", "backpressure_min"),
-    ("dgc_batch_job", "run_minutes"), ("mrs_job", "elapsed_min"), ("dgc_realtime_job", "bad_nodes")])
+    ("dgc_batch_job", "run_minutes"), ("mrs_job", "run_minutes"), ("dgc_realtime_job", "bad_nodes")])
 def test_other_runtime_metrics_share_freshness_and_explicit_missing_rules(kind, metric):
     raw = {metric: 0}
     row = SimpleNamespace(resource_type=kind, attrs={"metrics_monitoring": {

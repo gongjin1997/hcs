@@ -115,11 +115,11 @@ def test_node_duration_survives_unrelated_parent_status_change(mem_db):
 
 
 def test_execution_identity_change_resets_hits_even_if_state_is_unchanged(mem_db):
-    add_rule(mem_db, kind="mrs_job", check="job_status", when="job_state == 'ACCEPTED'")
+    add_rule(mem_db, kind="mrs_job", check="job_status", when="node_status == 'waiting'")
     context = ctx(task="mrs_job_status")
     for offset, execution in ((0, "one"), (1, "two")):
-        observation = Observation("mrs_job", "cluster/job", "job", "job_status", {"job_state": "ACCEPTED"},
-                                  status_raw="ACCEPTED", attrs={"job_id": execution})
+        observation = Observation("mrs_job", "ws/job/node", "job", "job_status", {"node_status": "waiting"},
+                                  status_raw="waiting", attrs={"instance_id": execution})
         pipeline.process_observations(mem_db, "mrs", [observation], context, NOW + timedelta(minutes=offset))
     assert mem_db.scalars(select(AlarmEvent)).all() == []
     resource = mem_db.scalar(select(Resource))
@@ -233,19 +233,19 @@ def test_global_cleanup_has_no_project(mem_db, monkeypatch):
 
 
 def test_unknown_source_cannot_recover_even_a_preserved_custom_rule(mem_db):
-    saved = add_rule(mem_db, kind="mrs_job", when="job_state == 'ACCEPTED' and status_duration_min > 15", count=1)
-    saved.recover = {"when": "job_state != 'ACCEPTED'"}
+    saved = add_rule(mem_db, kind="mrs_job", when="node_status == 'waiting' and status_duration_min > 15", count=1)
+    saved.recover = {"when": "node_status != 'waiting'"}
     saved.updated_by = "operator"
     mem_db.commit()
     context = ctx(task="mrs_job_status")
-    observation = Observation("mrs_job", "cluster/job", "job", "job_status",
-                              {"job_state": "ACCEPTED", "status_duration_min": 20},
-                              status_raw="ACCEPTED", attrs={"job_id": "one"})
+    observation = Observation("mrs_job", "ws/job/node", "job", "job_status",
+                              {"node_status": "waiting", "status_duration_min": 20},
+                              status_raw="waiting", attrs={"instance_id": "one"})
     pipeline.process_observations(mem_db, "mrs", [observation], context, NOW)
-    observation.facts, observation.status_raw = {"job_state": "FUTURE_STATE"}, "FUTURE_STATE"
+    observation.facts, observation.status_raw = {"node_status": "FUTURE_STATE"}, "FUTURE_STATE"
     pipeline.process_observations(mem_db, "mrs", [observation], context, NOW + timedelta(minutes=1))
     assert mem_db.scalar(select(AlarmEvent)).status == "FIRING"
-    assert saved.recover == {"when": "job_state != 'ACCEPTED'"} and saved.updated_by == "operator"
+    assert saved.recover == {"when": "node_status != 'waiting'"} and saved.updated_by == "operator"
 
 
 def test_scope_uses_stable_local_identity_after_account_or_project_label_change(mem_db):

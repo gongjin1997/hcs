@@ -34,7 +34,7 @@ def login_options(db: Session = Depends(get_db)):
     """演示账号只在“非 prod 且开启演示数据、演示用户仍存在”时返回；生产环境登录页不会出现任何账号提示。"""
     from app import __version__
     from app.core.permissions import BUILTIN_ROLES
-    from app.services.seed import DEMO_HINTS
+    from app.demo.seed import DEMO_HINTS
 
     s = get_settings()
     demo: list[dict] = []

@@ -57,7 +57,7 @@ class Probe:
     status: list[str] = field(default_factory=list)          # 统计取值分布的状态类字段
     params: dict = field(default_factory=dict)
     total: str | None = None                # 总数字段（分页结束判断用）
-    needs: str | None = None                # workspace / cce_cluster / mrs_cluster / dgc_job
+    needs: str | None = None                # workspace / cce_cluster / mrs_cluster / dgc_job / dgc_instance
     limit_param: str | None = "limit"
     max_limit: int | None = None
     used_by: str = ""
@@ -71,14 +71,14 @@ P = Probe
 TYPES = {"ecs.servers": ["ecs_server"], "ecs.server": ["ecs_server"], "ecs.quotas": ["ecs_server"],
          "evs.volumes": ["evs_volume"], "vpc.vpcs": ["vpc"],
          "vpc.subnets": ["vpc_subnet"], "elb.loadbalancers": ["elb"], "vpc.publicips": ["eip"],
-         "rds.instances": ["rds_instance"], "gaussdb.instances": ["gaussdb_instance"], "dcs.instances": ["dcs_instance"],
+         "gaussdb.instances": ["gaussdb_instance"], "dcs.instances": ["dcs_instance"],
          "dcs.statistics": ["dcs_instance"],
-         "dms.kafka": ["kafka_instance"], "mrs.clusters": ["mrs_cluster", "mrs_job"], "mrs.job_executions": ["mrs_job"],
-         "dws.clusters": ["dws_cluster"], "css.clusters": ["css_cluster"], "cce.clusters": ["cce_cluster", "cce_workload"],
+         "mrs.clusters": ["mrs_cluster"],
+         "dws.clusters": ["dws_cluster"], "cce.clusters": ["cce_cluster", "cce_workload"],
          "cce.nodes": ["cce_cluster"], "cce.nodepools": ["cce_cluster"],
          "k8s.pods": ["cce_workload"], "k8s.events": ["cce_workload"],
          "dataarts.jobs": ["dgc_realtime_job"], "dataarts.job_status": ["dgc_realtime_job"],
-         "dataarts.instances": ["dgc_batch_job"]}
+         "dataarts.instances": ["dgc_batch_job", "mrs_job"], "dataarts.instance_detail": ["mrs_job"]}
 PROBES: list[Probe] = [
     P("ecs.servers", "ecs", "ECS 云服务器列表", "/v1/{project_id}/cloudservers/detail", "servers", ["id", "name"],
       ["status", "flavor.id", "flavor.vcpus", "flavor.ram", "addresses", "OS-EXT-AZ:availability_zone",
@@ -100,10 +100,6 @@ PROBES: list[Probe] = [
     P("vpc.publicips", "vpc", "EIP 弹性公网 IP 列表", "/v1/{project_id}/publicips", "publicips",
       ["id", "public_ip_address"], ["alias", "status", "private_ip_address", "bandwidth_size", "bandwidth_share_type",
                                     "bandwidth_name", "create_time"], ["status"], used_by="台账（弹性公网 IP）"),
-    P("rds.instances", "rds", "RDS 实例列表", "/v3/{project_id}/instances", "instances", ["id", "name"],
-      ["status", "type", "cpu", "mem", "volume.size", "datastore.type", "datastore.version",
-       "nodes[].availability_zone", "private_ips", "flavor_ref", "created"], ["status", "type"], {"offset": 0},
-      "total_count", used_by="台账（RDS）"),
     P("gaussdb.instances", "gaussdb", "GaussDB 实例列表", gaussdb_instances_path(), "instances", ["id", "name"],
       ["status", "type", "datastore.version", "flavor_ref", "flavor_info.vcpu", "flavor_info.mem",
        "volume.size", "availability_zone", "private_ips",
@@ -117,25 +113,13 @@ PROBES: list[Probe] = [
     P("dcs.statistics", "dcs", "DCS 运行实例统计", "/v2/{project_id}/instances/statistic", "statistics", ["instance_id"],
       ["used_memory", "max_memory", "used_cpu", "input_kbps", "output_kbps", "keys", "cmd_get_count", "cmd_set_count"],
       limit_param=None, used_by="DCS 原生内存巡检（内存 MB，used_cpu 为累计秒数）"),
-    P("dms.kafka", "dms", "Kafka 实例列表", "/v2/{project_id}/instances", "instances", ["instance_id", "name"],
-      ["status", "specification", "storage_space", "used_storage_space", "connect_address", "available_zones",
-       "engine_version", "partition_num", "created_at"], ["status"], {"engine": "kafka", "offset": 0}, max_limit=50,
-      used_by="台账（Kafka）"),
     P("mrs.clusters", "mrs", "MRS 集群列表", "/v1.1/{project_id}/cluster_infos", "clusters",
       ["clusterId", "clusterName"], ["clusterState", "clusterVersion", "totalNodeNum", "azName", "masterNodeIp",
                                      "componentList[].componentName", "createAt"], ["clusterState"],
       {"currentPage": 1}, "clusterTotal", limit_param="pageSize", used_by="台账（MRS）/ MRS 集群巡检"),
-    P("mrs.job_executions", "mrs", "MRS 作业执行列表（首个集群，版本待核）",
-      "/v2/{project_id}/clusters/{cluster_id}/job-executions", "job_list", ["job_name"],
-      ["job_id", "job_state", "job_result", "job_type", "queue", "submitted_time",
-                                 "elapsed_time"], ["job_state", "job_result"], {"offset": 1}, "total_record",
-      needs="mrs_cluster", used_by="MRS 作业巡检"),
     P("dws.clusters", "dws", "DWS 集群列表", "/v1.0/{project_id}/clusters", "clusters", ["id", "name"],
       ["status", "availability_zone", "endpoints[].connect_info", "node_type", "number_of_node", "version", "created"],
       ["status"], total="count", limit_param=None, used_by="台账（DWS）"),
-    P("css.clusters", "css", "CSS 集群列表（版本待核）", "/v1.0/{project_id}/clusters", "clusters", ["id", "name"],
-      ["status", "datastore.type", "datastore.version", "instances[].specCode", "instances[].azCode", "endpoint",
-       "created"], ["status"], {"start": 1}, "totalSize", used_by="台账（CSS）"),
     P("cce.clusters", "cce", "CCE 集群列表", "/api/v3/projects/{project_id}/clusters", "items",
       ["metadata.uid", "metadata.name"], ["status.phase", "status.endpoints", "spec.version", "spec.flavor", "spec.type",
                                           "metadata.creationTimestamp"], ["status.phase"], limit_param=None,
@@ -165,6 +149,10 @@ PROBES: list[Probe] = [
     P("dataarts.instances", "dataarts", "DataArts 批作业实例（近 24 小时）", "/v1/{project_id}/jobs/instances/detail",
       "instances", ["jobName"], ["instanceId", "status", "planTime", "startTime", "endTime"], ["status"],
       {"offset": 0}, "total", needs="workspace", used_by="DataArts 批作业巡检"),
+    P("dataarts.instance_detail", "dataarts", "DataArts 作业实例详情（第一个实例的节点）",
+      "/v1/{project_id}/jobs/{job_name}/instances/{instance_id}", "nodes", ["nodeName", "status", "type"],
+      ["startTime", "endTime", "retryTimes", "logPath"], ["type", "status"], limit_param=None, needs="dgc_instance",
+      used_by="MRS 作业巡检（type 为 MRSSpark / MapReduce / MRSFlinkJob / MRSHetuEngine 的节点）"),
     P("ces.metrics", "ces", "CES 指标列表（SYS.ECS）", "/V1.0/{project_id}/metrics", "metrics", [],
       ["namespace", "metric_name", "dimensions[].name", "unit"], ["metric_name"], {"namespace": "SYS.ECS"},
       used_by="旧部署显式启用的 CES 兼容指标（不用于 DCS 内存）"),
@@ -184,6 +172,7 @@ PROBES.append(P("ecs.server", "ecs", "ECS 单机状态", "/v1/{project_id}/cloud
     used_by="所选少量关键实例的独立状态巡检"))
 
 DEPENDS = {"cce_cluster": "cce.clusters", "mrs_cluster": "mrs.clusters", "dgc_job": "dataarts.jobs",
+           "dgc_instance": "dataarts.instances",
            "workspace": "dataarts.jobs", "ecs_server": "ecs.servers"}
 for _p in PROBES:
     _p.types = TYPES.get(_p.code, [])
@@ -273,8 +262,6 @@ class Runner:
         if p.service == "aom":
             res.update(evidence_scope="disabled", product_metrics_verified=False, available=False,
                        contract_note="所有资源（含 ECS）均停用 AOM；旧地址、映射和元数据结果不代表当前可用")
-        if p.code in ("mrs.job_executions", "css.clusters"):
-            res.update(contract_status="unverified", contract_note="当前上传 PDF 未覆盖该兼容接口；成功仅表示样本可读")
         reason = self.skip_reason(p)
         if reason:
             return {**res, "result": "SKIP", "message": reason}
@@ -294,11 +281,11 @@ class Runner:
             path = path.replace("{cluster_uid}", quote(self.ctx["cce_cluster"], safe=""))
             if p.service == K8S:
                 host_vars = {"cluster_id": self.ctx["cce_cluster"]}
-        if p.needs == "mrs_cluster":
-            if not self.ctx.get("mrs_cluster"):
-                return {**res, "result": "SKIP", "message": "没有 MRS 集群（或 MRS 集群列表调用失败）"}
-            path = path.replace("{cluster_id}", quote(self.ctx["mrs_cluster"], safe=""))
-            params["submitted_time_begin"] = int(time.time() * 1000) - 24 * 3600 * 1000
+        if p.needs == "dgc_instance":
+            if not self.ctx.get("dgc_instance_job") or not self.ctx.get("dgc_instance_id"):
+                return {**res, "result": "SKIP", "message": "近 24 小时没有作业实例（或实例列表调用失败）"}
+            path = (path.replace("{job_name}", quote(self.ctx["dgc_instance_job"], safe=""))
+                    .replace("{instance_id}", quote(self.ctx["dgc_instance_id"], safe="")))
         if p.needs == "dgc_job":
             if not self.ctx.get("dgc_job"):
                 return {**res, "result": "SKIP", "message": "没有实时作业（或作业列表调用失败）"}
@@ -349,8 +336,7 @@ class Runner:
                         raise HcsError(0, "LOCAL.INCOMPLETE_PAGE", "列表记录数与已声明总数不一致")
                 except HcsError as error:
                     return {**res, "result": "FAIL", "message": _safe_error(error)}
-            if res["total"] is None and p.total in ("count", "total_count", "instance_num", "clusterTotal",
-                                                    "totalSize", "total_record"):
+            if res["total"] is None and p.total in ("count", "total_count", "instance_num", "clusterTotal"):
                 res["total_missing"] = f"没有总数字段 {p.total}；本次只检查样本，不证明清单完整"
         if p.code in ("elb.loadbalancers", "dws.clusters"):
             try:
@@ -395,6 +381,10 @@ class Runner:
             value = first.get("name")
         elif p.code == "ecs.servers":
             value = first.get("id")
+        elif p.code == "dataarts.instances":
+            job, iid = first.get("jobName"), first.get("instanceId")
+            self.ctx["dgc_instance_job"] = job if isinstance(job, str) else ""
+            self.ctx["dgc_instance_id"] = str(iid) if type(iid) is int or isinstance(iid, str) and iid.isdecimal() else ""
         key = {"cce.clusters": "cce_cluster", "mrs.clusters": "mrs_cluster", "dataarts.jobs": "dgc_job",
                "ecs.servers": "ecs_id"}.get(p.code)
         if key is not None:

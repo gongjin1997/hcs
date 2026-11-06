@@ -75,18 +75,6 @@ class ResourceEvidenceContractTests(unittest.TestCase):
         self.assertEqual(arguments["total_key"], "count")
         self.assertTrue(0 < arguments["limit"] <= 1000)
 
-    def test_rds_documented_record_offset_and_limit(self):
-        """[RDS1]: offset starts at zero; limit 1..100; instances/total_count."""
-        get = self._get("fetch_rds", "rds")
-        self.assertEqual(ast.literal_eval(get.args[1]), "/v3/{project_id}/instances")
-        page, arguments = self._page("fetch_rds")
-        self.assertEqual(ast.literal_eval(page.args[1]), "instances")
-        self.assertEqual(arguments["mode"], "offset")
-        self.assertEqual(arguments["start"], 0)
-        self.assertEqual(arguments["offset_param"], "offset")
-        self.assertEqual(arguments["total_key"], "total_count")
-        self.assertTrue(1 <= arguments["limit"] <= 100)
-
     def test_dws_documented_list_path_and_response_key(self):
         """[DWS1]: v1.0 list, clusters array; no pagination parameters documented."""
         get = self._get("fetch_dws", "dws")
@@ -122,23 +110,6 @@ class ResourceEvidenceContractTests(unittest.TestCase):
         # ELB's request table does not define limit/marker. Do not manufacture
         # parameter guarantees from its response page_info or a community API.
 
-    def test_kafka_documented_paging_limit_and_required_engine(self):
-        """[DMS1]: engine=kafka is required; each page has limit 1..50 (default 10)."""
-        get = self._get("fetch_kafka", "dms")
-        self.assertEqual(ast.literal_eval(get.args[1]), "/v2/{project_id}/instances")
-        parameters = next((item.value for item in get.keywords if item.arg == "params"), None)
-        self.assertIsInstance(parameters, ast.Dict)
-        self.assertTrue(any(
-            isinstance(key, ast.Constant) and key.value == "engine"
-            and isinstance(value, ast.Constant) and value.value == "kafka"
-            for key, value in zip(parameters.keys, parameters.values, strict=True)
-        ))
-        page, arguments = self._page("fetch_kafka")
-        self.assertEqual(ast.literal_eval(page.args[1]), "instances")
-        self.assertEqual(arguments["mode"], "offset")
-        self.assertEqual(arguments["start"], 0)
-        self.assertEqual(arguments["offset_param"], "offset")
-        self.assertTrue(1 <= arguments["limit"] <= 50)
         # instance_num is merely called "instance quantity" in the source;
         # this test does not invent a documented total-count guarantee.
 

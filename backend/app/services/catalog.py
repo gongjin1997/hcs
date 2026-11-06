@@ -1,10 +1,18 @@
-"""资源类型、服务、级别等字典（前后端共用的展示口径）。"""
+"""平台唯一的业务目录：云服务、资源类型、巡检任务及展示口径。
+
+其他模块（采集开关、台账、巡检证据、资源说明、任务说明、内置任务初始化、Probe）一律从这里派生，
+不再各自维护列表；一致性由 tests/test_catalog_consistency.py 守护。本模块只放纯数据，不导入业务代码。
+"""
+from dataclasses import dataclass
 
 SERVICES = {
-    "ecs": "ECS", "evs": "EVS", "vpc": "VPC", "elb": "ELB", "rds": "RDS", "dms": "DMS Kafka", "cce": "CCE",
-    "dws": "DWS", "css": "CSS", "dataarts": "DataArts Studio", "mrs": "MRS", "gaussdb": "GaussDB", "dcs": "DCS",
+    "ecs": "ECS", "evs": "EVS", "vpc": "VPC", "elb": "ELB", "cce": "CCE",
+    "dws": "DWS", "dataarts": "DataArts Studio", "mrs": "MRS", "gaussdb": "GaussDB", "dcs": "DCS",
     "platform": "巡检平台",
 }
+# 已下线的服务与资源类型（本局点不使用）：迁移 0018 清理存量数据，代码中不再出现采集或展示入口
+RETIRED_SERVICES = ("rds", "dms", "css")
+RETIRED_TYPES = ("rds_instance", "kafka_instance", "css_cluster")
 
 # 台账分类（资源台账页左侧导航）
 CATEGORIES = [
@@ -50,25 +58,18 @@ RESOURCE_TYPES: dict[str, dict] = {
     "elb": {"service": "elb", "name": "负载均衡 ELB", "category": "network", "tag": "ELB", "ledger": True,
             "columns": [_c("attrs.eip", "公网 IP", 130), _c("attrs.listeners", "监听器", 80),
                         _c("attrs.members", "后端成员", 90)]},
-    "rds_instance": {"service": "rds", "name": "云数据库 RDS", "category": "database", "tag": "RDS", "ledger": True,
-                     "columns": [_c("attrs.engine", "引擎", 120), _c("attrs.ha", "部署方式", 90)]},
     "gaussdb_instance": {"service": "gaussdb", "name": "GaussDB 实例", "category": "database", "group": "gaussdb",
                          "tag": "GaussDB", "ledger": True,
                          "columns": [_c("attrs.version", "版本", 120), _c("attrs.type", "部署形态", 100)]},
     "dcs_instance": {"service": "dcs", "name": "DCS 缓存实例", "category": "database", "group": "dcs", "tag": "DCS",
                      "ledger": True, "columns": [_c("attrs.engine_version", "版本", 80),
                                                  _c("attrs.port", "端口", 70)]},
-    "kafka_instance": {"service": "dms", "name": "Kafka 实例", "category": "bigdata", "tag": "Kafka", "ledger": True,
-                       "columns": [_c("attrs.engine_version", "版本", 80), _c("attrs.partition_num", "分区数", 80),
-                                   _c("attrs.storage_usage", "存储使用率(%)", 120)]},
     "mrs_cluster": {"service": "mrs", "name": "MRS 集群", "category": "bigdata", "group": "mrs", "tag": "MRS集群",
                     "ledger": True, "columns": [_c("attrs.version", "版本", 150), _c("attrs.nodes", "节点数", 80),
                                                 _c("attrs.components", "组件", 200)]},
     "dws_cluster": {"service": "dws", "name": "DWS 数据仓库", "category": "bigdata", "tag": "DWS", "ledger": True,
                     "columns": [_c("attrs.version", "版本", 90), _c("attrs.node_count", "节点数", 80),
                                 _c("attrs.node_type", "节点规格", 140)]},
-    "css_cluster": {"service": "css", "name": "CSS 云搜索", "category": "bigdata", "tag": "CSS", "ledger": True,
-                    "columns": [_c("attrs.version", "版本", 120), _c("attrs.node_count", "节点数", 80)]},
     # ---- 作业类：只巡检，不进台账 ----
     "dgc_realtime_job": {"service": "dataarts", "name": "实时作业", "category": "job", "group": "dgc_realtime",
                          "tag": "DataArts实时作业", "ledger": False,
@@ -76,8 +77,10 @@ RESOURCE_TYPES: dict[str, dict] = {
     "dgc_batch_job": {"service": "dataarts", "name": "批作业", "category": "job", "group": "dgc_batch",
                       "tag": "DataArts批作业", "ledger": False,
                       "columns": [_c("attrs.workspace", "工作空间", 120), _c("attrs.schedule", "调度", 120)]},
+    # MRS 作业经 DataArts 作业实例详情的 MRS 类节点获取（数据治理中心 API §5.3.16/§5.3.17），不调用 MRS 作业接口
     "mrs_job": {"service": "mrs", "name": "MRS 作业", "category": "job", "group": "mrs", "tag": "MRS作业",
-                "ledger": False, "columns": [_c("attrs.cluster", "集群", 120), _c("attrs.job_type", "类型", 100)]},
+                "ledger": False, "columns": [_c("attrs.workspace", "工作空间", 120), _c("attrs.job_name", "所属作业", 140),
+                                             _c("attrs.node_type", "节点类型", 110)]},
     # ---- 容器工作负载：由 CCE 容器事件采集汇总（Deployment / StatefulSet ...），只巡检，不进台账 ----
     "cce_workload": {"service": "cce", "name": "容器工作负载", "category": "container", "group": "cce", "tag": "CCE",
                      "ledger": False,
@@ -85,6 +88,69 @@ RESOURCE_TYPES: dict[str, dict] = {
                                  _c("attrs.kind", "类型", 100), _c("metrics.pods", "Pod 数", 70)]},
 }
 LEDGER_TYPES = [k for k, v in RESOURCE_TYPES.items() if v["ledger"]]
+INSPECT_ONLY_TYPES = [k for k, v in RESOURCE_TYPES.items() if not v["ledger"]]
+
+
+@dataclass(frozen=True)
+class TaskSpec:
+    """内置任务定义。collector=True 的任务必须在 collectors/registry.TASKS 中有同名采集器。
+
+    types：任务采集 / 写入的资源类型（采集开关按类型启停任务）；checks：任务负责的规则检查项（缺采中断证据时用于归属）；
+    default_enabled=False 的任务在新库中默认关闭，需要在页面显式开启。
+    """
+    code: str
+    name: str
+    service: str
+    interval_sec: int
+    types: tuple[str, ...] = ()
+    checks: tuple[str, ...] = ()
+    note: str | None = None
+    cron: str | None = None
+    collector: bool = True
+    default_enabled: bool = True
+
+
+LEDGER_TASK_CODE = "ledger_sync"
+CLEANUP_TASK_CODE = "data_cleanup"
+TASK_SPECS: tuple[TaskSpec, ...] = (
+    TaskSpec("dgc_realtime_status", "DataArts 实时作业状态", "dataarts", 60, ("dgc_realtime_job",),
+             ("job_status", "node_status")),
+    TaskSpec("dgc_batch_instance", "DataArts 批作业实例", "dataarts", 300, ("dgc_batch_job",), ("instance_status",)),
+    TaskSpec("mrs_cluster_status", "MRS 集群状态", "mrs", 120, ("mrs_cluster",), ("cluster_status",)),
+    TaskSpec("mrs_job_status", "MRS 作业执行", "mrs", 300, ("mrs_job",), ("job_status",),
+             note="经 DataArts 作业实例详情读取 MRS 类节点（MRSSpark / MapReduce / MRSFlinkJob / MRSHetuEngine）的执行状态；"
+                  "依赖 DataArts 工作空间配置，不调用 MRS 作业接口"),
+    TaskSpec("gaussdb_status", "GaussDB 实例状态与容量", "gaussdb", 120, ("gaussdb_instance",),
+             ("instance_status", "cpu", "memory", "disk"),
+             note="使用 GaussDB 原生接口只读采集，不使用 AOM 映射；磁盘、慢 SQL、会话等见 GaussDB 面板"),
+    TaskSpec("dcs_status", "DCS 实例状态与内存", "dcs", 60, ("dcs_instance",), ("instance_status", "memory")),
+    TaskSpec("ecs_status", "ECS 状态与告警巡检", "ecs", 120, ("ecs_server",),
+             ("instance_status", "cpu", "memory", "disk", "reboot"),
+             note="ECS 状态与告警判定；使用独立指标采样点，不重复查询指标源。各租户频率在 ECS 采集策略配置"),
+    TaskSpec("ecs_metrics", "ECS 使用指标采样", "ecs", 300, ("ecs_server",),
+             note="按租户策略采样 CPU、内存等指标；只查询纳入范围的本地实例，缺失不补零"),
+    TaskSpec("ecs_quota", "ECS 项目配额采集", "ecs", 3600, ("ecs_server",),
+             note="查询各项目实际配额；独立启停与周期，不调用云端配额修改接口"),
+    TaskSpec("cce_pod_events", "CCE 容器事件采集", "cce", 60, ("cce_workload",),
+             ("pod_restart", "pod_oom", "pod_crashloop", "pod_backpressure", "pod_evicted"),
+             note="采集 CCE 集群 Kubernetes Events，汇总容器重启 / OOM / 背压等事件"),
+    TaskSpec("cce_cluster_health", "CCE 节点健康与原生指标", "cce", 120, ("cce_cluster",),
+             note="只读采集 CCE 集群节点、节点池健康与显式启用的 Kubernetes 原生指标", default_enabled=False),
+    TaskSpec(LEDGER_TASK_CODE, "资源台账同步", "ledger", 3600, collector=False,
+             note=f"同步 {len(LEDGER_TYPES)} 类资源的台账（新增 / 变更 / 释放），关闭采集的资源类型会跳过"),
+    TaskSpec(CLEANUP_TASK_CODE, "数据清理（按保留期删除过期数据）", "platform", 86400, cron="30 3 * * *",
+             collector=False, note="按“系统设置 → 数据保留”删除过期的运行记录、通知、已恢复告警、审计、变更记录等"),
+)
+TASK_BY_CODE: dict[str, TaskSpec] = {t.code: t for t in TASK_SPECS}
+COLLECTOR_TASK_CODES = tuple(t.code for t in TASK_SPECS if t.collector)
+# 任务 → 资源类型 / 资源类型 → 任务（采集开关、资源说明共用）
+TASK_TYPES: dict[str, list[str]] = {t.code: list(t.types) for t in TASK_SPECS if t.types}
+TYPE_TASKS: dict[str, list[str]] = {}
+for _task in TASK_SPECS:
+    for _t in _task.types:
+        TYPE_TASKS.setdefault(_t, []).append(_task.code)
+TASK_CHECKS: dict[str, set[str]] = {t.code: set(t.checks) for t in TASK_SPECS if t.collector}
+TASK_NOTES: dict[str, str] = {t.code: t.note for t in TASK_SPECS if t.note}
 
 # 平台自身告警的对象类型（service = platform，见 app.services.platform_watch）：不进台账、不参与健康分、没有采集开关
 PLATFORM_TYPES: dict[str, dict] = {

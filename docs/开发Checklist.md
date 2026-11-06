@@ -12,10 +12,10 @@
 | 0. 准备：租户、账号、网络与环境 | 两个租户的账号 / AK/SK、CES 确认、网络、单机环境与构建机、阈值评审 | 2 / 15 | 迭代 0 |
 | 1. 基础框架、登录与权限 | 用户名密码登录、28 个权限点、4 个内置角色、数据范围、审计、生产密钥 | 16 / 18 | v1.0 上线前 |
 | 2. HCS 接入层（多租户） | 租户接入、Token / AK/SK、凭据加密、能力探测、指标来源、采集开关、接口探测 | 12 / 17 | v0.5 |
-| 3. 巡检采集、规则与告警 | 10 个内置任务、35 条规则、告警闭环、维护与静默、平台自身告警 | 15 / 16 | 试运行 |
+| 3. 巡检采集、规则与告警 | 13 个内置任务、36 条规则、告警闭环、维护与静默、平台自身告警 | 15 / 16 | 试运行 |
 | 4. 容器事件（CCE Pod） | 重启 / OOM / CrashLoop / 背压等事件采集、聚合、告警 | 9 / 12 | v0.5、v0.6 |
 | 5. 通知 | 按租户路由、Outbox、邮件、H5 认领、路由 / 联系人维护 | 8 / 11 | v0.5 |
-| 6. 资源台账 | 14 类资源同步、ECS 状态留痕、闲置、导出、字典与 Excel 导入 | 15 / 17 | v0.5 |
+| 6. 资源台账 | 11 类资源同步、ECS 状态留痕、闲置、导出、字典与 Excel 导入 | 15 / 17 | v0.5 |
 | 7. 报表中心 | 按租户 / 合并的日报、周报、月报、台账报表，页面配置发送 | 8 / 9 | v0.6 |
 | 8. 前端与 UI | 租户切换、维护与静默、系统管理 8 个页签、大屏、按需引入 | 10 / 11 | v0.6 |
 | 9. 工程化与部署 | 单机 compose 部署包、运维脚本、离线包、CI、迁移、监控、文档 | 15 / 19 | v0.5、v0.6 |
@@ -45,7 +45,7 @@
 - [ ] 准备运行环境：一台虚拟机（建议 4 核 8 GB、100 GB 数据盘，Docker 20.10+ 和 compose v2）；PostgreSQL 16、Redis 7 随 compose 一起部署（见 `docs/部署运维手册.md` 第 2 章）
 - [ ] 准备构建机：能访问镜像源、PyPI、npm（或公司制品库），用于构建镜像和离线安装包（`make bundle`）
 - [ ] 确定运维组成员名单、每人的角色和数据范围（建议 2 名平台管理员，互为备份）
-- [ ] 与值班代表一起评审 35 条内置规则的阈值和级别（`backend/app/rules/default_rules.yaml`）
+- [ ] 与值班代表一起评审 36 条内置规则的阈值和级别（`backend/app/rules/default_rules.yaml`）
 - [x] 本地开发环境：`make init` → `make dev-mock` / `make dev-api` / `make dev-web`，不需要 Docker
 - [x] Mock HCS 8.5.1：两个演示租户（租户A 账号密码 + CES；租户B AK/SK 签名 + Prometheus，CES 返回 404），覆盖 IAM（含 `/v3/auth/catalog`）、巡检和台账用到的全部接口、CCE K8s API，并校验租户隔离
 
@@ -60,14 +60,11 @@
 | ELB | 台账 | `/v3/{project_id}/elb/loadbalancers` |
 | CCE | 台账 + 容器事件的集群列表 | `/api/v3/projects/{project_id}/clusters`、`/api/v3/projects/{project_id}/clusters/{cluster_id}/nodes` |
 | CCE 集群 K8s API | 容器事件 | `/api/v1/pods`、`/api/v1/events`、`/api/v1/namespaces`、`/api/v1/namespaces/{ns}/pods/{pod}:{port}/proxy/metrics`（背压探针） |
-| RDS | 台账 | `/v3/{project_id}/instances` |
 | GaussDB | 巡检 + 台账 | `/v3/{project_id}/instances` |
 | DCS | 巡检 + 台账 | `/v2/{project_id}/instances` |
-| DMS Kafka | 台账 | `/v2/{project_id}/instances` |
-| MRS | 巡检 + 台账 | `/v1.1/{project_id}/cluster_infos`、`/v2/{project_id}/clusters/{cluster_id}/job-executions` |
+| MRS | 巡检 + 台账 | `/v1.1/{project_id}/cluster_infos`（集群）；MRS 作业经 DataArts `/v1/{project_id}/jobs/{job_name}/instances/{instance_id}` 的 MRS 节点 |
 | DWS | 台账 | `/v1.0/{project_id}/clusters` |
-| CSS | 台账 | `/v1.0/{project_id}/clusters` |
-| DataArts Studio | 巡检 | `/v1/{project_id}/jobs`、`/v1/{project_id}/jobs/{name}/status`、`/v1/{project_id}/jobs/instances/detail` |
+| DataArts Studio | 巡检（含 MRS 作业） | `/v1/{project_id}/jobs`、`/v1/{project_id}/jobs/{name}/status`、`/v1/{project_id}/jobs/instances/detail`、`/v1/{project_id}/jobs/{name}/instances/{instance_id}` |
 | CES（可选组件） | 巡检指标 | `/V1.0/{project_id}/batch-query-metric-data`；能力探测 `/V1.0/{project_id}/metrics?limit=1` |
 | Prometheus（可选，租户侧） | CES 不可用时的 ECS 指标 | `GET /api/v1/query`（PromQL，node\_exporter 指标） |
 
@@ -120,11 +117,11 @@
 
 ## 3. 巡检采集、规则与告警
 
-- [x] 10 个内置任务：8 个巡检任务（DataArts 实时作业 / 批作业、MRS 集群 / 作业、GaussDB、DCS、ECS 状态与资源使用、CCE 容器事件采集）+ 资源台账同步 + 数据清理；巡检按租户 × 项目逐个执行
+- [x] 13 个内置任务：11 个采集任务（DataArts 实时作业 / 批作业、MRS 集群 / 作业、GaussDB、DCS、ECS 状态 / 指标 / 配额、CCE 容器事件 / 集群健康）+ 资源台账同步 + 数据清理，定义见 `services/catalog.py` 的 `TASK_SPECS`；巡检按租户 × 项目逐个执行
 - [x] ECS 状态巡检：运行 / 关机 / 故障 / 变更中，关机时按“期望开机”判断是否告警，状态长时间未完成，CPU / 内存 / 磁盘（按租户的指标来源取数），按开机时间识别频繁重启
 - [x] 调度：APScheduler 加 Redis 锁，任务不重叠、错过的合并、随机抖动；支持固定周期或 crontab；支持“立即执行”
 - [x] 每次运行按租户写入 `inspection_run`（状态、耗时、资源数、异常数、API 调用次数、错误摘要、附加统计）
-- [x] 35 条内置规则（YAML）：DataArts 8、ECS 7、DCS 6、GaussDB 5、CCE 容器 5、MRS 4；分状态类和阈值类；表达式按 AST 白名单安全求值
+- [x] 36 条内置规则（YAML）：DataArts 8、ECS 7、GaussDB 7、DCS 6、CCE 容器 5、MRS 3；分状态类和阈值类；表达式按 AST 白名单安全求值
 - [x] 防抖（连续 N 次命中才告警）、滞回恢复、级别升级 / 降级、恢复后 30 分钟内再触发则重开原告警
 - [x] 告警指纹去重（含租户）；核心资源权重 ×3；资源、服务、租户、平台多级健康分
 - [x] 告警中心：租户列、筛选、状态分组、批量认领、关闭（原因必填）、导出 CSV、处理时间线
@@ -135,7 +132,7 @@
 - [x] 巡检任务编辑（「系统管理 → 巡检任务」）：修改周期（秒，有最小值保护）或 crontab、启停，全部审计；调度进程最迟 30 秒生效，无需重启；可查看每个租户的最近运行
 - [x] 平台自身告警：R-PLAT-001 任务连续失败 N 次（默认 3）、R-PLAT-002 租户认证失败（401 / 403）、R-PLAT-003 通知重试 5 次仍失败、R-PLAT-004 调度 / 通知进程心跳超时；参数在「系统设置 → 平台自身告警」，集中在「系统管理 → 平台状态」查看
 - [ ] 真实环境阈值调优：试运行期间统计误报和漏报，调整阈值和防抖次数（两个租户需要不同阈值时，先启用规则的 `scope` 按租户覆盖，见 `docs/后期开发方案.md` 第 4 章）
-- [x] 处置手册（Runbook）：35 条内置规则全部有处置步骤（v0.4 补齐其余 14 条），显示在告警详情和告警邮件中；评审见第 11 节
+- [x] 处置手册（Runbook）：36 条内置规则全部有处置步骤（v0.4 补齐其余 14 条），显示在告警详情和告警邮件中；评审见第 11 节
 
 > 🎯 **验收标准**：`test_pipeline.py`、`test_rules.py`、`test_escalation.py`、`test_v04_silence.py`、`test_v04_platform.py` 通过；试运行期间和 HCS 控制台告警逐条比对，没有漏报。
 
@@ -174,7 +171,7 @@
 
 ## 6. 资源台账
 
-- [x] 14 类资源按租户自动同步：ECS、CCE、EVS、VPC、子网、EIP、ELB、RDS、GaussDB、DCS、Kafka、MRS、DWS、CSS
+- [x] 11 类资源按租户自动同步：ECS、CCE、EVS、VPC、子网、EIP、ELB、GaussDB、DCS、MRS、DWS（RDS / Kafka / CSS 已下线，见迁移 0018）
 - [x] 每小时同步一次（`ledger_sync` 任务）；台账页可“立即同步”，也可以只同步某一类
 - [x] 变更识别：新增、变更（名称、状态、可用区、IP、规格、vCPU、内存、存储）、释放，写入 `resource_change`
 - [x] ECS 状态变化留痕：运行 ↔ 关机 / 故障、重启都进入变更记录；ECS 台账展示状态、期望开机、CPU / 内存 / 磁盘
@@ -233,7 +230,7 @@
 - [x] Nginx：静态资源长缓存、`/api` 反向代理、SSE 关闭缓冲、安全响应头、访问来源白名单、`/metrics` 默认拒绝；HTTPS 叠加配置（证书放 `nginx/certs/`）
 - [x] GitLab CI：check（后端 / 前端 / 部署文件检查）→ build（镜像）→ package（离线包，打 tag 时）
 - [x] Alembic 迁移 0001 ~ 0003（共 25 张表；0003 新增静默、采集开关、系统设置、进程心跳 4 张表，并给内置角色补授新权限点），`test_migrations` 校验升级、降级和模型一致
-- [x] `bootstrap` 幂等初始化：4 个内置角色、35 条规则、10 个任务（8 个巡检 + 台账同步 + 数据清理）、admin；已存在的不覆盖
+- [x] `bootstrap` 幂等初始化：4 个内置角色、36 条规则、13 个任务（11 个采集 + 台账同步 + 数据清理）、admin；已存在的不覆盖
 - [x] JSON 结构化日志（容器日志按 50 MB × 5 轮转）；`/healthz` 存活、`/readyz` 就绪；scheduler / notifier 用 `status --check` 做容器健康检查
 - [x] 可观测：`/metrics`（Prometheus，可选 Bearer Token）+ `make status` 平台自检；抓取配置与告警规则样例见 `docs/部署运维手册.md` 第 8 章
 - [x] 生产密钥由 `make gen-env` 生成（见第 1 节），`.env` 随每次备份一起保存
@@ -272,7 +269,7 @@
 - [ ] 运维组培训（约 30 分钟）：总览与租户切换、认领、容器事件、台账维护、报表
 - [ ] 正式上线：切换到正式收件组，开启日报、周报、月报
 - [x] 编写部署运维手册、联调手册（`docs/部署运维手册.md`、`docs/联调手册.md`）
-- [ ] 和值班代表评审 35 条规则的处置步骤（Runbook），按局点流程修订
+- [ ] 和值班代表评审 36 条规则的处置步骤（Runbook），按局点流程修订
 - [ ] 上线 1 个月后回顾：误报率、MTTA / MTTR、台账准确率、各租户 API 调用量
 
 > 🎯 **验收标准**：试运行期间没有漏报 P1 / P2，误报率在运维组可接受范围内；日报连续一周按时送达。

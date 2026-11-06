@@ -1,4 +1,4 @@
-# 演示 / 联调覆盖：Mock HCS 8.5.1 + Mailpit 收件箱 + 演示数据（账号见 backend/app/services/seed.py）。不要用于生产！
+# 演示 / 联调覆盖：Mock HCS 8.5.1 + Mailpit 收件箱 + 演示数据（账号见 backend/app/demo/seed.py）。不要用于生产！
 # 启用：.env 中 COMPOSE_FILE=docker-compose.yml:docker-compose.demo.yml，或仓库根目录 make up
 x-demo-env: &demo-env
   INSPECTOR_ENV: dev

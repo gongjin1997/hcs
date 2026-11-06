@@ -12,7 +12,7 @@ from .endpoints import EndpointResolver
 from .errors import HcsError
 
 DEFAULT_QPS: dict[str, float] = {"dataarts": 5, "mrs": 5, "gaussdb": 5, "dcs": 5, "ces": 10, "ecs": 5, "evs": 5, "vpc": 5,
-                                 "elb": 5, "rds": 5, "dms": 5, "cce": 5, "cce_k8s": 10, "dws": 5, "css": 5, "iam": 5}
+                                 "elb": 5, "cce": 5, "cce_k8s": 10, "dws": 5, "iam": 5}
 ROOT_SERVICES = ("dataarts", "mrs", "gaussdb", "dcs", "ces")      # Mock HCS 中挂在根路径的服务
 
 
@@ -20,7 +20,7 @@ def mock_endpoints(base: str) -> dict[str, str]:
     """开发联调：全部服务指向 Mock HCS（巡检服务在根路径，台账服务按 /{service} 前缀区分）。"""
     base = base.rstrip("/")
     eps = {svc: base for svc in ROOT_SERVICES}
-    eps.update({svc: f"{base}/{svc}" for svc in ("ecs", "evs", "vpc", "elb", "rds", "dms", "cce", "dws", "css")})
+    eps.update({svc: f"{base}/{svc}" for svc in ("ecs", "evs", "vpc", "elb", "cce", "dws")})
     eps["cce_k8s"] = f"{base}/k8s/{{cluster_id}}"
     eps["iam"] = base
     return eps

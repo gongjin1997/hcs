@@ -12,32 +12,21 @@ from app.core.security import hash_password
 from app.models import HcsAccount, InspectionTask, Resource, Role, User
 from app.rules.loader import sync_default_rules
 from app.services import collect_switch
+from app.services.catalog import TASK_SPECS
 
-# (任务代码, 名称, 服务, 默认周期秒[, crontab]) —— 巡检任务与 collectors/registry.py 中的 TASKS 一一对应；
-# ledger_sync 为台账同步，data_cleanup 为数据清理（按“系统设置 → 数据保留”删除过期数据，默认每天 03:30）
-BUILTIN_TASKS: list[tuple] = [("dgc_realtime_status", "DataArts 实时作业状态", "dataarts", 60),
-                 ("dgc_batch_instance", "DataArts 批作业实例", "dataarts", 300),
-                 ("mrs_cluster_status", "MRS 集群状态", "mrs", 120),
-                 ("mrs_job_status", "MRS 作业执行", "mrs", 300),
-                 ("gaussdb_status", "GaussDB 实例状态与容量", "gaussdb", 120),
-                 ("dcs_status", "DCS 实例状态与内存", "dcs", 60),
-                 ("ecs_status", "ECS 状态与告警巡检", "ecs", 120),
-                 ("ecs_metrics", "ECS 使用指标采样", "ecs", 300),
-                 ("ecs_quota", "ECS 项目配额采集", "ecs", 3600),
-                 ("cce_pod_events", "CCE 容器事件采集", "cce", 60),
-                 ("cce_cluster_health", "CCE 节点健康与原生指标", "cce", 120),
-                 ("ledger_sync", "资源台账同步", "ledger", 3600),
-                 ("data_cleanup", "数据清理（按保留期删除过期数据）", "platform", 86400, "30 3 * * *")]
+# (任务代码, 名称, 服务, 默认周期秒[, crontab])：由 catalog.TASK_SPECS 派生，保留元组形式供旧调用方使用
+BUILTIN_TASKS: list[tuple] = [(t.code, t.name, t.service, t.interval_sec, *((t.cron,) if t.cron else ()))
+                              for t in TASK_SPECS]
 
 
 def ensure_tasks(db: Session) -> int:
     """补齐内置任务；已存在的任务不覆盖（保留页面上调整过的周期、启停状态）。"""
     added = 0
-    for code, name, service, interval, *cron in BUILTIN_TASKS:
-        if db.get(InspectionTask, code) is None:
-            db.add(InspectionTask(code=code, name=name, service=service, interval_sec=interval,
-                                  cron=cron[0] if cron else None, params={},
-                                  enabled=get_settings().env != "prod" and code != "cce_cluster_health"))
+    for spec in TASK_SPECS:
+        if db.get(InspectionTask, spec.code) is None:
+            db.add(InspectionTask(code=spec.code, name=spec.name, service=spec.service, interval_sec=spec.interval_sec,
+                                  cron=spec.cron, params={},
+                                  enabled=get_settings().env != "prod" and spec.default_enabled))
             added += 1
     db.flush()
     return added

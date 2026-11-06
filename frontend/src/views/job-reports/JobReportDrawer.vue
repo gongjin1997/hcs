@@ -15,7 +15,7 @@
         <el-descriptions-item label="来源">{{ SOURCE_LABELS[row.resource_type] ?? row.resource_type }} · {{ row.service }}<div class="mono text-3">{{ row.resource_type }}</div></el-descriptions-item>
         <el-descriptions-item label="租户 / 项目">{{ row.tenant_name ?? '未采集' }} / {{ row.project_name ?? row.project_id ?? '未采集' }}</el-descriptions-item>
         <el-descriptions-item label="项目 ID">{{ row.project_id ?? '未采集' }}</el-descriptions-item>
-        <el-descriptions-item v-if="row.resource_type !== 'mrs_job'" label="工作空间">{{ factText(row.status_details.workspace) }}</el-descriptions-item>
+        <el-descriptions-item label="工作空间">{{ factText(row.status_details.workspace) }}</el-descriptions-item>
         <el-descriptions-item label="引擎 / 作业类型">{{ row.engine ?? '未识别' }} / {{ row.job_type ?? '未采集' }}</el-descriptions-item>
         <el-descriptions-item label="区域">{{ row.region ?? '未采集' }}</el-descriptions-item>
         <el-descriptions-item label="生命周期">{{ row.lifecycle }}</el-descriptions-item>
@@ -26,7 +26,6 @@
         <el-descriptions-item label="作业状态"><span class="mono">{{ row.display_status }}</span> · {{ row.status_label }}</el-descriptions-item>
         <el-descriptions-item label="原始状态"><span class="mono">{{ factText(row.status_raw) }}</span></el-descriptions-item>
         <el-descriptions-item :label="row.resource_type === 'dgc_batch_job' ? '实例执行状态' : '执行状态'"><span class="mono">{{ factText(row.execution_state) }}</span><div class="text-3 mono">{{ stateField }}</div></el-descriptions-item>
-        <el-descriptions-item v-if="row.resource_type === 'mrs_job' || row.execution_result !== null" label="执行结果"><span class="mono">{{ factText(row.execution_result) }}</span></el-descriptions-item>
         <el-descriptions-item label="最后观测时间">{{ fmtTime(row.updated_at, 'YYYY-MM-DD HH:mm:ss') }}<div class="text-3">{{ fromNow(row.updated_at) }}</div></el-descriptions-item>
         <el-descriptions-item label="状态变化观测时间">{{ fmtTime(row.status_since, 'YYYY-MM-DD HH:mm:ss') }}</el-descriptions-item>
         <el-descriptions-item label="巡检健康度">{{ row.health }}</el-descriptions-item>
@@ -91,7 +90,7 @@ const sourceFacts = computed(() => (sourceConfig.value?.fields ?? []).map(key =>
   key, label: DETAIL_LABELS[key] ?? key, value: props.row?.status_details[key],
 })))
 const stateField = computed(() => props.row ? {
-  dgc_realtime_job: 'job_status', dgc_batch_job: 'instance_status', mrs_job: 'job_state',
+  dgc_realtime_job: 'job_status', dgc_batch_job: 'instance_status', mrs_job: 'node_status',
 }[props.row.resource_type] : '')
 const nodes = computed(() => props.row ? jobNodes(props.row) : [])
 const metrics = computed<MetricEntry[]>(() => Object.entries(props.row?.metrics ?? {}).map(([key, value]) => ({ key, label: METRIC_LABELS[key] ?? key, value })))

@@ -50,7 +50,7 @@ export function cleanTenantIn(f: TenantIn): TenantIn {
 }
 
 /** 可覆盖地址的服务（与后端 hcs/endpoints.py 的服务编码一致） */
-export const ENDPOINT_SERVICES = ['ecs', 'evs', 'vpc', 'elb', 'cce', 'cce_k8s', 'rds', 'gaussdb', 'dcs', 'dms', 'mrs', 'dws', 'css', 'dataarts', 'ces']
+export const ENDPOINT_SERVICES = ['ecs', 'evs', 'vpc', 'elb', 'cce', 'cce_k8s', 'gaussdb', 'dcs', 'mrs', 'dws', 'dataarts', 'ces']
 /** 默认模板（与后端 core/config.py hcs_endpoints 一致），用作占位提示 */
 export const DEFAULT_ENDPOINTS: Record<string, string> = {
   dataarts: 'dayu-dlf.{region}.{domain}', mrs: 'mrs.{region}.{domain}', gaussdb: 'gaussdb-opengauss.{region}.{domain}',

@@ -267,7 +267,7 @@ async function openTask(row = task()) {
   return root
 }
 const saveTask = (root: TreeNode) => click(find(root, el => el.tag === 'Button' && text(el) === '保存'))
-const taskCodes = ['ecs_status', 'ecs_metrics', 'gaussdb_status', 'dcs_status', 'data_cleanup', 'rds_status', 'mrs_job_status', 'constructor', '__proto__']
+const taskCodes = ['ecs_status', 'ecs_metrics', 'gaussdb_status', 'dcs_status', 'data_cleanup', 'dws_status', 'mrs_job_status', 'constructor', '__proto__']
 
 describe('TaskPanel AOM 全面停用', () => {
   it.each(taskCodes)('%s 不显示映射编辑器，保存仅更新调度字段', async code => {

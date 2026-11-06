@@ -2,6 +2,7 @@
 from sqlalchemy import func, select
 
 from app.core.security import verify_password
+from app.demo.seed import seed_demo
 from app.models import (
     AlarmRule,
     AuditLog,
@@ -15,7 +16,6 @@ from app.models import (
     User,
 )
 from app.services.bootstrap import BUILTIN_TASKS, bootstrap
-from app.services.seed import seed_demo
 
 BOOT = "Boot-pass-001"        # 仅测试库
 

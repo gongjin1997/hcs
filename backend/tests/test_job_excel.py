@@ -21,8 +21,8 @@ def test_excel_export_is_a_real_workbook_and_matches_panel(mem_db, report_api, p
         metrics={"nodes": 2, "bad_nodes": 1})
     resource(mem_db, "dgc_batch_job", "success", attrs={"instance_id": "000123", "plan_time": 1792886400000,
         "start_time": 1792886460000, "end_time": 1792886520000}, metrics={"run_minutes": 1})
-    resource(mem_db, "mrs_job", "RUNNING", attrs={"job_type": "Flink", "job_state": "RUNNING",
-        "job_result": "UNDEFINED", "cluster": "MRS 1", "queue": "default"}, metrics={"elapsed_min": 0})
+    resource(mem_db, "mrs_job", "running", attrs={"node_type": "MRSFlinkJob", "node_status": "running",
+        "job_name": "实时同步", "node_name": "flink_sink"}, metrics={"run_minutes": 0})
     response = client.get(f"/api/v1/job-reports/{panel}/export")
     assert response.status_code == 200, response.text
     assert response.headers["content-type"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -34,7 +34,7 @@ def test_excel_export_is_a_real_workbook_and_matches_panel(mem_db, report_api, p
     ws = wb["作业明细"]
     assert ws.max_row == expected["total"] + 1
     assert ws.freeze_panes == "A2"
-    assert ws.auto_filter.ref == f"A1:AN{ws.max_row}"
+    assert ws.auto_filter.ref == f"A1:AK{ws.max_row}"
     headers = [cell.value for cell in ws[1]]
     values = [dict(zip(headers, row, strict=True)) for row in ws.iter_rows(min_row=2, values_only=True)]
     assert {row["资源主键"] for row in values} == {row["id"] for row in expected["items"]}
@@ -45,9 +45,9 @@ def test_excel_export_is_a_real_workbook_and_matches_panel(mem_db, report_api, p
             assert isinstance(row["开始时间"], datetime)
             assert row["运行时长（分钟）"] == 1
         if row["作业类别"] == "MRS 作业":
-            assert row["执行状态"] == "RUNNING" and row["执行结果"] == "UNDEFINED"
-            assert row["MRS 时长（分钟）"] == 0
-            assert row["运行时长（分钟）"] is None
+            assert row["执行状态"] == "running" and row["节点类型"] == "MRSFlinkJob"
+            assert row["所属作业"] == "实时同步" and row["节点名称"] == "flink_sink"
+            assert row["运行时长（分钟）"] == 0
     summary = dict(wb["汇总"].iter_rows(min_row=2, values_only=True))
     assert summary["作业数"] == expected["total"]
 

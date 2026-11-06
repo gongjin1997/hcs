@@ -79,11 +79,8 @@ class Settings(BaseSettings):
         "evs": "evs.{region}.{domain}",
         "vpc": "vpc.{region}.{domain}",
         "elb": "vpc.{region}.{domain}",
-        "rds": "rds.{region}.{domain}",
-        "dms": "dms.{region}.{domain}",
         "cce": "cce.{region}.{domain}",
         "dws": "dws.{region}.{domain}",
-        "css": "css.{region}.{domain}",
         # CCE 集群 Kubernetes API（经 CCE API 网关访问，按集群 ID 区分）：容器事件采集用
         "cce_k8s": "{cluster_id}.cce.{region}.{domain}",
     }

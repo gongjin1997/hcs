@@ -92,8 +92,8 @@ def test_ops_lead_can_audit_but_not_manage_accounts(client):
 def test_tenant_scoped_users(client, admin, tenant_ids):
     a, b = tenant_ids["tenant-a"], tenant_ids["tenant-b"]
     lina, wangfang = demo_login(client, "lina"), demo_login(client, "wangfang")
-    assert client.get("/api/v1/resources/summary", headers=lina).json()["data"]["total"] == 138
-    assert client.get("/api/v1/resources/summary", headers=wangfang).json()["data"]["total"] == 58
+    assert client.get("/api/v1/resources/summary", headers=lina).json()["data"]["total"] == 129
+    assert client.get("/api/v1/resources/summary", headers=wangfang).json()["data"]["total"] == 54
     denied = client.get("/api/v1/resources/summary", headers={**lina, "X-Tenant-Id": str(b)})
     assert denied.status_code == 403 and denied.json()["code"] == 40301
     res = client.get("/api/v1/resources", params={"page_size": 100}, headers=lina).json()["data"]["items"]

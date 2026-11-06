@@ -18,9 +18,9 @@ from .errors import HcsError
 _STATIC = frozenset("api apis auth tokens batch-query-metric-data metrics query projects servers instances jobs status "
                     "clusters namespaces pods events proxy volumes vpcs subnets ports floatingips publicips bandwidths "
                     "security-groups security-group-rules loadbalancers listeners pools members flavors snapshots "
-                    "workspaces nodes groups queues executions job-executions job-execution hosts networks "
+                    "workspaces nodes groups queues executions hosts networks "
                     "availability-zones availability_zones os-availability-zone os-server-groups detail config "
-                    "databases configurations engines versions os-interface extensions dms dws css elb lbaas "
+                    "databases configurations engines versions os-interface extensions dws elb lbaas "
                     "endpoints services domains roles users regions tenants token project metric-data "
                     "cloudservers cluster_infos gaussdb".split())
 

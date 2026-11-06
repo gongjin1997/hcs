@@ -90,9 +90,9 @@ def demo_template() -> dict:
     """会话内只写一次演示数据（bootstrap → seed_demo）到模板库；会话库与 test_bootstrap 共用，省掉一次约 4 秒的写入。"""
     from sqlalchemy import func, select
 
+    from app.demo.seed import seed_demo
     from app.models import User
     from app.services.bootstrap import bootstrap
-    from app.services.seed import seed_demo
 
     path = f"{_TMP}/demo-template.db"
     tpl = engine if _PG_URL else create_engine(f"sqlite:///{path}")
@@ -110,7 +110,7 @@ def demo_template() -> dict:
 def demo_db(demo_template, mem_db):
     """模板库的独立内存副本（含演示数据），用例可随意读写。"""
     if _PG_URL:
-        from app.services.seed import seed_demo
+        from app.demo.seed import seed_demo
 
         seed_demo(mem_db)
         yield mem_db
@@ -167,7 +167,7 @@ def mem_db():
 
 def demo_login(client: TestClient, username: str, tenant_id: int | None = None) -> dict:
     """用演示账号登录（密码取自演示数据定义，测试代码里不再重复写明文）；tenant_id 对应顶部“租户切换”（X-Tenant-Id）。"""
-    from app.services.seed import DEMO_USERS
+    from app.demo.seed import DEMO_USERS
 
     password = next(u[1] for u in DEMO_USERS if u[0] == username)
     headers = login(client, username, password)
@@ -195,8 +195,8 @@ def mock_http():
 @pytest.fixture()
 def world(mem_db):
     """空库 + 两个演示租户（租户A：用户名密码 / 有 CES；租户B：AK/SK / 无 CES、有 Prometheus）。"""
+    from app.demo.seed import _tenants
     from app.services.bootstrap import bootstrap
-    from app.services.seed import _tenants
 
     bootstrap(mem_db)
     tenants = _tenants(mem_db)

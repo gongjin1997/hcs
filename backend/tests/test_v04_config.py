@@ -87,17 +87,17 @@ def test_collect_switch_api(client, admin, tenant_ids):
     h = login(client, "collect_a01", "Init-pass-01")
     seen = client.get("/api/v1/system/collect-switches", headers=h).json()["data"]
     assert [t["code"] for t in seen["tenants"]] == ["tenant-a"] and seen["global_editable"] is False
-    glob = {"items": [{"resource_type": "css_cluster", "tenant_id": 0, "enabled": False}]}
+    glob = {"items": [{"resource_type": "dws_cluster", "tenant_id": 0, "enabled": False}]}
     assert client.put("/api/v1/system/collect-switches", json=glob, headers=h).status_code == 403   # 不能改全局
-    other = {"items": [{"resource_type": "css_cluster", "tenant_id": b, "enabled": False}]}
+    other = {"items": [{"resource_type": "dws_cluster", "tenant_id": b, "enabled": False}]}
     assert client.put("/api/v1/system/collect-switches", json=other, headers=h).status_code == 403  # 不能改其他租户
-    mine = {"items": [{"resource_type": "css_cluster", "tenant_id": tenant_ids["tenant-a"], "enabled": False}]}
+    mine = {"items": [{"resource_type": "dws_cluster", "tenant_id": tenant_ids["tenant-a"], "enabled": False}]}
     r = client.put("/api/v1/system/collect-switches", json=mine, headers=h).json()["data"]
     assert r["changed"][0]["new"] is False and r["closed_alarms"] == 0
     mine["items"][0]["enabled"] = None                                   # 改回“跟随全局”
     assert client.put("/api/v1/system/collect-switches", json=mine, headers=h).json()["data"]["changed"]
     logs = client.get("/api/v1/system/audit-logs", params={"action": "collect.update"}, headers=admin).json()["data"]
-    assert logs["items"][0]["operator"] == "采集管理员A" and "租户A · CSS" in logs["items"][0]["detail"]["changes"][0]
+    assert logs["items"][0]["operator"] == "采集管理员A" and "租户A · DWS" in logs["items"][0]["detail"]["changes"][0]
 
 
 def test_collect_switch_skips_ledger_and_tasks(world, mem_db, mock_http):

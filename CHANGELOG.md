@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+### 2026-11-06：目录收拢、下线 RDS / Kafka / CSS、MRS 作业改走 DataArts
+
+- **单一目录**：资源类型、云服务、内置任务（周期、资源类型、负责的检查项、说明）统一定义在 `services/catalog.py`（`TASK_SPECS`）。采集开关、任务初始化、巡检证据、资源指南、任务说明、`ledger_sync` / `data_cleanup` 代码均由它派生；采集器注册表和台账抓取函数在导入时校验与目录一致，漂移直接启动失败。新增 `tests/test_catalog_consistency.py` 守护。
+- **下线 RDS / Kafka(DMS) / CSS**：删除台账抓取、探测项、Mock、端点模板、QPS 配置、资源指南和前端字典，台账由 14 类变为 11 类。迁移 `0018` 关闭这三类及旧口径 MRS 作业上的活动告警（留处理记录），删除其资源、变更记录、评估状态与采集开关；降级只还原规则，已删除的资源数据不可恢复，升级前请先备份（`deploy.sh update` 会自动备份）。
+- **MRS 作业改为 DataArts 口径**：上传的 MRS API 参考不包含 V2 作业接口，不再调用 `/v2/{project_id}/clusters/{cluster_id}/job-executions`。改为读取数据治理中心 API 的作业实例列表（§5.3.16）和实例详情（§5.3.17），取节点类型为 MRSSpark / MapReduce / MRSFlinkJob / MRSHetuEngine 的节点。资源 ID 为 `[工作空间/]作业名/节点名`，状态为节点状态 `waiting / running / success / fail / skip / pause / manual-stop`，时间为毫秒时间戳，无需再猜单位。
+- 已结束实例的详情不会再变化：含 MRS 节点的实例复用本地记录，不含 MRS 节点的作业记入 `sys_setting`（`mrs_job_scan:<租户>:<项目>`），下一轮不再查询。新参数 `window_hours`（默认 24，≤72）、`max_details`（默认 500）。
+- 规则：`R-MRS-JOB-001` 改为 `node_status == 'fail'`；`R-MRS-JOB-003`（YARN 排队）在 DataArts 接口中没有对应字段，迁移中停用（未被人工改过时）。两条旧规则修改前内容备份在 `sys_setting`（`rule-dataarts-mrs-0018:*`）。
+- 作业报表、Excel 与前端去掉 `job_state / job_result / elapsed_min / 集群 / 队列`，新增所属作业、节点名称、节点类型、重试次数、日志路径；引擎按节点类型识别（MRSFlinkJob 归入 Flink 面板）。
+- 前端 `JOB_TYPES`、`INSPECT_ONLY_TYPES` 收为 `utils/dict.ts` 一处导出；`docs/资源与指标指南.md` 重新生成。
+- 文档数量统一：内置规则 36 条（DGC 8、ECS 7、GaussDB 7、DCS 6、CCE 5、MRS 3）、采集任务 11 个、台账 11 类；新增 `docs/README.md` 文档索引。
+- 沙箱无法安装依赖，本次改动未运行 `make check` 和 pytest / vitest；仅通过 ruff 与离线脚本核对，合并前请在 CI 或本地完整跑一遍。
+
 ### 2026-11-06：CCE 管理面节点健康与原生只读能力
 
 - 新增独立租户 CCE 健康配置和快照任务，节点/节点池与容器事件分别采集；新任务、功能开关、ownerReferences 和原生 CPU/内存指标均默认关闭，不替换既有租户配置。

@@ -32,8 +32,9 @@ from app.models import (
 from app.models.base import utcnow
 
 from . import settings_service
+from .catalog import CLEANUP_TASK_CODE
 
-CLEANUP_TASK = "data_cleanup"
+CLEANUP_TASK = CLEANUP_TASK_CODE
 BATCH = 2000
 DCS_MEMORY_RETENTION_DAYS = 90
 ECS_METRIC_RETENTION_DAYS = 90

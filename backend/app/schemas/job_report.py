@@ -21,7 +21,6 @@ class JobReportRow(BaseModel):
     engine: str | None
     status_raw: str | None
     execution_state: str | None = Field(description="采集器保存的 job_state/job_status/instance_status；历史未保存时为空")
-    execution_result: str | None = Field(description="MRS 已保存的 job_result，与执行状态独立；不从健康度推断")
     display_status: str = Field(description="已知状态归一化；未知非空状态保留原文；缺失状态为 NO_DATA")
     status_label: str
     status_known: bool

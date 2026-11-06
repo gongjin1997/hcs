@@ -5,7 +5,7 @@ OpenAPI 与 kube-apiserver v1），用于本地联调、演示与自动化测试
 - 两个演示租户（tenants.py）：租户A 用户名密码换 Token（X-Auth-Token）；租户B AK/SK 签名（SDK-HMAC-SHA256），
   且局点没有云监控 CES（CES 接口返回 404 APIGW.0101），ECS 使用率由 /prom/tenant-b 模拟的 Prometheus 提供
 - 巡检用到的服务（DataArts / MRS / GaussDB / DCS / CES）挂在根路径；台账服务按路径前缀区分：
-  /ecs /evs /vpc /elb /rds /dms /cce /dws /css（与 app.hcs.factory.mock_endpoints 对应）
+  /ecs /evs /vpc /elb /cce /dws（与 app.hcs.factory.mock_endpoints 对应）
 - AOM 仅在开发 Mock 前缀 /aom 下提供：CUSTOM.HCS_INSPECTOR_TEST 是自定义演示指标，
   其确定性样本不是生产历史，也不表示 HCS 内置 SYS.DCS 到 AOM 的映射
 - CCE 集群 K8s API：/k8s/{cluster_id}/api/v1/...（pods / events / namespaces / Pod 代理 /metrics）
@@ -125,9 +125,9 @@ def _marker(rows: list, marker: str | None, limit: int) -> list:
 
 # ======================= IAM =======================
 def _catalog(t: dict, mock_base: str = "http://mock") -> list[dict]:
-    types = {"iam": "identity", "ecs": "compute", "evs": "volumev2", "vpc": "network", "elb": "elb", "rds": "rds",
-             "gaussdb": "gaussdb", "dcs": "dcs", "dms": "dms", "mrs": "mrs", "dataarts": "dataarts", "cce": "cce",
-             "dws": "dws", "css": "css", "ces": "metric", "aom": "aom"}
+    types = {"iam": "identity", "ecs": "compute", "evs": "volumev2", "vpc": "network", "elb": "elb",
+             "gaussdb": "gaussdb", "dcs": "dcs", "mrs": "mrs", "dataarts": "dataarts", "cce": "cce",
+             "dws": "dws", "ces": "metric", "aom": "aom"}
     return [{"id": f"svc-{s}", "name": s, "type": types.get(s, s),
              "endpoints": [{"id": f"ep-{s}-{REGION}", "interface": "public", "region": REGION, "region_id": REGION,
                             "url": f"{mock_base.rstrip('/')}/aom" if s == "aom"
@@ -491,17 +491,52 @@ def dataarts_jobs(ds: DS, jobType: str = "BATCH", offset: int = 0, limit: int = 
 def dataarts_instances(ds: DS, minPlanTime: int = 0, maxPlanTime: int | None = None,  # noqa: N803
                        offset: int = 0, limit: int = 100):
     now = _now_ms()
+    rows = [r for r in _batch_instances(ds) if minPlanTime <= r["planTime"] <= (maxPlanTime or now)]
+    return {"total": len(rows), "instances": _offset(rows, offset * limit, limit)}
+
+
+def _batch_instances(ds: ModuleType) -> list[dict]:
+    """批作业实例（含 instanceId）：列表与详情共用，保证两个接口口径一致。"""
+    now = _now_ms()
     rows = []
     for idx, (name, status, plan_ago, run_min) in enumerate(getattr(ds, "BATCH_JOBS", [])):
         plan = now - plan_ago * 60_000
-        if plan < minPlanTime or plan > (maxPlanTime or now):
-            continue
         start = plan + 30_000
         rows.append({"jobName": name, "instanceId": 880_000 + idx, "status": status, "planTime": plan,
                      "submitTime": plan, "startTime": start,
                      "endTime": None if run_min is None else start + run_min * 60_000,
                      "executeTime": None if run_min is None else run_min * 60_000, "instanceType": 0})
-    return {"total": len(rows), "instances": _offset(rows, offset * limit, limit)}
+    return rows
+
+
+def _node_status(instance_status: str, position: int, total: int) -> str:
+    """节点状态：失败实例的最后一个节点失败，运行中实例的最后一个节点运行中，其余已成功（DataArts 表 5-182）。"""
+    last = position == total - 1
+    if instance_status == "fail" and last:
+        return "fail"
+    if instance_status == "running" and last:
+        return "running"
+    return "success"
+
+
+@app.get("/v1/{project_id}/jobs/{name:path}/instances/{instance_id}")
+def dataarts_instance_detail(ds: DS, name: str, instance_id: int):
+    """上传 PDF §5.3.17：作业实例详情，nodes[] 含节点类型（MRSSpark / MapReduce / MRSFlinkJob 即 MRS 作业）。"""
+    inst = next((r for r in _batch_instances(ds) if r["jobName"] == name and r["instanceId"] == instance_id), None)
+    if inst is None:
+        raise err(404, f"job {name} instance {instance_id} not found", "DLF.0100")
+    spec = getattr(ds, "JOB_NODES", {}).get(name, [])
+    nodes = []
+    for pos, (node_name, node_type) in enumerate(spec):
+        status = _node_status(inst["status"], pos, len(spec))
+        start = inst["startTime"] + pos * 60_000
+        nodes.append({"nodeName": node_name, "type": node_type, "status": status, "planTime": inst["planTime"],
+                      "startTime": start, "endTime": None if status == "running" else start + 45_000,
+                      "retryTimes": 1 if status == "fail" else 0, "instanceId": instance_id,
+                      "logPath": f"obs://mock-logs/{name}/{instance_id}/{node_name}.log"})
+    return {**{k: inst[k] for k in ("jobName", "instanceId", "status", "planTime", "startTime", "endTime",
+                                    "executeTime", "instanceType")},
+            "forceSuccess": False, "ignoreSuccess": False, "total": len(nodes), "nodes": nodes}
 
 
 @app.get("/v1/{project_id}/jobs/{name:path}/status")
@@ -766,24 +801,13 @@ def mrs_clusters(ds: DS, pageSize: int = 10, currentPage: int = 1):  # noqa: N80
     return {"clusterTotal": len(rows), "clusters": _page(rows, currentPage, pageSize)}
 
 
-@app.get("/v2/{project_id}/clusters/{cluster_id}/job-executions", status_code=202)
-def mrs_jobs(ds: DS, cluster_id: str, offset: int = 1, limit: int = 100):
-    now = _now_ms()
-    name = next((c["clusterName"] for c in oa.mrs_clusters(ds) if c["clusterId"] == cluster_id), None)
-    jobs = getattr(ds, "MRS_JOBS", {}).get(name, []) if name else []
-    rows = [{"job_id": ds.rid("mrs-job", f"{name}/{j}"), "job_name": j, "job_state": st, "job_result": res,
-             "job_type": jt, "queue": "default", "submitted_time": now - ago * 60_000, "elapsed_time": el}
-            for j, jt, st, res, ago, el in jobs]
-    return JSONResponse(status_code=202, content={"total_record": len(rows), "job_list": rows})
-
-
 # ======================= 台账相关服务（按路径前缀区分） =======================
 def service(prefix: str) -> APIRouter:
     return APIRouter(prefix=prefix)
 
 
-ecs, evs, vpc, elb, rds = service("/ecs"), service("/evs"), service("/vpc"), service("/elb"), service("/rds")
-dms, cce, dws, css = service("/dms"), service("/cce"), service("/dws"), service("/css")
+ecs, evs, vpc, elb = service("/ecs"), service("/evs"), service("/vpc"), service("/elb")
+cce, dws = service("/cce"), service("/dws")
 
 
 @ecs.get("/v1/{project_id}/cloudservers/detail")
@@ -827,20 +851,6 @@ vpc.add_api_route("/v1/{project_id}/publicips", _marker_api("publicips", oa.publ
 elb.add_api_route("/v3/{project_id}/elb/loadbalancers", _marker_api("loadbalancers", oa.loadbalancers), methods=["GET"])
 
 
-@rds.get("/v3/{project_id}/instances")
-def rds_instances(ds: DS, offset: int = 0, limit: int = 100):
-    rows = oa.rds_instances(ds)
-    return {"instances": _offset(rows, offset, limit), "total_count": len(rows)}
-
-
-@dms.get("/v2/{project_id}/instances")
-def dms_instances(ds: DS, engine: str = Query(pattern="^kafka$"), offset: int = Query(0, ge=0),
-                  limit: int = Query(10, ge=1, le=50)):
-    rows = _offset(oa.kafka_instances(ds), offset, limit)
-    # 文档未承诺 instance_num 是全量总数；模拟页内数量，防止客户端靠它提前停页。
-    return {"instances": rows, "instance_num": len(rows)}
-
-
 @cce.get("/api/v3/projects/{project_id}/clusters")
 def cce_clusters(ds: DS):
     return {"kind": "Cluster", "apiVersion": "v3", "items": oa.cce_clusters(ds)}
@@ -857,13 +867,7 @@ def dws_clusters(ds: DS):
     return {"clusters": rows, "count": len(rows)}
 
 
-@css.get("/v1.0/{project_id}/clusters")
-def css_clusters(ds: DS, start: int = 1, limit: int = 10):
-    rows = oa.css_clusters(ds)
-    return {"clusters": _page(rows, start, limit), "totalSize": len(rows)}
-
-
-for r in (ecs, evs, vpc, elb, rds, dms, cce, dws, css):
+for r in (ecs, evs, vpc, elb, cce, dws):
     app.include_router(r)
 
 

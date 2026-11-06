@@ -27,18 +27,18 @@ def alarms(db):
     return db.scalars(select(AlarmEvent)).all()
 
 
-def test_mrs_new_execution_does_not_inherit_previous_executions_accepted_duration(mem_db):
+def test_mrs_new_instance_does_not_inherit_previous_instances_waiting_duration(mem_db):
     rule(mem_db, "REVIEW-MRS-DURATION", "mrs_job", "job_status",
-         "job_state == 'ACCEPTED' and status_duration_min > 15")
+         "node_status == 'waiting' and status_duration_min > 15")
     first = utcnow()
     ctx = context()
 
     def job(execution):
-        return Observation("mrs_job", "cluster/same-name", "same-name", "job_status",
-                           {"job_state": "ACCEPTED"}, status_raw="ACCEPTED", attrs={"job_id": execution})
+        return Observation("mrs_job", "ws/same-name/node", "same-name", "job_status",
+                           {"node_status": "waiting"}, status_raw="waiting", attrs={"instance_id": execution})
 
-    process_observations(mem_db, "mrs", [job("old-execution")], ctx, first)
-    process_observations(mem_db, "mrs", [job("new-execution")], ctx, first + timedelta(minutes=20))
+    process_observations(mem_db, "mrs", [job("old-instance")], ctx, first)
+    process_observations(mem_db, "mrs", [job("new-instance")], ctx, first + timedelta(minutes=20))
     assert alarms(mem_db) == []
 
 
@@ -68,10 +68,10 @@ def test_explicit_observation_duration_is_not_overwritten_by_parent_snapshot(mem
     assert len(alarms(mem_db)) == 1
 
 
-def test_mrs_unknown_state_is_not_positive_queue_recovery_evidence():
-    raw = next(item for item in load_yaml_rules() if item["id"] == "R-MRS-JOB-003")
+def test_mrs_unknown_state_is_not_positive_recovery_evidence():
+    raw = next(item for item in load_yaml_rules() if item["id"] == "R-MRS-JOB-001")
     current = Rule(**raw)
-    decision = evaluate_rule(current, {"job_state": "FUTURE_STATE", "status_duration_min": 20}, {}, "P3")
+    decision = evaluate_rule(current, {"node_status": "FUTURE_STATE"}, {}, "P2")
     assert decision.action != "RESOLVE"
 
 

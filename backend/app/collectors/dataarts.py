@@ -16,11 +16,12 @@ REALTIME_STATES = frozenset(("STARTING", "NORMAL", "EXCEPTION", "STOPPING", "STO
 BATCH_STATES = frozenset(("waiting", "running", "success", "fail", "running-exception", "pause", "manual-stop"))
 
 
-def _invalid(message: str) -> HcsError:
+def dataarts_error(message: str) -> HcsError:
+    """DataArts 响应不符合上传 PDF 契约（实时 / 批 / MRS 作业采集器共用）。"""
     return HcsError(0, "LOCAL.DATAARTS_RESPONSE", message)
 
 
-def _millis(value: object) -> int | None:
+def millis(value: object) -> int | None:
     if isinstance(value, bool) or value is None:
         return None
     if isinstance(value, str):
@@ -32,7 +33,7 @@ def _millis(value: object) -> int | None:
     return None
 
 
-def _text(value: object) -> str | None:
+def text_or_none(value: object) -> str | None:
     return value if isinstance(value, str) and value.strip() else None
 
 
@@ -44,7 +45,7 @@ def _display_time(value: object) -> str | int | float | None:
     return None
 
 
-def _pages(fetch: Callable[[dict], dict], key: str) -> list[dict]:
+def paged_list(fetch: Callable[[dict], dict], key: str) -> list[dict]:
     # EDOC1100450764 的两个列表都把 offset 定义为从 0 开始的页号，而非记录数。
     expected_total: int | None = None
 
@@ -52,10 +53,10 @@ def _pages(fetch: Callable[[dict], dict], key: str) -> list[dict]:
         nonlocal expected_total
         body = fetch(params)
         if not isinstance(body, dict) or body.get("total") is None or body.get("error_code"):
-            raise _invalid("DataArts 列表缺少必需的 total，未使用不完整清单")
+            raise dataarts_error("DataArts 列表缺少必需的 total，未使用不完整清单")
         total = response_total(body, "total", required=True)
         if expected_total is not None and total != expected_total:
-            raise _invalid("DataArts 分页 total 发生变化，未使用不完整清单或计算基线")
+            raise dataarts_error("DataArts 分页 total 发生变化，未使用不完整清单或计算基线")
         expected_total = total
         return body
     return list(page_all(complete, key, mode="page", start=0, limit=100))
@@ -63,26 +64,26 @@ def _pages(fetch: Callable[[dict], dict], key: str) -> list[dict]:
 
 def _nodes(state: dict, name: str) -> list[dict] | None:
     if not isinstance(state, dict) or state.get("error_code"):
-        raise _invalid("DataArts 未返回有效作业状态对象")
+        raise dataarts_error("DataArts 未返回有效作业状态对象")
     if state.get("name") is not None and state["name"] != name:
-        raise _invalid("DataArts 状态响应的作业名与请求不一致")
+        raise dataarts_error("DataArts 状态响应的作业名与请求不一致")
     if state.get("status") is not None and not isinstance(state["status"], str):
-        raise _invalid("DataArts 作业状态字段格式不正确")
+        raise dataarts_error("DataArts 作业状态字段格式不正确")
     nodes = state.get("nodes")
     if nodes is None:
         return None  # 官方为可选字段；缺失不等于零节点、零异常。
     if not isinstance(nodes, list) or any(not isinstance(n, dict) or not isinstance(n.get("name"), str)
                                          or not n["name"] for n in nodes):
-        raise _invalid("DataArts 节点列表或节点名称格式不正确")
+        raise dataarts_error("DataArts 节点列表或节点名称格式不正确")
     if len({n["name"] for n in nodes}) != len(nodes):
-        raise _invalid("DataArts 状态响应包含重复节点名")
+        raise dataarts_error("DataArts 状态响应包含重复节点名")
     if any(n.get("status") is not None and not isinstance(n["status"], str) for n in nodes):
-        raise _invalid("DataArts 节点状态字段格式不正确")
+        raise dataarts_error("DataArts 节点状态字段格式不正确")
     return nodes
 
 
 def _run_minutes(instance: dict, now_ms: int) -> float | None:
-    start, end = _millis(instance.get("startTime")), _millis(instance.get("endTime"))
+    start, end = millis(instance.get("startTime")), millis(instance.get("endTime"))
     if start is None or start == 0:
         return None
     if end == 0 or instance.get("endTime") is None:
@@ -96,8 +97,8 @@ def _successful_durations(instances: list[dict]) -> dict[str, list[float]]:
     for instance in instances:
         if instance.get("status") != "success":
             continue
-        start, end = _millis(instance.get("startTime")), _millis(instance.get("endTime"))
-        identity = _millis(instance.get("instanceId"))
+        start, end = millis(instance.get("startTime")), millis(instance.get("endTime"))
+        identity = millis(instance.get("instanceId"))
         if start is None or start <= 0 or end is None or end < start or identity is None:
             continue
         samples.setdefault(instance["jobName"], {})[identity] = (end - start) / 60000
@@ -118,12 +119,12 @@ class DataArtsRealtimeCollector:
                 return ctx.client.get("dataarts", "/v1/{project_id}/jobs", params={**p, "jobType": "REAL_TIME"}, headers=h)
 
             try:
-                jobs = _pages(fetch_jobs, "jobs")
+                jobs = paged_list(fetch_jobs, "jobs")
                 if any(not isinstance(job.get("name"), str) or not job["name"]
                        or job.get("jobType") not in (None, "REAL_TIME") for job in jobs):
-                    raise _invalid("DataArts 实时作业清单包含无效名称或不匹配的 jobType")
+                    raise dataarts_error("DataArts 实时作业清单包含无效名称或不匹配的 jobType")
                 if len({job["name"] for job in jobs}) != len(jobs):
-                    raise _invalid("DataArts 实时作业清单包含重复作业，未使用不完整清单")
+                    raise dataarts_error("DataArts 实时作业清单包含重复作业，未使用不完整清单")
             except HcsError as e:
                 ctx.errors.append(f"workspace={ws}: {e}")
                 log_collection_failure(log, ctx, e, cloud_service="dataarts", phase="job_list", workspace=ws)
@@ -168,9 +169,9 @@ class DataArtsRealtimeCollector:
                 attrs = {"workspace": ws, "owner": j.get("owner"),
                          "priority": priority if type(priority) is int and 0 <= priority <= 2 else None,
                          "path": j.get("path"), "job_type": j.get("jobType"), "job_status": status,
-                         "engine": _text(j.get("engine")) or _text(j.get("jobEngine")),
+                         "engine": text_or_none(j.get("engine")) or text_or_none(j.get("jobEngine")),
                          "start_time": _display_time(st.get("startTime")), "end_time": _display_time(st.get("endTime")),
-                         "nodes": [{"name": n["name"], "status": n.get("status"), "type": _text(n.get("type"))}
+                         "nodes": [{"name": n["name"], "status": n.get("status"), "type": text_or_none(n.get("type"))}
                                    for n in nodes] if nodes is not None else None}
                 obs.append(Observation("dgc_realtime_job", rid, name, "job_status",
                                        facts, status_raw=status or "UNKNOWN", attrs=attrs,
@@ -209,14 +210,14 @@ class DataArtsBatchCollector:
                 return ctx.client.get("dataarts", "/v1/{project_id}/jobs/instances/detail", params={**q, **p}, headers=h)
 
             try:
-                insts = _pages(fetch_instances, "instances")
+                insts = paged_list(fetch_instances, "instances")
                 if any(not isinstance(i.get("jobName"), str) or not i["jobName"]
-                       or _millis(i.get("planTime")) is None or not isinstance(i.get("status"), str)
-                       or _millis(i.get("instanceId")) is None
+                       or millis(i.get("planTime")) is None or not isinstance(i.get("status"), str)
+                       or millis(i.get("instanceId")) is None
                        for i in insts):
-                    raise _invalid("DataArts 实例清单的 jobName、planTime、instanceId 或 status 不完整")
-                if len({(i["jobName"], _millis(i["instanceId"])) for i in insts}) != len(insts):
-                    raise _invalid("DataArts 实例分页包含重复实例，未使用不完整清单")
+                    raise dataarts_error("DataArts 实例清单的 jobName、planTime、instanceId 或 status 不完整")
+                if len({(i["jobName"], millis(i["instanceId"])) for i in insts}) != len(insts):
+                    raise dataarts_error("DataArts 实例分页包含重复实例，未使用不完整清单")
             except HcsError as e:
                 ctx.errors.append(f"workspace={ws}: {e}")
                 log_collection_failure(log, ctx, e, cloud_service="dataarts", phase="batch_instances", workspace=ws)
@@ -224,8 +225,8 @@ class DataArtsBatchCollector:
             samples = _successful_durations(insts)
             latest: dict[str, dict] = {}
             def order(i: dict) -> tuple[int, int, int]:
-                return (_millis(i.get("planTime")) or 0, _millis(i.get("submitTime")) or 0,
-                        _millis(i.get("instanceId")) or 0)
+                return (millis(i.get("planTime")) or 0, millis(i.get("submitTime")) or 0,
+                        millis(i.get("instanceId")) or 0)
             for i in insts:
                 if i["jobName"] not in latest or order(i) > order(latest[i["jobName"]]):
                     latest[i["jobName"]] = i
@@ -245,13 +246,13 @@ class DataArtsBatchCollector:
                 obs.append(Observation("dgc_batch_job", f"{ws}/{name}" if ws else name, name, "instance_status",
                                        facts, status_raw=i.get("status"),
                                        attrs={"workspace": ws, "instance_id": i.get("instanceId"),
-                                              "job_type": _text(i.get("jobType")),
-                                              "engine": _text(i.get("engine")) or _text(i.get("jobEngine")),
+                                              "job_type": text_or_none(i.get("jobType")),
+                                              "engine": text_or_none(i.get("engine")) or text_or_none(i.get("jobEngine")),
                                               "instance_status": i.get("status"), "plan_time": i.get("planTime"),
                                               "instance_type": i.get("instanceType"),
-                                              "start_time": _millis(i.get("startTime")) or None,
-                                              "end_time": _millis(i.get("endTime")) or None,
-                                              "submitted_time": _millis(i.get("submitTime")),
+                                              "start_time": millis(i.get("startTime")) or None,
+                                              "end_time": millis(i.get("endTime")) or None,
+                                              "submitted_time": millis(i.get("submitTime")),
                                               "batch_baseline": {"window_start_ms": params["minPlanTime"],
                                                   "window_end_ms": params["maxPlanTime"], "sample_count": len(durations),
                                                   "min_samples": minimum, "method": "NEAREST_RANK_P90",

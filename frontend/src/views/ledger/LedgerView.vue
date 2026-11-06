@@ -208,7 +208,7 @@ import { useResourceRouteScope } from '@/composables/useResourceRouteScope'
 import { positiveIdParam } from '@/config/resource-navigation'
 import { useTable } from '@/composables/useTable'
 import type { ClassificationConfig, LedgerSummary, Resource, ResourceMeta } from '@/types'
-import { ENV_TYPE, HEALTH, IDLE_STATES, TASK_STATUS, rawStatusType, statusText, typeName, usageColor } from '@/utils/dict'
+import { ENV_TYPE, HEALTH, IDLE_STATES, INSPECT_ONLY_TYPES, TASK_STATUS, rawStatusType, statusText, typeName, usageColor } from '@/utils/dict'
 import { fmtTime, fromNow } from '@/utils/format'
 import ChangeTable from './ChangeTable.vue'
 import LedgerDictDialog from './LedgerDictDialog.vue'
@@ -223,7 +223,6 @@ const NO_IP = ['evs_volume', 'vpc', 'vpc_subnet']
 const ICONS: Record<string, unknown> = { compute: Cpu, storage: Files, network: Connection, database: Coin, bigdata: DataAnalysis, job: Operation, container: Box }
 /** 只巡检、不进台账的分类（不参与“全部台账资源”计数、导出） */
 const INSPECT_ONLY_CAT: Record<string, string> = { job: '作业（仅巡检）', container: '容器（仅巡检）' }
-const INSPECT_ONLY_TYPES = ['dgc_realtime_job', 'dgc_batch_job', 'mrs_job', 'cce_workload']
 /** ECS 运行状态筛选；“其他”= 变更中 / 未知等过渡状态 */
 const ECS_OTHER = ['BUILD', 'REBOOT', 'HARD_REBOOT', 'RESIZE', 'VERIFY_RESIZE', 'REVERT_RESIZE', 'MIGRATING', 'REBUILD', 'SHELVED', 'SHELVED_OFFLOADED', 'UNKNOWN']
 const ECS_STATUS_OPTIONS = [

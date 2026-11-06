@@ -14,7 +14,7 @@ from app.collectors.dcs import DcsCollector
 from app.collectors.ecs import EcsStatusCollector
 from app.collectors.ecs_metrics import EcsMetricsCollector
 from app.collectors.gaussdb import GaussDBCollector
-from app.collectors.mrs import MrsClusterCollector, MrsJobCollector
+from app.collectors.mrs import MrsClusterCollector
 from app.core.config import Settings, get_settings
 from app.hcs import auth, client_for
 from app.ledger.sync import sync_ledger
@@ -292,7 +292,7 @@ def test_system_metadata_excludes_aom_and_keeps_ces_disabled_by_default():
 
 
 
-@pytest.mark.parametrize("collector", [EcsStatusCollector, GaussDBCollector, MrsClusterCollector, MrsJobCollector])
+@pytest.mark.parametrize("collector", [EcsStatusCollector, GaussDBCollector, MrsClusterCollector])
 def test_default_collectors_query_native_services_only(collector):
     calls = []
 
@@ -308,8 +308,6 @@ def test_default_collectors_query_native_services_only(collector):
                     return {"used": "15", "total": "185"}
                 return {"total_count": 1, "instances": [{"id": "db-one", "name": "one", "status": "ACTIVE"}]}
             if service == "mrs":
-                if path.endswith("job-executions"):
-                    return {"total_record": 0, "job_list": []}
                 return {"clusterTotal": 1, "clusters": [{"clusterId": "cluster-one", "clusterName": "one",
                                                         "clusterState": "running"}]}
             pytest.fail(f"unexpected monitoring service: {service}")

@@ -5,7 +5,7 @@
 """
 
 from app.schemas.guide import GuideField, ResourceGuide
-from app.services.catalog import RESOURCE_TYPES
+from app.services.catalog import RESOURCE_TYPES, TYPE_TASKS
 
 
 def _field(
@@ -145,16 +145,24 @@ _METRICS: dict[str, list[GuideField]] = {
     ],
     "mrs_job": [
         _number(
-            "elapsed_min",
-            "最近执行耗时",
+            "run_minutes",
+            "节点运行时长",
             "分钟",
-            "仅在明确秒/毫秒契约时换算分钟；按作业名取窗口内 submitted_time 最新的一次执行。",
-            "collectors/mrs.py: V2 job-executions elapsed_time",
+            "节点 endTime − startTime（毫秒时间戳）；节点运行中以采集时刻为结束；取作业最新一次实例。",
+            "DataArts 作业实例详情 nodes[].startTime / endTime（§5.3.17）",
             "job_status",
             limitations=(
-                "窗口默认 6 小时；耗时缺失或单位未确认时为空，不把未知补零。",
-                "当前 V2 job-executions 属于待确认的局点兼容接口，不能宣称已核实所有 8.5.1 部署。",
+                "窗口默认 24 小时（接口上限 3 天）；起止时间缺失时为空，不把未知补零。",
+                "只覆盖 DataArts 编排的 MRS 节点，不含在 MRS 控制台直接提交的作业。",
             ),
+        ),
+        _number(
+            "retry_times",
+            "失败重试次数",
+            "次",
+            "节点 retryTimes 原值。",
+            "DataArts 作业实例详情 nodes[].retryTimes（§5.3.17）",
+            "job_status",
         ),
     ],
     "gaussdb_instance": [
@@ -370,17 +378,17 @@ _FACTS: dict[str, list[GuideField]] = {
     ],
     "mrs_job": [
         _state(
-            "job_state",
-            "执行阶段",
-            "最近执行的 job_state，如 ACCEPTED、RUNNING、FAILED；等待时长规则使用本地状态持续时间。",
-            "MRS V2 job-executions.job_state",
+            "node_status",
+            "节点状态",
+            "MRS 类节点状态：waiting、running、success、fail、skip、pause、manual-stop；未知值不判为正常。",
+            "DataArts 作业实例详情 nodes[].status（表 5-182）",
             "job_status",
         ),
         _state(
-            "job_result",
-            "执行结果",
-            "最近执行的 job_result，如 FAILED、SUCCEEDED；运行中可能无结果。",
-            "MRS V2 job-executions.job_result",
+            "job_status",
+            "所属实例状态",
+            "节点所在作业实例的状态：waiting、running、success、fail、running-exception、pause、manual-stop。",
+            "DataArts 作业实例列表 instances[].status（表 5-178）",
             "job_status",
         ),
     ],
@@ -624,11 +632,6 @@ _ATTRS: dict[str, list[GuideField]] = {
         _attribute("vip_port_id", "VIP 端口 ID", "原生 VIP 端口标识，用于关联 EIP。", "ledger.fetch_elb"),
         _attribute("provisioning_status", "配置状态", "配置状态原值；不能用 ACTIVE 代替缺失的运行状态。", "ledger.fetch_elb"),
     ],
-    "rds_instance": [
-        _attribute("engine", "引擎及版本", "datastore.type 与 datastore.version 拼接。", "ledger.fetch_rds"),
-        _attribute("ha", "部署方式", "type 的 Ha/Single/Replica 映射为主备/单机/只读，其他原样展示。", "ledger.fetch_rds"),
-        _attribute("flavor", "规格编码", "flavor_ref 原值。", "ledger.fetch_rds"),
-    ],
     "gaussdb_instance": [
         _attribute("vcpus", "规格 vCPU", "flavor_info.vcpu 的核数，不将节点数作为 CPU 使用率。",
                    "ledger.gaussdb_attrs", "核", "integer"),
@@ -699,19 +702,6 @@ _ATTRS: dict[str, list[GuideField]] = {
             "number",
         ),
     ],
-    "kafka_instance": [
-        _attribute("engine_version", "Kafka 版本", "engine_version 原值。", "ledger.fetch_kafka"),
-        _attribute("partition_num", "分区数", "partition_num 原值；不是消息积压量。", "ledger.fetch_kafka", "个", "number"),
-        _attribute(
-            "storage_usage",
-            "存储使用率",
-            "used_storage_space×100/storage_space，保留 1 位小数；缺失或分母为 0 时为空。",
-            "ledger.fetch_kafka",
-            "%",
-            "number",
-        ),
-        _attribute("specification", "规格描述", "specification 原文。", "ledger.fetch_kafka"),
-    ],
     "mrs_cluster": [
         _attribute("version", "集群版本", "clusterVersion 原值。", "MRS cluster_infos / ledger.fetch_mrs"),
         _attribute(
@@ -723,13 +713,6 @@ _ATTRS: dict[str, list[GuideField]] = {
         _attribute("version", "DWS 版本", "version 原值。", "ledger.fetch_dws"),
         _attribute("node_count", "配置节点数", "number_of_node 原值。", "ledger.fetch_dws", "个", "number"),
         _attribute("node_type", "节点规格", "node_type 原值；不在本地推算 CPU/内存/磁盘容量。", "ledger.fetch_dws"),
-    ],
-    "css_cluster": [
-        _attribute("version", "搜索引擎及版本", "datastore.type/version 拼接。", "ledger.fetch_css"),
-        _attribute("node_count", "返回实例数", "instances 数组长度，不是健康或主节点数。", "ledger.fetch_css", "个", "integer"),
-        _attribute(
-            "spec_code", "首节点规格", "instances 第一条 specCode，缺失显示 '-'；不证明所有节点同规格。", "ledger.fetch_css"
-        ),
     ],
     "dgc_realtime_job": [
         _attribute(key, label, meaning, "collectors/dataarts.py: 作业列表与 /status")
@@ -797,20 +780,20 @@ _ATTRS: dict[str, list[GuideField]] = {
         ),
     ],
     "mrs_job": [
-        _attribute(key, label, meaning, "collectors/mrs.py: cluster_infos + job-executions")
+        _attribute(key, label, meaning, "collectors/mrs.py: DataArts 作业实例列表 + 实例详情")
         for key, label, meaning in (
-            ("cluster", "集群名称", "来自 clusterName。"),
-            ("cluster_id", "集群 ID", "来自 clusterId。"),
-            ("job_type", "作业类型", "job_type 原值；未据此推断具体引擎能力。"),
-            ("queue", "提交队列", "queue 原值；未采集队列资源使用率。"),
-            ("job_id", "执行 ID", "job_id 原值，不同于平台 cluster/name 资源 ID。"),
-            ("job_state", "执行阶段", "job_state 原值。"),
-            ("job_result", "执行结果", "job_result 原值。"),
-            ("submitted_time", "提交时间原值", "submitted_time 用于最近执行排序；原样保存，需局点核验格式。"),
-            ("start_time", "开始时间原值", "start_time 原样保存，不在本地假设单位。"),
-            ("end_time", "结束时间原值", "end_time 原样保存，不在本地假设单位。"),
-            ("elapsed_time", "耗时原值", "上游原始 elapsed_time；不自动假定秒或毫秒。"),
-            ("elapsed_time_unit", "已声明耗时单位", "milliseconds/seconds，未声明时为空。"),
+            ("workspace", "工作空间", "DataArts 工作空间 ID，同名作业按工作空间区分。"),
+            ("job_name", "所属作业", "节点所在的 DataArts 作业名称。"),
+            ("node_name", "节点名称", "nodeName 原值；与作业名共同组成资源 ID。"),
+            ("node_type", "节点类型", "MRSSpark、MapReduce、MRSFlinkJob 或 MRSHetuEngine。"),
+            ("instance_id", "实例 ID", "作业实例 ID；变化即新一轮执行，状态持续时间重新计时。"),
+            ("job_status", "实例状态", "所属作业实例的 status 原值。"),
+            ("node_status", "节点状态", "节点 status 原值。"),
+            ("plan_time", "计划时间", "实例 planTime（毫秒时间戳）。"),
+            ("start_time", "开始时间", "节点 startTime（毫秒时间戳）。"),
+            ("end_time", "结束时间", "节点 endTime（毫秒时间戳），运行中为空。"),
+            ("retry_times", "失败重试次数", "节点 retryTimes 原值。"),
+            ("log_path", "日志路径", "节点 logPath 原值，只作展示，平台不读取日志内容。"),
         )
     ],
     "cce_workload": [
@@ -862,11 +845,6 @@ _CAPACITY: dict[str, list[GuideField]] = {
             "ledger.fetch_evs", "GB", "number"
         )
     ],
-    "rds_instance": [
-        _attribute("vcpus", "配置 vCPU", "cpu 转数值后取整数；缺失为空。", "ledger.fetch_rds", "vCPU", "integer"),
-        _attribute("memory_gb", "配置内存", "mem 转数值，当前适配按 GB，不另除 1024。", "ledger.fetch_rds", "GB", "number"),
-        _attribute("storage_gb", "配置存储", "volume.size 转数值；不是可用空间。", "ledger.fetch_rds", "GB", "number"),
-    ],
     "gaussdb_instance": [
         _attribute("vcpus", "规格 vCPU", "flavor_info.vcpu 核数，不乘节点数冒充集群总量。",
                    "ledger.fetch_gaussdb", "核", "integer"),
@@ -879,16 +857,6 @@ _CAPACITY: dict[str, list[GuideField]] = {
             "配置缓存容量",
             "capacity 转数值；与使用率的 max_memory 分母分开理解。",
             "ledger.fetch_dcs",
-            "GB",
-            "number",
-        )
-    ],
-    "kafka_instance": [
-        _attribute(
-            "storage_gb",
-            "配置存储",
-            "storage_space 转数值；used_storage_space 只用于计算 attrs.storage_usage。",
-            "ledger.fetch_kafka",
             "GB",
             "number",
         )
@@ -986,18 +954,6 @@ _CONTENT: dict[str, tuple[str, list[str], list[str], list[str]]] = {
         ],
         ["没有后端逐个健康状态、请求 QPS、HTTP 错误率或时延采集；member_count 缺失时旧实现回退 0。"],
     ),
-    "rds_instance": (
-        "RDS 引擎、部署方式与配置 CPU/内存/存储台账。",
-        [
-            "核对引擎版本、主备/只读形态及状态；容量为配置值，不表示剩余容量。",
-            "数据库变慢需从上游补充慢 SQL、锁、连接与 I/O证据，当前 RDS 不走 GaussDB 采集器。",
-        ],
-        [
-            "升级或规格变更前核对兼容性、备份可恢复性和维护窗口。",
-            "容量趋势需要额外监控数据支撑，不能把台账配置内存当内存使用率。",
-        ],
-        ["当前只有台账同步，没有 RDS 专属 CPU/连接/磁盘使用率 facts 或巡检 target。"],
-    ),
     "gaussdb_instance": (
         "原生实例状态、磁盘使用量、慢 SQL、实时会话及原生巡检报告。",
         [
@@ -1023,23 +979,11 @@ _CONTENT: dict[str, tuple[str, list[str], list[str], list[str]]] = {
         ["memory_usage 的分母为 max_memory，不是配置 capacity；实例接口内存无需 CES。",
          "新鲜度按本地收到响应的时间计算，不能证明源端采样延迟；旧快照和过期值不作当前统计。", _STALE],
     ),
-    "kafka_instance": (
-        "Kafka 版本、分区数、配置存储与 API 返回的存储使用率。",
-        [
-            "存储高先在上游核对保留策略、分区分布和实际日志增长；storage_usage 是台账属性而非持续采样指标。",
-            "消息延迟要另外看消费位点、消费组和 Broker 健康，当前分区数不能表示积压程度。",
-        ],
-        [
-            "依据业务留存和峰值吞吐规划容量，变更保留策略前确认数据重放要求。",
-            "当前 fetcher 只读取一次实例列表；实例量大时核对局点分页与清单完整性。",
-        ],
-        ["没有 consumer lag、生产/消费 QPS、Broker I/O 或独立规则检查项。"],
-    ),
     "mrs_cluster": (
         "MRS 集群状态、版本、配置节点数和组件清单。",
         [
             "状态异常/冻结时先核对集群操作与上游控制台，再看节点与组件服务详情。",
-            "作业失败或排队转到 mrs_job；组件名称出现不表示 HDFS/YARN 等服务健康。",
+            "作业失败转到 mrs_job；组件名称出现不表示 HDFS/YARN 等服务健康。",
         ],
         [
             "维护、扩缩容和升级前核对组件依赖及作业窗口，避免把计划操作作为突发异常。",
@@ -1055,18 +999,6 @@ _CONTENT: dict[str, tuple[str, list[str], list[str], list[str]]] = {
         ],
         ["扩容前评估数据重分布、备份、业务低峰和回滚路径。", "容量治理结合真实存储趋势和查询负载，不只以节点数设告警。"],
         ["没有 DWS 磁盘使用率、连接数、查询耗时或独立巡检 target。"],
-    ),
-    "css_cluster": (
-        "CSS 搜索集群版本、实例数量和首节点规格清单。",
-        [
-            "先核对状态映射与实例清单，100/200/303 分别映射 CREATING/AVAILABLE/UNAVAILABLE，其他状态原样保留。",
-            "搜索或写入异常时在上游查分片、索引、JVM 与节点磁盘水位；AVAILABLE 不表示所有索引健康。",
-        ],
-        [
-            "索引生命周期和分片规划结合实际数据量；清理前确认备份与业务留存要求。",
-            "变更节点前核对规格差异，当前 spec_code 只展示首节点。",
-        ],
-        ["没有集群 green/yellow/red、未分配分片、JVM 堆或查询 QPS 采集。"],
     ),
     "dgc_realtime_job": (
         "DataArts 实时作业与逐节点状态，按工作空间和作业名区分。",
@@ -1093,16 +1025,18 @@ _CONTENT: dict[str, tuple[str, list[str], list[str], list[str]]] = {
         ["仅取窗口内最新计划实例，不是完整执行历史或成功率；当前未计算/保存历史 P90。", _STALE],
     ),
     "mrs_job": (
-        "MRS 兼容作业适配：每集群/作业名最近一次执行的阶段、结果与已确认单位的耗时；851 作业契约仍待确认。",
+        "DataArts 作业实例中的 MRS 类节点（MRSSpark / MapReduce / MRSFlinkJob / MRSHetuEngine）："
+        "每个作业最近一次实例里各节点的状态与运行时长。",
         [
-            "按 cluster_id、作业名和执行 job_id 定位；FAILED 需同时看 job_state/job_result 和引擎日志。",
-            "ACCEPTED 停留时查队列配额、可用资源和提交参数，当前未采集队列容量指标。",
+            "按工作空间、作业名、节点名和实例 ID 定位；fail 先看节点 logPath 指向的日志，"
+            "再到 MRS Manager / YARN 查看 application。",
+            "节点长时间 waiting 通常是上游节点未完成或 MRS 队列资源不足，当前未采集队列容量指标。",
         ],
         [
-            "核对局点分页 offset 语义以及 elapsed_time 单位，再按 window_hours 设合理查询窗口。",
-            "等待时间是本地状态持续时长，首次看到 ACCEPTED 不代表刚提交；涉及任务重试要对照原执行 ID。",
+            "window_hours 默认 24，接口限制查询范围不超过 3 天；作业很多时用 max_details 控制每轮详情查询数。",
+            "实例进入 success / fail / manual-stop 后详情不再变化，平台复用本地记录，只对未终态实例重复查询。",
         ],
-        ["默认只看最近 6 小时并按作业名取最新；缺失或单位未确认的 elapsed_time 保留为空，不证明耗时正常。", _STALE],
+        ["只覆盖 DataArts 编排的 MRS 节点；MRS 控制台直接提交的作业不可见。", _STALE],
     ),
     "cce_workload": (
         "按工作负载汇总 Pod 快照、重启/OOM、CrashLoop、驱逐和可选背压事件。",
@@ -1124,17 +1058,7 @@ _CONTENT: dict[str, tuple[str, list[str], list[str], list[str]]] = {
     ),
 }
 
-_TASKS = {
-    "ecs_server": ["ecs_status", "ecs_metrics", "ecs_quota"],
-    "dgc_realtime_job": ["dgc_realtime_status"],
-    "dgc_batch_job": ["dgc_batch_instance"],
-    "mrs_cluster": ["mrs_cluster_status"],
-    "mrs_job": ["mrs_job_status"],
-    "gaussdb_instance": ["gaussdb_status"],
-    "dcs_instance": ["dcs_status"],
-    "cce_workload": ["cce_pod_events"],
-    "cce_cluster": ["cce_cluster_health"],
-}
+_TASKS = TYPE_TASKS   # 资源类型 → 采集任务，由 catalog.TASK_SPECS 派生，不在此重复维护
 
 
 def _common_facts() -> list[GuideField]:

@@ -7,8 +7,8 @@
 
 运维组内部使用的华为云 Stack（HCS 8.5.1）**只读**运维平台，v0.4.0，多租户：
 
-- **巡检告警**：定时采集 DataArts / MRS / GaussDB / DCS / ECS / CCE 容器事件 → 35 条内置规则 → 告警去重 / 升级 / 恢复 → 邮件通知（认领 / 升级）、维护窗口与静默
-- **资源台账**：每小时按「租户 × 项目」同步 14 类资源，变更留痕，字典约束 + Excel 导入导出
+- **巡检告警**：定时采集 DataArts / MRS（集群 + 经 DataArts 实例节点的作业）/ GaussDB / DCS / ECS / CCE 容器事件 → 36 条内置规则 → 告警去重 / 升级 / 恢复 → 邮件通知（认领 / 升级）、维护窗口与静默
+- **资源台账**：每小时按「租户 × 项目」同步 11 类资源，变更留痕，字典约束 + Excel 导入导出
 - **报表中心**：日 / 周 / 月 / 台账报表，定时发邮件
 
 进程（同一后端镜像）：`api`（uvicorn）· `scheduler`（巡检 / 台账 / 报表 / 清理，APScheduler + Redis 锁）· `notifier`（Outbox → SMTP）· `migrate`（alembic + bootstrap）。
@@ -30,6 +30,7 @@
 | 对接真实 HCS、`make probe`、字段映射 | `docs/联调手册.md` |
 | 路线图与待办 B01–B28 | `docs/后期开发方案.md` |
 | 接口与权限点清单（**生成物**，用 `make apidoc` 更新，不要手改） | `docs/接口清单.md` |
+| 资源 / 指标 / 事实说明（**生成物**，用 `make guides` 更新，不要手改） | `docs/资源与指标指南.md` |
 
 ## 常用命令（仓库根目录）
 
@@ -74,4 +75,4 @@ make probe args="--mock-url http://127.0.0.1:9000 --only dataarts"   # HCS 只�
 - 先读任务卡 → 给出计划（改哪些文件、是否要迁移、怎么测）→ 再动手；小步提交
 - 业务口径（阈值、HCS 字段含义、报表统计口径）不确定时停下来问，不要猜；字段映射以 `make probe` 实测为准
 - 不要 `git push`、不要打 tag、不要改 `deploy/.env`；发版流程见 `/release` 与 `docs/开发文档.md` §7
-- 演示数据（`services/seed*.py`）只服务开发 / 演示环境，业务逻辑不得依赖它
+- 演示数据（`app/demo/`）只服务开发 / 演示环境，业务逻辑不得依赖它

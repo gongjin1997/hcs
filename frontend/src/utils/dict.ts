@@ -25,13 +25,13 @@ export const HEALTH: Record<string, { label: string; color: string }> = {
 }
 export const SERVICES: Record<string, string> = {
   dataarts: 'DataArts Studio', mrs: 'MRS', gaussdb: 'GaussDB', dcs: 'DCS', ecs: 'ECS', evs: 'EVS', vpc: 'VPC', elb: 'ELB',
-  rds: 'RDS', dms: 'DMS Kafka', cce: 'CCE', dws: 'DWS', css: 'CSS', aom: 'AOM（已停用）', ces: 'CES（旧配置）', ledger: '全部服务', platform: '巡检平台',
+  cce: 'CCE', dws: 'DWS', aom: 'AOM（已停用）', ces: 'CES（旧配置）', ledger: '全部服务', platform: '巡检平台',
 }
 /** 资源类型名称（与后端 services/catalog.py RESOURCE_TYPES 一致；台账页以 /resources/types 接口为准） */
 export const RESOURCE_TYPES: Record<string, string> = {
   ecs_server: '云服务器 ECS', cce_cluster: 'CCE 集群', evs_volume: '云硬盘 EVS', vpc: '虚拟私有云 VPC', vpc_subnet: '子网',
-  eip: '弹性公网 IP', elb: '负载均衡 ELB', rds_instance: '云数据库 RDS', gaussdb_instance: 'GaussDB 实例', dcs_instance: 'DCS 缓存实例',
-  kafka_instance: 'Kafka 实例', mrs_cluster: 'MRS 集群', dws_cluster: 'DWS 数据仓库', css_cluster: 'CSS 云搜索',
+  eip: '弹性公网 IP', elb: '负载均衡 ELB', gaussdb_instance: 'GaussDB 实例', dcs_instance: 'DCS 缓存实例',
+  mrs_cluster: 'MRS 集群', dws_cluster: 'DWS 数据仓库',
   dgc_realtime_job: '实时作业', dgc_batch_job: '批作业', mrs_job: 'MRS 作业', cce_workload: '容器工作负载',
   // 平台自身告警（服务 = platform）
   platform_task: '巡检任务', platform_tenant: '租户接入', platform_notify: '通知投递', platform_worker: '后台进程',
@@ -112,7 +112,7 @@ export const SAMPLE_FACTS: Record<string, Record<string, unknown>> = {
   dgc_realtime_job: { status: 'EXCEPTION', job_status: 'NORMAL', node_status: 'EXCEPTION', status_duration_min: 12, critical: true, expected_running: true },
   dgc_batch_job: { last_status: 'fail', run_minutes: 42, p90_minutes: 30, critical: false },
   mrs_cluster: { cluster_state: 'abnormal', status_duration_min: 3 },
-  mrs_job: { job_state: 'FAILED', job_result: 'FAILED', status_duration_min: 20, critical: false },
+  mrs_job: { node_status: 'fail', job_status: 'fail', run_minutes: 12, status_duration_min: 20, critical: false },
 }
 
 // 台账状态中文名（按资源类型覆盖；未列出的原样展示）
@@ -127,7 +127,10 @@ const STATUS_TEXT: Record<string, Record<string, string>> = {
   vpc_subnet: { ACTIVE: '正常' },
   gaussdb_instance: { 'STORAGE FULL': '存储满' },
 }
-const JOB_TYPES = ['dgc_realtime_job', 'dgc_batch_job', 'mrs_job']
+/** 作业类资源（只巡检，不进台账）；与后端 catalog 的 category=job 一致 */
+export const JOB_TYPES = ['dgc_realtime_job', 'dgc_batch_job', 'mrs_job']
+/** 只巡检、不进台账的资源类型（作业 + 容器工作负载） */
+export const INSPECT_ONLY_TYPES = [...JOB_TYPES, 'cce_workload']
 export function statusText(type: string, raw?: string | null): string {
   if (!raw) return '-'
   if (JOB_TYPES.includes(type)) return raw

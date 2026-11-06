@@ -26,11 +26,11 @@ PANEL_TITLES = {
 }
 TYPE_NAMES = {"dgc_realtime_job": "DGC 实时作业", "dgc_batch_job": "DGC 批作业", "mrs_job": "MRS 作业"}
 HEADERS = [
-    "作业名称", "作业类别", "作业状态", "原始状态", "执行状态", "执行结果", "引擎", "作业类型",
-    "租户", "项目", "区域", "工作空间", "集群", "队列", "实例 ID", "执行 ID",
-    "计划时间", "提交时间", "开始时间", "结束时间", "运行时长（分钟）", "MRS 时长（分钟）",
+    "作业名称", "作业类别", "作业状态", "原始状态", "执行状态", "引擎", "作业类型",
+    "租户", "项目", "区域", "工作空间", "所属作业", "节点名称", "实例 ID", "节点类型",
+    "计划时间", "提交时间", "开始时间", "结束时间", "运行时长（分钟）",
     "节点数", "异常节点数", "活动告警数", "巡检健康度", "最后观测时间", "状态变化观测时间",
-    "资源 ID", "资源主键", "租户 ID", "项目 ID", "集群 ID", "生命周期",
+    "资源 ID", "资源主键", "租户 ID", "项目 ID", "生命周期",
     "历史 P90（分钟）", "基线有效样本数", "基线最低样本数", "基线窗口开始", "基线窗口结束", "基线状态",
 ]
 
@@ -85,14 +85,14 @@ def _row(row: JobReportRow) -> list[Any]:
     baseline = baseline if isinstance(baseline, dict) else {}
     return [
         row.name, TYPE_NAMES[row.resource_type], row.status_label, row.status_raw, row.execution_state,
-        row.execution_result, row.engine, row.job_type, row.tenant_name, row.project_name or row.project_id,
-        row.region, details.get("workspace"), details.get("cluster"), details.get("queue"),
-        str(details["instance_id"]) if details.get("instance_id") is not None else None, details.get("job_id"),
-        *(_time(details.get(key)) if row.resource_type == "dgc_batch_job" else details.get(key)
+        row.engine, row.job_type, row.tenant_name, row.project_name or row.project_id,
+        row.region, details.get("workspace"), details.get("job_name"), details.get("node_name"),
+        str(details["instance_id"]) if details.get("instance_id") is not None else None, details.get("node_type"),
+        *(_time(details.get(key)) if row.resource_type in ("dgc_batch_job", "mrs_job") else details.get(key)
           for key in ("plan_time", "submitted_time", "start_time", "end_time")),
-        metrics.get("run_minutes"), metrics.get("elapsed_min"), metrics.get("nodes"), metrics.get("bad_nodes"),
+        metrics.get("run_minutes"), metrics.get("nodes"), metrics.get("bad_nodes"),
         row.active_alarms, row.health, row.updated_at, row.status_since, row.resource_id, row.id,
-        row.tenant_id, row.project_id, details.get("cluster_id"), row.lifecycle,
+        row.tenant_id, row.project_id, row.lifecycle,
         metrics.get("p90_minutes"), baseline.get("sample_count"), baseline.get("min_samples"),
         _time(baseline.get("window_start_ms")), _time(baseline.get("window_end_ms")), baseline.get("status"),
     ]

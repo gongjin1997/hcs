@@ -163,7 +163,7 @@ const rules: FormRules = { name: [{ required: true, message: '请填写名称', 
 
 const serviceOptions = computed(() => Object.fromEntries(Object.entries(SERVICES).filter(([k]) => k !== 'ledger')))
 const typeOptions = computed(() => Object.entries(RESOURCE_TYPES).map(([code, name]) => ({ code, name }))
-  .filter((t) => !m.services.length || m.services.some((s) => t.code.startsWith(s === 'dataarts' ? 'dgc' : s === 'dms' ? 'kafka' : s === 'vpc' ? 'vpc' : s) || (s === 'vpc' && t.code === 'eip'))))
+  .filter((t) => !m.services.length || m.services.some((s) => t.code.startsWith(s === 'dataarts' ? 'dgc' : s) || (s === 'vpc' && t.code === 'eip'))))
 const ruleOptions = ref<Rule[]>([])
 const resourceOptions = ref<Pick<Resource, 'id' | 'name' | 'resource_type' | 'ip'>[]>([])
 const searchRequest = useLatestRequest()

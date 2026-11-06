@@ -14,8 +14,20 @@ describe('PDF 作业报表边界复核 20261102', () => {
     expect(PANEL_CONFIG.dgc.statuses).toContain('PAUSED')
   })
 
-  it.each(['mrs_job', 'dgc_realtime_job'] as const)('keeps unverified numeric dates raw for %s', resourceType => {
-    expect(detailText('start_time', 1792886400, resourceType)).toBe('1792886400')
+  it('keeps unverified numeric dates raw for realtime jobs, whose time fields are not documented as milliseconds', () => {
+    expect(detailText('start_time', 1792886400, 'dgc_realtime_job')).toBe('1792886400')
+  })
+
+  it('formats MRS node timestamps, which DataArts documents as milliseconds, like batch instances', () => {
+    expect(detailText('start_time', 1792886400000, 'mrs_job')).toMatch(/（本地）$/)
+    expect(detailText('retry_times', 1792886400000, 'mrs_job')).toBe('1792886400000')
+  })
+
+  it('offers the DataArts node states as MRS panel filters and labels', () => {
+    expect(PANEL_CONFIG.mrs.statuses).toEqual(expect.arrayContaining(['WAITING', 'RUNNING', 'SUCCEEDED', 'FAILED', 'SKIPPED']))
+    expect(PANEL_CONFIG.mrs.statuses).not.toContain('QUEUED')
+    expect(JOB_STATUSES.SKIPPED?.label).toBe('已跳过')
+    expect(SOURCE_FACTS.mrs_job.fields).toEqual(expect.arrayContaining(['job_name', 'node_name', 'node_type', 'instance_id']))
   })
 
   it('shows the local 24h P90 and its sample provenance', () => {
