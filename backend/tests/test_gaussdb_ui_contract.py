@@ -15,7 +15,9 @@ def test_local_instance_detail_and_projects_require_only_view_and_never_open_clo
     listing = g.client.get(path("")).json()["data"]["items"]
     detail = g.client.get(f"{BASE}/instances/111")
     assert detail.status_code == 200, detail.text
-    assert detail.json()["data"] == next(row for row in listing if row["id"] == 111)
+    listed = next(row for row in listing if row["id"] == 111)
+    assert listed["nodes"] is None and listed["component_items"] is None
+    assert detail.json()["data"] == {**listed, "nodes": [], "component_items": []}
     projects = g.client.get(f"{BASE}/projects")
     assert projects.status_code == 200, projects.text
     assert projects.json()["data"] == [

@@ -24,6 +24,7 @@ import { useUserStore } from '@/stores/user'
 import type { SmsGlobalConfig } from '@/types/sms'
 
 const props = withDefaults(defineProps<{ disabled?: boolean }>(), { disabled: false })
+const emit = defineEmits<{ saved: [] }>()
 const user = useUserStore()
 const editable = computed(() => !!user.user && user.user.tenant_ids == null && user.can('setting:manage'))
 const enabled = ref(false)
@@ -53,6 +54,7 @@ async function save() {
     const config = await saveSmsGlobal(enabled.value)
     saved.value = config
     enabled.value = config.enabled === true
+    emit('saved')
     ElMessage.success(config.enabled ? '短信总开关已开启' : '短信总开关已关闭')
   } catch {
     saved.value = null

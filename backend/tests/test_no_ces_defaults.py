@@ -306,6 +306,9 @@ def test_default_collectors_query_native_services_only(collector):
             if service == "gaussdb":
                 if path.endswith("/volume-usage"):
                     return {"used": "15", "total": "185"}
+                if path.endswith("/components"):
+                    return {"total_count": 1, "nodes": [{"id": "node-one", "components": [
+                        {"id": "dn-one", "type": "DN", "role": "master", "status": "Primary"}]}]}
                 return {"total_count": 1, "instances": [{"id": "db-one", "name": "one", "status": "ACTIVE"}]}
             if service == "mrs":
                 return {"clusterTotal": 1, "clusters": [{"clusterId": "cluster-one", "clusterName": "one",
@@ -319,6 +322,9 @@ def test_default_collectors_query_native_services_only(collector):
     assert ctx.errors == []
     assert all(row.check_item not in {"cpu", "memory"} for row in rows)
     assert all(row.check_item != "disk" or row.metrics["disk_usage"] == 8.11 for row in rows)
+    if collector is GaussDBCollector:
+        assert any(service == "gaussdb" and path.endswith("/components") for service, path in calls)
+        assert next(row for row in rows if row.check_item == "components").facts["down_components"] == 0
 
 
 @pytest.mark.parametrize("source", ["AUTO", "AOM", "CES", "PROMETHEUS", "NONE"])
@@ -332,6 +338,10 @@ def test_dcs_never_uses_ces_even_with_compatibility_enabled(source, metric_setti
             assert service == "dcs"
             if path == "/v2/{project_id}/instances/statistic":
                 return {"statistics": [{"instance_id": "dcs-one", "used_memory": 20, "max_memory": 100}]}
+            if path == "/v2/{project_id}/instances-logical-nodes":
+                return {"count": 1, "instances": [{"instance_id": "dcs-one", "nodes": [
+                    {"logical_node_id": "node-one", "node_type": "master", "node_role": "redis-server",
+                     "status": "Active", "node_ip": "192.0.2.1", "node_port": 6379}]}]}
             assert path == "/v2/{project_id}/instances"
             return {"instance_num": 1, "instances": [{"instance_id": "dcs-one", "name": "one", "status": "RUNNING",
                                                      "used_memory": 20, "max_memory": 100}]}
@@ -339,7 +349,8 @@ def test_dcs_never_uses_ces_even_with_compatibility_enabled(source, metric_setti
     ctx = context(tenant(source, endpoints={"aom": "https://aom.example.invalid"}))
     ctx.client = DcsClient()
     rows = DcsCollector().collect(ctx)
-    assert calls == [("dcs", "/v2/{project_id}/instances"), ("dcs", "/v2/{project_id}/instances/statistic")]
+    assert calls == [("dcs", "/v2/{project_id}/instances"), ("dcs", "/v2/{project_id}/instances/statistic"),
+                     ("dcs", "/v2/{project_id}/instances-logical-nodes")]
     assert ctx.errors == []
     assert next(row for row in rows if row.check_item == "memory").facts["memory_usage"] == 20
 

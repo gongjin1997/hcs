@@ -2,7 +2,7 @@
 from collections import defaultdict
 from datetime import datetime, timedelta
 from math import ceil
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -80,8 +80,9 @@ def topology_out(resource: Resource, now: datetime | None = None) -> DcsTopology
         threshold = 900
     observed = parse_observed_at(raw.get("observed_at"))
     age = ((now or utcnow()) - observed).total_seconds() if observed else None
-    freshness = ("NO_DATA" if age is None or age < -30 else
-                 "STALE" if raw["state"] == "STALE" or age > threshold else "FRESH")
+    freshness: Literal["FRESH", "STALE", "NO_DATA"] = (
+        "NO_DATA" if age is None or age < -30 else
+        "STALE" if raw["state"] == "STALE" or age > threshold else "FRESH")
     counts = {key: raw.get(key) if type(raw.get(key)) is int and raw[key] >= 0 else None for key in TOPOLOGY_COUNTS}
     warning = raw.get("warning") if isinstance(raw.get("warning"), str) else None
     return DcsTopology(state=raw["state"], observed_at=observed, freshness=freshness, warning=warning, **counts)
@@ -91,7 +92,7 @@ def nodes_out(resource: Resource) -> list[DcsNode]:
     nodes = (resource.attrs or {}).get("nodes")
     if not isinstance(nodes, list):
         return []
-    return [DcsNode(**{key: node.get(key) if isinstance(node.get(key), str) else None for key in NODE_FIELDS})
+    return [DcsNode.model_validate({key: node.get(key) if isinstance(node.get(key), str) else None for key in NODE_FIELDS})
             for node in nodes if isinstance(node, dict) and isinstance(node.get("name"), str) and node["name"]]
 
 

@@ -71,7 +71,7 @@
     <CollectionPanel v-if="collection" ref="collectionRef" :setting="collection" :disabled="loading || !!saving || confirmingReload" class="mt-16" @saved="load('collect')" />
     <!-- 升级短信：总开关 + 各租户独立网关（原“租户接入”卡片上的短信配置移到这里） -->
     <div class="sms-section mt-16" aria-label="升级短信">
-      <SmsGlobalPanel ref="smsRef" :disabled="loading || !!saving || confirmingReload" />
+      <SmsGlobalPanel ref="smsRef" :disabled="loading || !!saving || confirmingReload" @saved="smsTenantRef?.reload()" />
       <SmsTenantPanel v-if="canTenantSms" ref="smsTenantRef" :disabled="loading || !!saving || confirmingReload" class="mt-12" />
     </div>
 

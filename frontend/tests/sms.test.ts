@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { defineComponent, h } from 'vue'
+import { SYSTEM_PERMS } from '../src/router/perms'
 import type { Contact } from '../src/types'
 import type { SmsNotification, SmsTenantConfig, SmsTenantUpdate } from '../src/types/sms'
 import { useLatestRequest } from '../src/composables/useLatestRequest'
@@ -57,6 +59,39 @@ describe('短信接口仅配置与读取，不提供发送入口', () => {
 })
 
 describe('短信总开关默认关闭', () => {
+  it('保存成功后通知系统设置更新租户发送状态，保存失败不发出成功事件', async () => {
+    const service = api(), onSaved = vi.fn()
+    const view = mountPersonnel('system/SmsGlobalPanel.vue', { dependencies: dependencies(service), props: { onSaved } })
+    dispose.push(view.unmount)
+    await settlePersonnel()
+    await setField(view.root, '开启升级短信', true)
+    await clickButton(view.root, '保存短信总开关')
+    expect(onSaved).toHaveBeenCalledOnce()
+    service.saveSmsGlobal.mockRejectedValueOnce(new Error('fixture save failure'))
+    await setField(view.root, '开启升级短信', false)
+    await clickButton(view.root, '保存短信总开关')
+    expect(onSaved).toHaveBeenCalledOnce()
+  })
+
+  it('系统设置收到总开关保存事件后重新读取租户短信概况', async () => {
+    const reload = vi.fn(async () => undefined)
+    const Global = defineComponent({ emits: ['saved'], setup: (_props, { emit }) => () => h('button', { onClick: () => emit('saved') }, '保存总开关') })
+    const Tenants = defineComponent({ setup(_props, { expose }) { expose({ reload }); return () => h('summary', '租户短信概况') } })
+    const view = mountPersonnel('system/SettingsPanel.vue', { api: { getSettings: vi.fn(async () => ({})) }, dependencies: {
+      './SmsGlobalPanel.vue': { default: Global }, './SmsTenantPanel.vue': { default: Tenants },
+    } })
+    dispose.push(view.unmount)
+    await settlePersonnel()
+    await (findNode(view.root, 'button', item => textOf(item) === '保存总开关').props.onClick as () => void)()
+    await settlePersonnel()
+    expect(reload).toHaveBeenCalledOnce()
+  })
+
+  it('只有租户管理权限时仍可通过系统路由与菜单进入短信设置', () => {
+    const permissions = new Set(['tenant:manage'])
+    expect(SYSTEM_PERMS.some(permission => permissions.has(permission))).toBe(true)
+  })
+
   it('读取默认关闭，不自动保存或发送，仅手动保存才修改总开关', async () => {
     const service = api()
     const view = mountPersonnel('system/SmsGlobalPanel.vue', { dependencies: dependencies(service) })

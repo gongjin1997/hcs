@@ -41,6 +41,7 @@ from app.schemas.gaussdb import (
     GaussOverviewOut,
     GaussProjectOption,
     GaussSummaryOut,
+    StatusGroup,
 )
 from app.services import settings_service
 from app.services.gaussdb_reports import normalize_metric_series
@@ -147,7 +148,7 @@ COMPONENT_STATES = ("AVAILABLE", "NO_DATA", "STALE", "ERROR")
 DISK_STATES = ("AVAILABLE", "PARTIAL", "ERROR", "UNAVAILABLE")
 
 
-def status_group(health: str | None, status: str | None) -> str:
+def status_group(health: str | None, status: str | None) -> StatusGroup:
     """异常：有活动告警、故障 / 磁盘满 / 冻结 / 创建失败，或状态未识别；变更中；已停止；正常。"""
     if health in ALARM_HEALTH or status in ABNORMAL_STATES or status not in KNOWN_STATES:
         return "abnormal"
@@ -227,12 +228,12 @@ def _alarm_counts(db: Session, rows: Sequence[Resource]) -> dict[int, int]:
         return {}
     counts: dict[int, int] = {}
     for start in range(0, len(ids), 500):
-        counts.update(db.execute(
+        counts.update({resource_ref: count for resource_ref, count in db.execute(
             select(AlarmEvent.resource_ref, func.count()).join(
                 Resource, (Resource.id == AlarmEvent.resource_ref)
                 & AlarmEvent.tenant_id.is_not_distinct_from(Resource.tenant_id))
             .where(AlarmEvent.resource_ref.in_(ids[start:start + 500]), AlarmEvent.status.in_(ACTIVE_STATUSES))
-            .group_by(AlarmEvent.resource_ref)).all())
+            .group_by(AlarmEvent.resource_ref)) if resource_ref is not None})
     return counts
 
 

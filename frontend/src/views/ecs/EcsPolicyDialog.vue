@@ -120,6 +120,7 @@ function configureMapping() { prometheusJson.value = JSON.stringify({ queries: {
 
 <style scoped lang="scss">
 .ecs-policy { display: flex; flex-direction: column; gap: 14px; max-height: calc(85vh - 180px); max-height: calc(85dvh - 180px); overflow-y: auto; padding-right: 4px; }
+.ecs-policy > :deep(.el-alert) { flex-shrink: 0; }
 .policy-footer { justify-content: flex-end; }
 .table-heading, .select-footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; align-items: center; }
 .phase-grid { display: flex; flex-direction: column; gap: 12px; margin: 16px 0 24px; }

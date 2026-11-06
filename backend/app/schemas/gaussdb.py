@@ -85,8 +85,8 @@ class GaussSummaryOut(BaseModel):
     stopped: int = 0
     normal: int = 0
     scope_excluded: int = 0
-    disk_high: int = Field(0, description="最近一次采集磁盘使用率 ≥ 85% 的实例数（只计未过期的采集）")
-    components_down: int = Field(0, description="最近一次采集有组件宕机的实例数")
+    disk_high: int = Field(default=0, description="最近一次采集磁盘使用率 ≥ 85% 的实例数（只计未过期的采集）")
+    components_down: int = Field(default=0, description="最近一次采集有组件宕机的实例数")
     active_alarms: int = 0
     last_collected_at: datetime | None = None
 

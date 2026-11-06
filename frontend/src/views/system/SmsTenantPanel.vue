@@ -12,8 +12,8 @@
       <el-table-column label="网关与凭据" width="130"><template #default="{ row }"><el-tag size="small" :type="row.configured ? 'success' : 'info'" effect="plain">{{ row.configured ? '已配置' : '未配置' }}</el-tag></template></el-table-column>
       <el-table-column label="租户开关" width="100"><template #default="{ row }">{{ row.enabled ? '已开启' : '已关闭' }}</template></el-table-column>
       <el-table-column label="告警级别" width="120"><template #default="{ row }">{{ row.severities.join('、') || '—' }}</template></el-table-column>
-      <el-table-column label="当前是否发送" min-width="150"><template #default="{ row }"><el-tag size="small" :type="row.effective ? 'warning' : 'info'" effect="plain">{{ row.effective ? '会发送（可能计费）' : statusText(row) }}</el-tag></template></el-table-column>
-      <el-table-column label="操作" width="90" fixed="right"><template #default="{ row }"><el-button link type="primary" :disabled="disabled" @click="open(row)">配置</el-button></template></el-table-column>
+      <el-table-column label="当前是否发送" min-width="150"><template #default="{ row }"><el-tag size="small" :type="row.effective ? 'warning' : 'info'" effect="plain">{{ row.effective ? '会发送（可能计费）' : statusText(row as SmsTenantSummary) }}</el-tag></template></el-table-column>
+      <el-table-column label="操作" width="90" fixed="right"><template #default="{ row }"><el-button link type="primary" :disabled="disabled" @click="open(row as SmsTenantSummary)">配置</el-button></template></el-table-column>
     </el-table>
     <SmsTenantDialog v-model="dialog.visible" :tenant-id="dialog.tenantId" :tenant-name="dialog.tenantName" @saved="load" />
   </div>

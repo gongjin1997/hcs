@@ -14,6 +14,7 @@ let controller: AbortController | null = null
 
 async function load() {
   controller?.abort()
+  controller = null
   const target = props.instance
   detail.value = null
   error.value = ''
@@ -25,14 +26,16 @@ async function load() {
   loading.value = true
   try {
     const data = await getDcsInstance(target.id, { signal: current.signal, tenantId: target.tenant_id })
-    if (controller === current && data.id === target.id) detail.value = data
+    if (controller !== current || current.signal.aborted) return
+    if (data.id !== target.id || data.tenant_id !== target.tenant_id) throw new Error('实例范围不匹配')
+    detail.value = data
   } catch {
     if (controller === current && !current.signal.aborted) error.value = '节点信息加载失败，请重试'
   } finally {
     if (controller === current) loading.value = false
   }
 }
-watch(() => props.instance?.id ?? null, load, { immediate: true })
+watch(() => props.instance, load, { immediate: true })
 onScopeDispose(() => controller?.abort())
 
 const topology = computed(() => detail.value?.topology ?? props.instance?.topology ?? null)
@@ -62,7 +65,7 @@ const emptyText = computed(() => {
     <el-alert v-if="topology && topology.state === 'STALE'" :title="TOPOLOGY_STATE_TEXT.STALE" type="warning" :closable="false" show-icon />
     <el-alert v-else-if="topology?.unknown" :title="`${topology.unknown} 个节点状态未识别，节点告警暂不恢复`" type="warning" :closable="false" show-icon />
     <el-table v-loading="loading" :data="nodes" row-key="name" size="small" stripe :row-class-name="rowClass" max-height="420">
-      <el-table-column label="分片" min-width="120"><template #default="{ row }">{{ shardLabel(row) }}</template></el-table-column>
+      <el-table-column label="分片" min-width="120"><template #default="{ row }">{{ shardLabel(row as DcsNode) }}</template></el-table-column>
       <el-table-column label="角色" width="100"><template #default="{ row }">{{ NODE_ROLE_TEXT[row.role ?? ''] ?? row.role ?? '—' }}</template></el-table-column>
       <el-table-column label="节点（IP:端口）" min-width="180" prop="name" />
       <el-table-column label="状态" width="120"><template #default="{ row }">

@@ -43,14 +43,25 @@ def test_dashboard(client, admin, tenant_ids):
     assert [item["count"] for item in top] == sorted((item["count"] for item in top), reverse=True)
     assert sum(item["count"] for item in top) <= data["pods"]["restarts_24h"]
     # 顶部切换到租户A：只统计租户A 的数据
-    a = client.get("/api/v1/dashboard/summary", headers={**admin, "X-Tenant-Id": str(tenant_ids["tenant-a"])}).json()
-    assert a["data"]["ledger"]["total"] == 129 and a["data"]["kpis"]["active_alarms"] == 20   # 含 1 条平台告警
+    tenant_headers = {**admin, "X-Tenant-Id": str(tenant_ids["tenant-a"])}
+    a = client.get("/api/v1/dashboard/summary", headers=tenant_headers).json()
+    tenant_active = client.get("/api/v1/alarms", params={"status_group": "active", "page_size": 200},
+                               headers=tenant_headers).json()["data"]
+    assert a["data"]["ledger"]["total"] == 129
+    assert a["data"]["kpis"]["active_alarms"] == tenant_active["total"]
+    assert a["data"]["kpis"]["p1"] == sum(row["severity"] == "P1" for row in tenant_active["items"])
     assert [t["code"] for t in a["data"]["tenants"]] == ["tenant-a"]
 
 
 def test_alarm_list_and_ack(client, admin):
-    page = client.get("/api/v1/alarms", params={"severity": ["P1"]}, headers=admin).json()["data"]
-    assert page["total"] == 3 and all(a["severity"] == "P1" for a in page["items"])
+    active = client.get("/api/v1/alarms", params={"status_group": "active", "page_size": 200},
+                        headers=admin).json()["data"]
+    assert active["total"] == len(active["items"])
+    expected = {row["id"] for row in active["items"] if row["severity"] == "P1"}
+    page = client.get("/api/v1/alarms", params={"severity": ["P1"], "status_group": "active", "page_size": 200},
+                      headers=admin).json()["data"]
+    assert page["total"] == len(expected) > 0
+    assert {row["id"] for row in page["items"]} == expected and all(a["severity"] == "P1" for a in page["items"])
     firing = next(a for a in page["items"] if a["status"] == "FIRING")
     r = client.post(f"/api/v1/alarms/{firing['id']}/ack", json={"note": "处理中"}, headers=admin)
     assert r.json()["data"]["status"] == "ACKED"
