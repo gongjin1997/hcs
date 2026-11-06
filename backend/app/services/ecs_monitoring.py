@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.core.deps import Scope
 from app.core.response import BizError, ErrorCode, not_found
-from app.metrics import mode
+from app.metrics.ecs_diagnostics import INCOMPLETE, REASONS, diagnostic_message, unavailable_reason
 from app.metrics.ecs_readings import EcsReading as Reading
 from app.metrics.ecs_readings import ecs_source
 from app.models import EcsMetricSample, HcsAccount, HcsProject, InspectionTask, Resource
@@ -259,14 +259,17 @@ def instance_out(resource: Resource, tenant: HcsAccount | None, project: HcsProj
     if current and sampling and selected and query_status in ("ERROR", "PARTIAL"):
         status = query_status
     message = DIAGNOSTICS.get(status, DIAGNOSTICS["NO_DATA"])
-    if status == "SOURCE_UNCONFIGURED" and mode(tenant) == "AOM":
-        message = "AOM 已停用，当前使用率暂无数据"
+    if status == "SOURCE_UNCONFIGURED":
+        message = REASONS[unavailable_reason(tenant)]
+    elif current and sampling and selected and query_status.lower() in INCOMPLETE:
+        message = diagnostic_message(meta["diagnostic"])
     semantics = {key: point.timestamp_semantics for key, point in latest.items() if key in wanted}
-    if "evaluation" in semantics.values():
+    observed = any(point.observed_at is not None for point in latest.values())
+    if observed and "evaluation" in semantics.values():
         message += "；PromQL 时间为求值时间，非 exporter 物理采样时间；真实求值结果已保留"
-    if "unknown" in semantics.values():
+    if observed and "unknown" in semantics.values():
         message += "；部分指标时间语义未知，不能证明物理采样新鲜度"
-    if "source_sample" in semantics.values():
+    if observed and "source_sample" in semantics.values():
         message += "；源时间按上游/显式查询返回，表达式仍须现场核实"
     diagnostic = EcsDiagnostic(status=status, message=message, at=checked, timestamp_semantics=semantics)
     return EcsInstanceOut(id=resource.id, tenant_id=resource.tenant_id, tenant_name=tenant.name if tenant else "未分配租户",

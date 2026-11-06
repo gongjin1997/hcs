@@ -342,9 +342,62 @@ function successRate(t: InspectionTask): number | null {
 /** 各任务的附加统计（stats 字段，按任务类型解释） */
 function statsText(code: string, r: TaskRun): string {
   const s = r.stats ?? {}
-  if (code === 'ecs_status' && s.servers != null) {
-    const src = s.metrics_source === 'AOM' ? historicalMetricsSourceLabel(s.metrics_source) : METRICS_SOURCE[s.metrics_source]?.label ?? s.metrics_source ?? '-'
-    return `指标来源 ${src} · ${s.with_metrics ?? 0}/${s.servers} 台有指标`
+  if (['ecs_status', 'ecs_metrics'].includes(code) && (s.servers != null || s.metrics_source != null || s.metrics_diagnostic != null)) {
+    const source = typeof s.metrics_source === 'string' ? s.metrics_source : ''
+    const src = source === 'AOM' ? historicalMetricsSourceLabel(source)
+      : Object.prototype.hasOwnProperty.call(METRICS_SOURCE, source) ? METRICS_SOURCE[source].label : '未知来源'
+    const count = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : '—'
+    const parts = [`指标来源 ${src}`, `${count(s.with_metrics)}/${count(s.servers ?? r.resource_total)} 台有采样`]
+    if (code === 'ecs_metrics' || s.sample_points != null) parts.push(`采样点 ${count(s.sample_points)}`)
+    // 诊断只解释已知代码；未知字段可能含内网地址、查询或其他敏感内容。
+    const reasons = new Map(Object.entries({
+      prometheus_not_configured: '未配置 Prometheus 数据源',
+      source_not_configured: '未配置指标来源',
+      aom_disabled: 'AOM 已停用',
+      legacy_ces_disabled: 'CES 已关闭',
+      metrics_source_disabled: '未启用外部指标来源',
+      no_unambiguous_ip: '无可唯一匹配的 IP',
+      no_matching_series: '未匹配序列',
+      stale_samples: '只有过期样本',
+      metric_query_missing: '缺少指标查询配置',
+      invalid_prometheus_source: 'Prometheus 数据源配置无效',
+      invalid_prometheus_mapping: 'Prometheus 指标映射无效',
+      unverified_query_unit: '指标查询单位未确认',
+      invalid_timestamp_query: '采样时间查询配置无效',
+      invalid_query_window: '指标查询时间范围无效',
+      scope_mismatch: '采集范围不匹配',
+      legacy_metric_unsupported: '旧来源不支持该指标',
+      query_failed: '指标查询失败',
+      incomplete_fresh_coverage: '新鲜样本覆盖不完整',
+      no_selected_resources: '无选中资源',
+      no_source: '未配置指标来源',
+      mapping_missing: '缺少指标映射',
+      no_series: '无匹配时序',
+      no_data: '无有效采样',
+      partial: '指标采集不完整',
+      error: '指标采集失败',
+    }))
+    const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
+    const diagnostic: unknown = s.metrics_diagnostic
+    if (record(diagnostic)) {
+      const reasonText = (entry: Record<string, unknown>) => {
+        if (typeof entry.reason === 'string' && entry.reason) return reasons.get(entry.reason) ?? '原因未知'
+        if (entry.status === 'ready') return ''
+        return typeof entry.status === 'string' ? reasons.get(entry.status) ?? '原因未知' : '原因未知'
+      }
+      const details: string[] = []
+      const metrics = diagnostic.metrics
+      if (record(metrics)) {
+        for (const [key, label] of Object.entries({ cpu_util: 'CPU 使用率', mem_util: '内存使用率', disk_util: '磁盘使用率', boot_time: '开机时间' })) {
+          if (!Object.prototype.hasOwnProperty.call(metrics, key) || !record(metrics[key])) continue
+          const reason = reasonText(metrics[key])
+          if (reason) details.push(`${label}：${reason}`)
+        }
+      }
+      if (details.length) parts.push(details.join('；'))
+      else if (diagnostic.status && diagnostic.status !== 'ready') parts.push(reasonText(diagnostic))
+    }
+    return parts.join(' · ')
   }
   if (code === 'cce_pod_events' && s.events_created != null) return `新增事件 ${s.events_created} · 执行探针 ${s.probes ?? 0}`
   if (code === 'ledger_sync') {

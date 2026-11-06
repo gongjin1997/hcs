@@ -469,7 +469,7 @@ def test_ecs_aom_stays_disabled_and_gaussdb_keeps_independent_native_source(
         inventory = sync_ledger(mem_db, client=client, target=target, types=["ecs_server"], trigger="MANUAL")
         assert inventory.status == "SUCCESS", inventory.error_summary
         sampled = run_task(mem_db, "ecs_metrics", client=client, target=target, trigger="MANUAL")
-        assert sampled.status == "SUCCESS", sampled.error_summary
+        assert sampled.status == "PARTIAL" and "AOM 已停用" in sampled.error_summary
         assert sampled.stats["metrics_source"] == "NONE"
         assert sampled.stats["metrics_diagnostic"]["covered_resources"] == 0
         before_status = len(calls)

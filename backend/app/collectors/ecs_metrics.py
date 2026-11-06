@@ -5,6 +5,7 @@ from ipaddress import ip_address
 from types import SimpleNamespace
 
 from app.collectors.base import Observation, RunContext
+from app.metrics.ecs_diagnostics import INCOMPLETE, diagnostic_message
 from app.metrics.ecs_readings import collect_readings, ecs_source
 from app.models import HcsAccount, HcsProject, Resource, ResourceChange
 from app.models.base import utcnow
@@ -97,6 +98,15 @@ class EcsMetricsCollector:
             diagnostic=result.diagnostic, signature=signature)
         if rejected:
             ctx.errors.append("ECS 部分采样无效或与同一时刻记录冲突，未写入不确定值")
+        diagnostic_metrics = result.diagnostic.get("metrics") or {}
+        required = [key for key in policy["metric_keys"] if key in METRICS] or policy["metric_keys"]
+        has_fresh = any((diagnostic_metrics.get(key) or {}).get("fresh_points", 0) > 0 for key in required)
+        if (result.diagnostic.get("status") in INCOMPLETE
+                and (result.diagnostic.get("status") != "partial" or not has_fresh)):
+            # A completed request is not proof that this task obtained usage data.
+            # Partial coverage alone (e.g. stopped VMs) remains a diagnostic;
+            # real request errors already set ctx.errors independently.
+            ctx.errors.insert(0, "ECS 指标采样未完成：" + diagnostic_message(result.diagnostic))
         observations = []
         for resource in resources:
             latest: dict[str, Reading] = {}

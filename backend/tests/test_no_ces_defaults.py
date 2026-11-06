@@ -438,7 +438,8 @@ def test_old_aom_collector_configuration_keeps_only_native_facts_without_queryin
     assert list(mem_db.scalars(select(EcsMetricSample))) == []
     rows = collector().collect(ctx)
     assert len(calls) == 1 and ctx.stats["metrics_source"] == "NONE"
-    assert ctx.errors == [] and account.capabilities == {}
+    assert len(ctx.errors) == 1 and "AOM 已停用" in ctx.errors[0]
+    assert account.capabilities == {}
     assert all(value is None for row in rows if row.check_item in {"cpu", "memory", "disk"}
                for key, value in row.facts.items() if key != "disk_mount")
 
@@ -475,7 +476,8 @@ def test_old_collector_mapping_cannot_trigger_catalogue_samples_or_alerts(
     assert inventory.status == "SUCCESS", inventory.error_summary
     sampled = run_task(mem_db, "ecs_metrics", client=client, target=target, trigger="MANUAL")
     status = run_task(mem_db, "ecs_status", client=client, target=target, trigger="MANUAL")
-    assert sampled.status == status.status == "SUCCESS", (sampled.error_summary, status.error_summary)
+    assert sampled.status == "PARTIAL" and "AOM 已停用" in sampled.error_summary
+    assert status.status == "SUCCESS", status.error_summary
     assert sampled.stats["metrics_source"] == status.stats["metrics_source"] == "NONE"
     assert len(native_calls) == 2
     resource = mem_db.scalar(select(Resource).where(Resource.tenant_id == account.id,

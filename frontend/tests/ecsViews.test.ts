@@ -25,6 +25,60 @@ const mount = (file: string, options: Parameters<typeof mountPersonnel>[1]) => {
 const buttons = (root: Parameters<typeof textOf>[0]) => allNodes(root).filter(node => node.tag === 'Button').map(node => textOf(node).trim())
 
 describe('ECS 实际模板权限和交互', () => {
+  it('实例行的指标状态可悬浮查看本行后台诊断，不新增列或请求', async () => {
+    const instance = ecsInstance()
+    instance.diagnostic = { status: 'NO_DATA', message: 'Prometheus 无可唯一匹配的 IP，当前使用率暂无数据', at: null }
+    const api = { listEcsInstances: vi.fn<EcsInstancesFetcher>(async () => ({ items: [instance], total: 1, page: 1, page_size: 20 })) }
+    const view = mount('ecs/EcsView.vue', { dependencies: { ...base, '@/api/ecs': api, '@/stores/user': permissions(['ledger:view']) } })
+    await settlePersonnel()
+    const states = allNodes(view.root).filter(node => String(node.props.class).includes('metric-state'))
+    expect(states).toHaveLength(3)
+    expect(states.map(node => node.props.title)).toEqual(Array(3).fill(instance.diagnostic.message))
+    expect(api.listEcsInstances).toHaveBeenCalledOnce()
+    expect(allNodes(view.root).filter(node => node.tag === 'TableColumn')).toHaveLength(7)
+  })
+  it('健康 FRESH 读数和没有诊断的实例不挂诊断提示', async () => {
+    const healthy = ecsInstance()
+    healthy.diagnostic = { status: 'FRESH', message: '健康实例不需要展示的诊断说明', at: null }
+    for (const metric of ['cpu_util', 'mem_util', 'disk_util'] as const) healthy.latest[metric] = {
+      value: 0, source: 'PROMETHEUS', state: 'FRESH', observed_at: '2026-11-02T00:00:00Z', collected_at: '2026-11-02T00:00:01Z',
+    }
+    const empty = ecsInstance(12)
+    empty.diagnostic = null
+    const api = { listEcsInstances: vi.fn<EcsInstancesFetcher>(async () => ({ items: [healthy, empty], total: 2, page: 1, page_size: 20 })) }
+    const view = mount('ecs/EcsView.vue', { dependencies: { ...base, '@/api/ecs': api, '@/stores/user': permissions(['ledger:view']) } })
+    await settlePersonnel()
+    const states = allNodes(view.root).filter(node => String(node.props.class).includes('metric-state'))
+    expect(states).toHaveLength(6)
+    expect(states.every(node => node.props.title === undefined)).toBe(true)
+    expect(textOf(view.root)).not.toContain(healthy.diagnostic.message)
+  })
+  it('切换租户立即清空旧诊断，旧请求迟到也不显示跨租户状态', async () => {
+    const pending = deferred<Awaited<ReturnType<EcsInstancesFetcher>>>()
+    const app = Vue.reactive({ tenantId: 7 as number | null, tenantLabel: '租户甲', tenants: [{ id: 7, name: '租户甲' }, { id: 8, name: '租户乙' }] })
+    const first = ecsInstance()
+    first.diagnostic = { status: 'NO_DATA', message: '甲租户未配置来源', at: null }
+    const api = { listEcsInstances: vi.fn<EcsInstancesFetcher>(async () => ({ items: [first], total: 1, page: 1, page_size: 20 })) }
+    const view = mount('ecs/EcsView.vue', { dependencies: { ...base, '@/api/ecs': api, '@/stores/user': permissions(['ledger:view']), '@/stores/app': { useAppStore: () => app } } })
+    await settlePersonnel()
+    const titles = () => allNodes(view.root).map(node => node.props.title).filter(Boolean)
+    expect(titles()).toContain('甲租户未配置来源')
+    api.listEcsInstances.mockImplementationOnce(() => pending.promise)
+    const header = findNode(view.root, 'Component', node => node.props.title === 'ECS 监控')
+    const refreshing = (header.props.refresh as () => Promise<void>)()
+    app.tenantId = 8
+    await settlePersonnel()
+    expect(titles()).not.toContain('甲租户未配置来源')
+    const second = ecsInstance(12, 8)
+    second.diagnostic = { status: 'NO_DATA', message: '乙租户无采样', at: null }
+    api.listEcsInstances.mockResolvedValue({ items: [second], total: 1, page: 1, page_size: 20 })
+    await (header.props.refresh as () => Promise<void>)()
+    pending.resolve({ items: [first], total: 1, page: 1, page_size: 20 })
+    await refreshing
+    await settlePersonnel()
+    expect(titles()).toContain('乙租户无采样')
+    expect(titles()).not.toContain('甲租户未配置来源')
+  })
   it('首屏按实例、租户项目、状态及三项读数排列，分别展示真实零、缺失与过期', async () => {
     const instance = ecsInstance()
     instance.latest.cpu_util = { value: 0, source: 'PROMETHEUS', state: 'FRESH', observed_at: '2026-11-02T00:00:00Z', collected_at: '2026-11-02T00:00:01Z' }

@@ -140,7 +140,11 @@ def test_auto_ignores_legacy_aom_and_keeps_prometheus_for_other_tenant(world, me
     assert all("ces" not in t.capabilities for t in (a, b))
     for code in world:
         _sync(mem_db, code, mock_http)
-        assert _run(mem_db, code, "ecs_metrics", mock_http).status == "SUCCESS"
+        sampled = _run(mem_db, code, "ecs_metrics", mock_http)
+        assert sampled.status == ("PARTIAL" if code == "tenant-a" else "SUCCESS"), sampled.error_summary
+        if code == "tenant-a":
+            assert sampled.stats["metrics_diagnostic"]["status"] == "no_source"
+            assert "未配置可用指标源" in sampled.error_summary
         before_status = len(calls)
         assert _run(mem_db, code, "ecs_status", mock_http).status == "SUCCESS"
         assert all("/ams/" not in path and not path.endswith("/samples") and "/api/v1/query" not in path
@@ -172,7 +176,8 @@ def test_auto_without_configured_monitoring_keeps_native_state_and_missing_metri
         return original(request, *args, **kwargs)
     monkeypatch.setattr(mock_http, "send", track)
     sample_run = run_task(mem_db, "ecs_metrics", client=current, target=tg, trigger="MANUAL")
-    assert sample_run.status == "SUCCESS" and sample_run.stats["metrics_diagnostic"]["status"] == "no_source"
+    assert sample_run.status == "PARTIAL" and sample_run.stats["metrics_diagnostic"]["status"] == "no_source"
+    assert "未配置可用指标源" in sample_run.error_summary
     run = run_task(mem_db, "ecs_status", client=current, target=tg, trigger="MANUAL")
     assert run.status == "SUCCESS" and effective(a) == "NONE" and a.capabilities == {}
     assert {r.attrs["metrics_source"] for r in _ecs(mem_db, a)} == {"NONE"}

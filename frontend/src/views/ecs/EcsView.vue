@@ -101,7 +101,7 @@ watch(() => [route.query.instance_id, route.query.tenant_id, app.tenantId, scope
             </template></el-table-column>
             <el-table-column label="实例状态" width="85"><template #default="{ row }"><el-tag :type="rawStatusType(row.status_raw)" size="small">{{ statusText('ecs_server', row.status_raw) }}</el-tag></template></el-table-column>
             <el-table-column v-for="(item, index) in ECS_METRICS" :key="item.key" :label="item.label" min-width="150"><template #default="{ row }">
-              <div class="metric-reading"><b class="metric-value">{{ percentText(row.readings[index].value) }}</b><span class="metric-state" :class="`state-${row.readings[index].state.toLowerCase()}`">{{ ECS_STATE_LABEL[row.readings[index].state as keyof typeof ECS_STATE_LABEL] }}</span></div>
+              <div class="metric-reading"><b class="metric-value">{{ percentText(row.readings[index].value) }}</b><span class="metric-state" :class="`state-${row.readings[index].state.toLowerCase()}`" :title="row.readings[index].state !== 'FRESH' ? row.diagnostic?.message || undefined : undefined">{{ ECS_STATE_LABEL[row.readings[index].state as keyof typeof ECS_STATE_LABEL] }}</span></div>
               <el-tooltip :content="`${ecsTimestampLabel(row.readings[index].timestamp_semantics)}；返回：${fmtTime(row.readings[index].observed_at, 'YYYY-MM-DD HH:mm:ss')}；入库：${fmtTime(row.readings[index].collected_at, 'YYYY-MM-DD HH:mm:ss')}`"><div class="text-3 sample-time">返回 {{ fmtTime(row.readings[index].observed_at) }}</div></el-tooltip>
               <div class="text-3 sample-source">{{ row.readings[index].source ?? '无来源' }}</div>
             </template></el-table-column>

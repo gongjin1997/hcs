@@ -23,6 +23,7 @@ from app.hcs.ratelimit import request_budget
 from app.hcs.readonly import ces_access
 from app.metrics import effective, mark, use_ces
 from app.metrics.ces import BATCH, ces_list_metrics, metric_key
+from app.metrics.ecs_diagnostics import unavailable_reason
 from app.metrics.prometheus import DEFAULT_QUERIES, PromClient, PromError, host_of, prom_for
 
 if TYPE_CHECKING:
@@ -267,7 +268,7 @@ def _prometheus(ctx: RunContext, ids: list[str], index: dict[str, str], aliases:
         except _FAILURES:
             _error(ctx, entry, "PROMETHEUS", alias)
         if not entry["series_count"] and not entry["errors"]:
-            entry["status"] = "no_series"
+            entry.update(status="no_series", reason="no_matching_series")
 
 
 def _ces(ctx: RunContext, ids: list[str], aliases: list[str], config: dict, diagnostic: dict,
@@ -308,7 +309,7 @@ def _ces(ctx: RunContext, ids: list[str], aliases: list[str], config: dict, diag
             allowed = {metric_key(desc): desc for desc in descriptors}
             entry["series_count"] = len(allowed)
             if not allowed:
-                entry["status"] = "no_series"
+                entry.update(status="no_series", reason="no_matching_series")
             if len(allowed) > BATCH * 20:
                 raise HcsError(0, "LOCAL.REQUEST_BUDGET", "CES descriptor budget exceeded")
             descriptors = list(allowed.values())
@@ -427,7 +428,7 @@ def _finish(ctx: RunContext, out: dict[str, list[EcsReading]], source: str, diag
             incomplete = entry["errors"] or entry["rejected_points"] or fresh_resources < len(ids)
             entry["status"] = "partial" if incomplete else "ready"
             if fresh_resources < len(ids):
-                entry["reason"] = "incomplete_fresh_coverage"
+                entry["reason"] = "stale_samples" if not fresh_resources else "incomplete_fresh_coverage"
         elif entry["errors"]:
             entry["status"] = "error"
         if entry["rejected_points"]:
@@ -481,11 +482,8 @@ def collect_readings(ctx: RunContext, ids: list[str], ip_index: dict[str, str], 
                   "scope": {"tenant_id": ctx.tenant_id, "project_ref": ctx.project_ref, "project_id": ctx.project_id}}
     out: dict[str, list[EcsReading]] = {}
     if source == "NONE":
-        mode = str(getattr(ctx.tenant, "metrics_source", "AUTO") or "AUTO").upper()
-        reason = {"AOM": "aom_disabled", "PROMETHEUS": "prometheus_not_configured",
-                  "CES": "legacy_ces_disabled", "NONE": "metrics_source_disabled"}.get(mode, "source_not_configured")
         for entry in diagnostic["metrics"].values():
-            entry.update(status="no_source", reason=reason)
+            entry.update(status="no_source", reason=unavailable_reason(ctx.tenant))
         return _finish(ctx, out, source, diagnostic, ids)
     if not ids or not aliases:
         return _finish(ctx, out, source, diagnostic, ids)

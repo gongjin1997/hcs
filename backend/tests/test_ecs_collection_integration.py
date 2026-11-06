@@ -1,5 +1,6 @@
 """Real ECS adapters + pipeline, isolated database and synthetic HTTP only."""
 import json
+import logging
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ from sqlalchemy import func, select
 
 from app.collectors import ecs, ecs_metrics
 from app.core.config import get_settings
+from app.core.deps import CurrentUser, Scope
 from app.hcs import HcsClient, ratelimit
 from app.hcs.endpoints import EndpointResolver
 from app.ledger import sync as inventory
@@ -307,7 +309,7 @@ def test_legacy_aom_policy_is_ignored_without_database_rewrite_or_cloud_calls(in
     assert available(env.tenant, "aom") is False
     assert collection_policy.effective(env.db, env.tenant.id).aom is None
     result = run(env, "ecs_metrics")
-    assert result.status == "SUCCESS", result.error_summary
+    assert result.status == "PARTIAL" and result.error_summary
     assert result.stats["metrics_source"] == "NONE" and samples(env) == []
     assert env.telemetry.calls == []
     env.db.refresh(row)
@@ -328,3 +330,90 @@ def test_auto_with_legacy_aom_policy_uses_only_configured_prometheus(integrated)
     assert {row.source for row in samples(env)} == {"PROMETHEUS"}
     assert {row.observed_at for row in samples(env)} == {max(env.telemetry.times)}
     assert all(request.url.host == "prom.integration.invalid" for request in env.telemetry.calls)
+
+
+@pytest.mark.parametrize("source,reason,explanation", [
+    ("AUTO", "source_not_configured", "未配置"),
+    ("AOM", "aom_disabled", "AOM 已停用"),
+    ("NONE", "metrics_source_disabled", "仅服务原生字段"),
+    ("CES", "legacy_ces_disabled", "CES 兼容开关未开启"),
+    ("PROMETHEUS", "prometheus_not_configured", "Prometheus 地址未配置"),
+])
+def test_missing_source_is_not_a_success_and_log_explains_zero_calls(integrated, caplog, source, reason, explanation):
+    env = integrated
+    env.tenant.metrics_source = source
+    env.tenant.prometheus_url = None
+    env.db.commit()
+    caplog.set_level(logging.INFO, logger="app.services.pipeline")
+    result = run(env, "ecs_metrics")
+    assert result.status == "PARTIAL"
+    assert explanation in result.error_summary
+    assert result.api_calls == 0 and env.telemetry.calls == [] and samples(env) == []
+    assert all(resource.metrics["cpu_util"] is None for resource in env.resources.values())
+    record = next(r for r in caplog.records if r.getMessage() == "task_finished" and r.task == "ecs_metrics")
+    assert record.metrics_source == "NONE" and record.metrics_status == "no_source"
+    assert record.with_metrics == 0 and record.sample_points == 0
+    assert record.metrics_requested_resources == 3 and record.metrics_reasons == [reason]
+    assert "integration.invalid" not in str(record.__dict__)
+    assert "synthetic-project" not in str(record.__dict__)
+    current = ecs_monitoring.list_instances(env.db, ecs_scope(env))
+    assert all(item.diagnostic.status == "SOURCE_UNCONFIGURED" and explanation in item.diagnostic.message
+               for item in current.items)
+
+
+@pytest.mark.parametrize("cause", ["no_ip", "empty_series", "stale_samples"])
+def test_no_usable_samples_reports_the_actual_blocker(integrated, cause):
+    env = integrated
+    if cause == "no_ip":
+        for resource in env.resources.values():
+            resource.ip = None
+            resource.attrs = {**resource.attrs, "fixed_ips": []}
+        expected_calls, explanation = 0, "私网 IP"
+    elif cause == "empty_series":
+        env.telemetry.servers = []
+        expected_calls, explanation = 3, "未匹配"
+    else:
+        env.telemetry.times = [NOW-timedelta(seconds=901)]
+        expected_calls, explanation = 3, "已过期"
+    env.db.commit()
+    result = run(env, "ecs_metrics")
+    assert result.status == "PARTIAL" and explanation in result.error_summary
+    assert result.api_calls == expected_calls
+    assert all(resource.metrics["cpu_util"] is None for resource in env.resources.values())
+    assert len(samples(env)) == (9 if cause == "stale_samples" else 0)
+    current = ecs_monitoring.list_instances(env.db, ecs_scope(env))
+    assert all(explanation in item.diagnostic.message for item in current.items)
+
+
+def ecs_scope(env):
+    return Scope([env.tenant.id], False, CurrentUser(id=100, username="ecs-reader", display_name="reader",
+                 permissions=["ledger:view"], tenant_ids=[env.tenant.id]))
+
+
+def test_restoring_existing_source_collects_real_zero_values_and_clears_diagnostic(integrated):
+    env = integrated
+    env.tenant.prometheus_url = None
+    env.db.commit()
+    assert run(env, "ecs_metrics").status == "PARTIAL"
+    env.tenant.prometheus_url = "https://prom.integration.invalid"
+    env.telemetry.values = {key: 0 for key in env.telemetry.values}
+    env.db.commit()
+    result = run(env, "ecs_metrics")
+    assert result.status == "SUCCESS" and result.error_summary is None
+    assert result.api_calls == 3 and result.stats["sample_points"] == 9
+    assert len(samples(env)) == 9 and all(point.value == 0 for point in samples(env))
+    current = ecs_monitoring.list_instances(env.db, ecs_scope(env))
+    assert all(item.diagnostic.status == "FRESH" for item in current.items)
+    assert all(value.state == "FRESH" and value.value == 0 for item in current.items for value in item.latest.values())
+
+
+def test_partial_coverage_keeps_counts_without_turning_stopped_vms_into_query_failures(integrated):
+    env = integrated
+    env.resources["host-c"].status_raw = "SHUTOFF"
+    env.telemetry.servers = env.telemetry.servers[:2]
+    env.db.commit()
+    result = run(env, "ecs_metrics")
+    assert result.status == "SUCCESS" and result.error_summary is None
+    assert result.stats["with_metrics"] == 2 and result.stats["servers"] == 3
+    assert result.stats["metrics_diagnostic"]["status"] == "partial"
+    assert len(samples(env)) == 6 and env.resources["host-c"].metrics["cpu_util"] is None

@@ -25,6 +25,7 @@ from app.hcs import HcsClient, HcsError
 from app.hcs.client import metrics_delta
 from app.ledger.fetchers import gaussdb_spec
 from app.ledger.sync import LEDGER_TASK, sync_ledger
+from app.metrics.ecs_diagnostics import log_summary as ecs_metrics_log_summary
 from app.models import (
     AlarmEvent,
     DcsMemorySample,
@@ -77,6 +78,8 @@ def _log_run(run: InspectionRun, started: float, **fields: object) -> None:
         run.status, logging.INFO)
     hcs = (run.stats or {}).get("hcs", {})
     fields.setdefault("error_count", len((run.error_summary or "").splitlines()))
+    if run.task_code == "ecs_metrics":
+        fields.update(ecs_metrics_log_summary(run.stats or {}))
     log.log(level, "task_finished", extra={
         "event": "task_finished", "task": run.task_code, "run_id": run.id, "tenant_id": run.tenant_id,
         "trigger": run.trigger_type, "status": run.status, "cost_ms": round((perf_counter() - started) * 1000, 2),
