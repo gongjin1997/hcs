@@ -33,3 +33,17 @@ export interface SmsNotification {
   gateway_code?: string | null
   claimed_at?: string | null
 }
+
+/** 系统配置页的租户短信概况；不含网关地址、账号与密码。 */
+export interface SmsTenantSummary {
+  tenant_id: number
+  tenant_name: string
+  short_name: string
+  tenant_enabled: boolean
+  enabled: boolean
+  configured: boolean
+  severities: SmsSeverity[]
+  /** 总开关、租户开关与凭据都就绪，当前会发送 */
+  effective: boolean
+}
+export interface SmsTenantSummaries { global_enabled: boolean; items: SmsTenantSummary[] }

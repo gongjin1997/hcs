@@ -33,8 +33,6 @@
         <div class="t-actions">
           <el-button v-if="canManage" type="primary" plain :icon="Lightning" :loading="testing === t.id" @click="test(t)">连通性测试</el-button>
           <el-button v-if="canManage" :icon="Edit" @click="openDialog(t)">编辑</el-button>
-          <el-button v-if="user.canAny('ledger:view', 'task:view')" @click="openEcsPolicy(t)">ECS 采集策略</el-button>
-          <el-button v-if="canManageSms(t.id)" @click="openSms(t)">短信配置</el-button>
           <el-dropdown v-if="canManage" trigger="click" @command="(c: string) => onMore(c, t)">
             <el-button :icon="MoreFilled" />
             <template #dropdown><el-dropdown-menu>
@@ -119,8 +117,7 @@
     <el-empty v-if="!tenants.length && !loading" description="还没有接入租户" />
 
     <TenantDialog v-model="dlg.visible" :tenant="dlg.tenant" :info="info" @saved="load" />
-    <EcsPolicyDialog v-model="ecsPolicy.visible" :tenant-id="ecsPolicy.tenantId" :tenant-name="ecsPolicy.tenantName" />
-    <SmsTenantDialog v-model="sms.visible" :tenant-id="sms.tenantId" :tenant-name="sms.tenantName" />
+    <p class="text-3 moved-tip">ECS 采集策略在“巡检任务”的 ECS 任务行设置；升级短信在“系统设置 → 租户短信”配置。</p>
   </div>
 </template>
 
@@ -129,15 +126,13 @@ import {
   CircleCheckFilled, CircleCloseFilled, Edit, Key, Lightning, MoreFilled, Plus, QuestionFilled, RemoveFilled, Select, WarningFilled,
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { computed, markRaw, onMounted, reactive, ref } from 'vue'
+import { computed, markRaw, nextTick, onMounted, reactive, ref } from 'vue'
 import { deleteTenant, listTenants, testTenant, updateTenant } from '@/api'
 import { useUserStore } from '@/stores/user'
 import type { SystemInfo, Tenant, TenantCheck } from '@/types'
 import { AUTH_TYPE, CAPABILITY, CHECK_KIND, ENV_TYPE, METRICS_SOURCE, SERVICES, effectiveMetricsSource } from '@/utils/dict'
 import { fmtTime } from '@/utils/format'
 import TenantDialog from './TenantDialog.vue'
-import SmsTenantDialog from './SmsTenantDialog.vue'
-import EcsPolicyDialog from '@/views/ecs/EcsPolicyDialog.vue'
 import { toTenantIn } from './tenant-form'
 
 defineProps<{ info: SystemInfo | null }>()
@@ -147,18 +142,17 @@ const tenants = ref<Tenant[]>([])
 const loading = ref(false)
 const testing = ref<number | null>(null)
 const dlg = reactive({ visible: false, tenant: null as Tenant | null })
-const sms = reactive({ visible: false, tenantId: null as number | null, tenantName: '' })
-const ecsPolicy = reactive({ visible: false, tenantId: null as number | null, tenantName: '' })
-function openEcsPolicy(tenant: Tenant) { Object.assign(ecsPolicy, { visible: true, tenantId: tenant.id, tenantName: tenant.short_name || tenant.name }) }
-const canManageSms = (id: number) => canManage.value && !!user.user && (user.user.tenant_ids == null || user.user.tenant_ids.includes(id))
-function openSms(tenant: Tenant) {
-  if (!canManageSms(tenant.id)) return
-  Object.assign(sms, { visible: true, tenantId: tenant.id, tenantName: tenant.short_name || tenant.name })
-}
 
 async function load() {
   loading.value = true
   try { tenants.value = await listTenants() } finally { loading.value = false }
+  focusTenantFromHash()
+}
+/** 其他页面带 #tenant-{id} 跳过来（如 ECS 采集策略里的“配置租户服务地址”）：卡片渲染后再滚动，路由的滚动行为发生得太早 */
+function focusTenantFromHash() {
+  if (typeof window === 'undefined' || !/^#tenant-\d+$/.test(window.location.hash)) return
+  const id = window.location.hash.slice(1)
+  void nextTick(() => document.getElementById(id)?.scrollIntoView({ block: 'start', behavior: 'smooth' }))
 }
 onMounted(load)
 defineExpose({ reload: load })
@@ -245,6 +239,7 @@ async function onMore(cmd: string, t: Tenant) {
 .check-endpoint { font-size: 11px; margin-top: 2px; }
 .configuration-warnings { margin-bottom: 8px; padding: 6px 10px; border-left: 2px solid var(--hi-p3); color: var(--hi-text-2); font-size: 12px; line-height: 1.6; p { margin: 2px 0; overflow-wrap: anywhere; } }
 .ws { margin-right: 4px; }
+.moved-tip { margin: 4px 0 0; font-size: 12px; }
 .ep { display: block; font-size: 12px; b { font-weight: 500; margin-right: 4px; } }
 @media (max-width: 767px) {
   .t-head, .t-title .flex, .t-actions { flex-wrap: wrap; }

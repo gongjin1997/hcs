@@ -323,6 +323,9 @@ const Settings = loadPanel('views/system/SettingsPanel.vue', {
   ...settingsDependencies,
   '@element-plus/icons-vue': iconModule,
   './CollectionPanel.vue': { default: Collection },
+  // 租户短信（原“租户接入”卡片上的短信配置）在系统设置里，需要“管理租户接入”权限
+  './SmsTenantPanel.vue': { default: stub('SmsTenantPanel') },
+  '@/stores/user': { useUserStore: () => ({ user: { id: 1, tenant_ids: null }, can: () => true }) },
 })
 
 describe('system setting drafts', () => {

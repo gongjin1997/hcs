@@ -7,7 +7,7 @@ import EChart from '@/components/EChart.vue'
 import { useUserStore } from '@/stores/user'
 import { resourceAlarmsLocation, resourceLedgerLocation, resourceViewerScopeKey } from '@/config/resource-navigation'
 import { fmtTime } from '@/utils/format'
-import { historicalMetricsSourceLabel, rawStatusType, statusText } from '@/utils/dict'
+import { METRICS_SOURCE, historicalMetricsSourceLabel, rawStatusType, statusText } from '@/utils/dict'
 import type { EcsInstance, EcsMetricKey } from '@/types/ecs'
 import { ECS_METRICS, ECS_PRESETS, ECS_STATE_LABEL, ecsLatestReadings, ecsTimestampLabel, intervalText, percentText } from './ecs-utils'
 import { ecsTrendChart } from './ecs-chart'
@@ -40,7 +40,11 @@ const detailRows = computed(() => history.value?.series.filter(series => series.
   .flatMap(series => series.points.map(point => ({ ...point, source: series.source, timestamp_semantics: series.timestamp_semantics })))
   .sort((a, b) => Date.parse(b.at) - Date.parse(a.at) || a.source.localeCompare(b.source)) ?? [])
 const visibleRows = computed(() => detailRows.value.slice((detailPage.value - 1) * 20, detailPage.value * 20))
-const sourceText = computed(() => instance.value?.metrics_source === 'AOM' ? '未配置数据源' : instance.value?.metrics_source || '未配置数据源')
+// 来源代码显示为中文名称（例如 NONE → 仅服务原生）；旧 AOM 不能显示为当前来源
+const sourceText = computed(() => {
+  const code = instance.value?.metrics_source
+  return !code || code === 'AOM' ? '未配置数据源' : METRICS_SOURCE[code]?.label ?? code
+})
 const canPolicy = computed(() => user.canAny('ledger:view', 'task:view') && instance.value?.tenant_id != null)
 function openPolicy() { if (canPolicy.value && instance.value?.tenant_id != null) emit('policy', instance.value.tenant_id) }
 async function onExport() { if (await exportExcel()) ElMessage.success('Excel 已导出') }

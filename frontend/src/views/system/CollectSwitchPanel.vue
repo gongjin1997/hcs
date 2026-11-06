@@ -68,7 +68,6 @@
               <el-option value="on" label="开启" />
               <el-option value="off" label="关闭" />
             </el-select>
-            <el-button v-if="row.code === 'ecs_server' && user.canAny('ledger:view', 'task:view')" link type="primary" size="small" @click="openEcsPolicy(t.id, t.short_name || t.name)">ECS 采集策略</el-button>
             <div class="eff">
               <span class="dot" />{{ effOf(row as SwitchType, t.id) ? '采集中' : '已关闭' }}
               <span class="text-3">· 资源 {{ row.tenants[t.id]?.resources ?? 0 }}</span>
@@ -85,7 +84,6 @@
     </el-table>
     <div v-if="!canManage" class="text-3 mt-12">当前角色只能查看；修改采集开关需要“采集开关（按资源类型启停）”权限。</div>
 
-    <EcsPolicyDialog v-model="ecsPolicy.visible" :tenant-id="ecsPolicy.tenantId" :tenant-name="ecsPolicy.tenantName" />
     <CollectScopeDialog v-if="scopes" v-model="scopeDialog.visible" :tenant-id="scopeDialog.tenantId" :tenant-name="scopeDialog.tenantName"
                         :type="scopeDialog.type" :can-manage="canManage && (scopeDialog.tenantId !== 0 || scopes.global_editable)"
                         :limits="scopes.limits" @saved="load(true)" />
@@ -119,7 +117,6 @@ import { ElMessage } from 'element-plus'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { getCollectScopes, getCollectSwitches, listTasks, saveCollectSwitches, switchImpact } from '@/api'
 import { useUserStore } from '@/stores/user'
-import EcsPolicyDialog from '@/views/ecs/EcsPolicyDialog.vue'
 import type { CollectScopes, CollectSwitches, ScopeType, SwitchImpact, SwitchItem, SwitchType } from '@/types'
 import CollectScopeDialog from './CollectScopeDialog.vue'
 import { scopeSummary } from './collect-scope'
@@ -144,8 +141,6 @@ function openScope(tenantId: number, tenantName: string, code: string) {
   const type = scopeType(code)
   if (type) Object.assign(scopeDialog, { visible: true, tenantId, tenantName, type })
 }
-const ecsPolicy = reactive({ visible: false, tenantId: null as number | null, tenantName: '' })
-function openEcsPolicy(tenantId: number, tenantName: string) { Object.assign(ecsPolicy, { visible: true, tenantId, tenantName }) }
 const taskNames = ref<Record<string, string>>({})
 const category = ref('all')
 const keyword = ref('')

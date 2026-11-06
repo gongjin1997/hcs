@@ -187,23 +187,31 @@ describe('租户短信配置独立且默认不发送', () => {
     expect(allNodes(root).some(item => item.tag === 'Button' && textOf(item) === '保存短信配置')).toBe(false)
   })
 
-  it('租户范围内的管理者可保存关闭配置，卡片入口按明确租户范围限制', async () => {
+  it('租户范围内的管理者可保存关闭配置；入口在“系统设置 → 租户短信”，租户接入卡片不再有短信配置', async () => {
     const { root, service } = await tenant(api(), [7], 7)
     await clickButton(root, '保存短信配置')
     expect(service.saveTenantSms.mock.calls[0][0]).toBe(7)
-    const view = mountBusinessScript<{ canManageSms(id: number): boolean; openSms(tenant: unknown): void; sms: { visible: boolean; tenantId: number | null } }>('system/TenantPanel.vue', {
+    const summaries = { global_enabled: false, items: [{ tenant_id: 7, tenant_name: '已授权租户', short_name: '租户七', tenant_enabled: true,
+      enabled: true, configured: true, severities: ['P1' as const], effective: false }] }
+    const listTenantSms = vi.fn(async () => summaries)
+    const list = mountBusinessScript<{ load(): Promise<void>; open(row: unknown): void; items: unknown[]; statusText(row: unknown): string
+      dialog: { visible: boolean; tenantId: number | null; tenantName: string } }>('system/SmsTenantPanel.vue', {
+      dependencies: { '@/api/sms': { listTenantSms } },
+    })
+    dispose.push(list.unmount)
+    await list.state.load(); await settleView()
+    expect(listTenantSms).toHaveBeenCalledOnce(); expect(list.state.items).toEqual(summaries.items)
+    expect(list.state.statusText(summaries.items[0])).toBe('总开关关闭')
+    list.state.open(summaries.items[0])
+    expect(list.state.dialog).toEqual({ visible: true, tenantId: 7, tenantName: '租户七' })
+    const panel = mountBusinessScript<Record<string, unknown>>('system/TenantPanel.vue', {
       props: { info: null }, dependencies: {
         './tenant-form': {},
         '@/stores/user': { useUserStore: () => ({ user: { tenant_ids: [7] }, can: () => true }) },
       },
     })
-    dispose.push(view.unmount)
-    expect(view.state.canManageSms(7)).toBe(true)
-    expect(view.state.canManageSms(8)).toBe(false)
-    view.state.openSms({ id: 8, name: '越权租户' })
-    expect(view.state.sms.visible).toBe(false)
-    view.state.openSms({ id: 7, name: '已授权租户' })
-    expect(view.state.sms.tenantId).toBe(7)
+    dispose.push(panel.unmount)
+    expect('openSms' in panel.state).toBe(false); expect('openEcsPolicy' in panel.state).toBe(false)
   })
 
   it('记录只展示掩码号码，网关受理不标为送达，未知结果不提供重发', async () => {

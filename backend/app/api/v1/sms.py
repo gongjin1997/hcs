@@ -62,6 +62,22 @@ def put_global(body: SmsGlobalIn, db: Session = Depends(get_db), scope: Scope = 
     return ok(sms_settings.load_global(db).model_dump(mode="json"))
 
 
+@router.get("/sms/tenants", summary="各租户短信配置概况（系统配置页使用；不返回网关地址、账号与密码）")
+def list_tenants(db: Session = Depends(get_db), scope: Scope = Depends(get_scope),
+                 _: CurrentUser = Depends(require_perm("tenant:manage"))):
+    rows = db.scalars(scope.apply(select(HcsAccount), HcsAccount.id).order_by(HcsAccount.id)).all()
+    global_on = sms_settings.load_global(db).enabled
+    items = []
+    for tenant in rows:
+        config = sms_settings.load_tenant(db, tenant.id)
+        public = sms_settings.public_tenant(config)
+        items.append({"tenant_id": tenant.id, "tenant_name": tenant.name, "short_name": tenant.short_name,
+                      "tenant_enabled": tenant.enabled, "enabled": config.enabled,
+                      "configured": bool(config.endpoint and config.username and public["password_set"]),
+                      "severities": config.severities, "effective": sms_settings.effective(db, tenant.id)})
+    return ok({"global_enabled": global_on, "items": items})
+
+
 @router.get("/tenants/{tenant_id}/sms", summary="租户短信配置（密码不返回）")
 def get_tenant(tenant_id: int, db: Session = Depends(get_db), scope: Scope = Depends(get_scope),
                _: CurrentUser = Depends(require_perm("tenant:manage"))):

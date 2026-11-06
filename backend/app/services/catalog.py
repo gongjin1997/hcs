@@ -153,7 +153,7 @@ TASK_SPECS: tuple[TaskSpec, ...] = (
                   "（Δ秒 ÷ Δ时间 ÷ 主节点数），首次采样与实例重启后不输出"),
     TaskSpec("ecs_status", "ECS 状态与告警巡检", "ecs", 120, ("ecs_server",),
              ("instance_status", "cpu", "memory", "disk", "reboot"),
-             note="ECS 状态与告警判定；使用独立指标采样点，不重复查询指标源。各租户频率在 ECS 采集策略配置"),
+             note="ECS 状态与告警判定；使用独立指标采样点，不重复查询指标源。各租户的频率、范围与指标在本任务的“租户策略”设置"),
     TaskSpec("ecs_metrics", "ECS 使用指标采样", "ecs", 300, ("ecs_server",),
              note="按租户策略采样 CPU、内存等指标；只查询纳入范围的本地实例，缺失不补零"),
     TaskSpec("ecs_quota", "ECS 项目配额采集", "ecs", 3600, ("ecs_server",),

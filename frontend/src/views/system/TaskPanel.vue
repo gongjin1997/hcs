@@ -49,6 +49,8 @@
           <b>{{ row.name }}</b>
           <div class="text-3 mono">{{ row.code }}</div>
           <div v-if="row.note" class="text-3 note">{{ row.note }}</div>
+          <div v-if="ECS_POLICY_TASKS.includes(row.code)" class="text-3 note">各租户可单独设置频率、范围与指标（租户策略优先于这里的全局周期）。</div>
+          <div v-if="row.code === 'cce_cluster_health' && user.can('podevent:view')" class="text-3 note">采集哪些集群、启用哪些原生指标：<router-link :to="{ path: '/pod-events', query: { tab: 'clusters' } }">容器事件 → 集群与节点 → 采集配置</router-link></div>
         </template>
       </el-table-column>
       <el-table-column label="服务" width="110"><template #default="{ row }">{{ SERVICES[row.service] ?? row.service }}</template></el-table-column>
@@ -99,15 +101,19 @@
                      @change="(v: string | number | boolean) => toggle(row as InspectionTask, !!v)" />
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="150" fixed="right">
+      <el-table-column label="操作" width="170" fixed="right">
         <template #default="{ row }">
           <el-button v-perm="'task:run'" link type="primary" :icon="VideoPlay" :loading="running === row.code" :disabled="!row.enabled" @click="run(row as InspectionTask)">立即执行</el-button>
           <el-button v-if="canEdit" link type="primary" @click="openEdit(row as InspectionTask)">修改</el-button>
+          <el-button v-if="ECS_POLICY_TASKS.includes(row.code)" link type="primary" @click="openEcsPolicy">租户策略</el-button>
         </template>
       </el-table-column>
     </el-table>
     <div class="tip text-3">巡检 / 台账同步 / 容器事件采集由调度进程（scheduler）按周期执行，单个租户认证或接口失败只影响该租户；修改周期后调度进程最迟 30 秒生效；
       手动执行范围跟随顶部租户切换{{ app.currentTenant ? `（当前：${app.currentTenant.name}）` : '（当前：全部租户）' }}。</div>
+
+    <!-- ECS 租户采集策略：顶部选了租户时直接编辑该租户，否则在对话框里选择租户 -->
+    <EcsPolicyDialog v-model="ecsPolicy.visible" :tenant-id="ecsPolicy.tenantId" :tenant-name="ecsPolicy.tenantName" @saved="load" />
 
     <!-- 修改任务周期 -->
     <el-dialog v-model="edit.visible" :title="`修改任务：${edit.task?.name ?? ''}`" width="560px" append-to-body>
@@ -182,6 +188,7 @@ import { computed, h, onMounted, reactive, ref } from 'vue'
 import { type InspectionTask, type ReportSchedule, type TaskRun, listTasks, reportSchedule, runTask, saveReportSchedule, updateTask } from '@/api'
 import TenantTag from '@/components/TenantTag.vue'
 import RecipientSelect from '@/components/RecipientSelect.vue'
+import EcsPolicyDialog from '@/views/ecs/EcsPolicyDialog.vue'
 import { useAppStore } from '@/stores/app'
 import { useUserStore } from '@/stores/user'
 import { METRICS_SOURCE, SERVICES, TASK_STATUS, historicalMetricsSourceLabel, typeName } from '@/utils/dict'
@@ -193,6 +200,13 @@ const globalConfigScope = computed(() => !!user.user && user.user.tenant_ids == 
 const canEdit = computed(() => globalConfigScope.value && user.can('task:edit'))
 const canReportConfig = computed(() => globalConfigScope.value && user.can('report:config') && !!schedule.value?.editable)
 const loading = ref(false)
+/** 这些任务按租户 ECS 采集策略调度（collection_policy.TASK_PHASES）；策略原先放在“租户接入”卡片上 */
+const ECS_POLICY_TASKS = ['ecs_status', 'ecs_metrics', 'ecs_quota']
+const ecsPolicy = reactive({ visible: false, tenantId: null as number | null, tenantName: '' })
+function openEcsPolicy() {
+  const tenant = app.currentTenant
+  Object.assign(ecsPolicy, { visible: true, tenantId: tenant?.id ?? null, tenantName: tenant ? tenant.short_name || tenant.name : '' })
+}
 const tasks = ref<InspectionTask[]>([])
 const schedule = ref<ReportSchedule | null>(null)
 const running = ref('')

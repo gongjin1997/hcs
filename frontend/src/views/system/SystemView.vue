@@ -55,7 +55,8 @@ const ALL: { name: string; label: string; perm: string | string[]; icon: object 
   { name: 'platform', label: '平台状态', perm: 'task:view', icon: markRaw(Monitor) },
   { name: 'users', label: '用户管理', perm: 'user:manage', icon: markRaw(User) },
   { name: 'roles', label: '角色与权限', perm: 'role:manage', icon: markRaw(Key) },
-  { name: 'settings', label: '系统设置', perm: 'setting:manage', icon: markRaw(Setting) },
+  // 租户短信也在这里配置，只有“管理租户接入”权限的账号同样可以进入（只看到短信部分）
+  { name: 'settings', label: '系统设置', perm: ['setting:manage', 'tenant:manage'], icon: markRaw(Setting) },
   { name: 'audit', label: '操作审计', perm: 'audit:view', icon: markRaw(Document) },
 ]
 const globalIdentityScope = computed(() => !!user.user && user.user.tenant_ids == null)

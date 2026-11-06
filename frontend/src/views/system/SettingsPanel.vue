@@ -2,7 +2,7 @@
   <div v-loading="loading" class="settings-panel">
     <el-alert type="info" :closable="false" show-icon class="mb-16"
               title="保存后生效，无需重启。未设置时使用部署默认值；修改记录可在操作审计中查看。" />
-    <el-row :gutter="16">
+    <el-row v-if="canSettings" :gutter="16">
       <!-- 数据保留 -->
       <el-col :xs="24" :lg="12">
         <div v-if="retention" class="box">
@@ -69,7 +69,11 @@
     </el-row>
 
     <CollectionPanel v-if="collection" ref="collectionRef" :setting="collection" :disabled="loading || !!saving || confirmingReload" class="mt-16" @saved="load('collect')" />
-    <SmsGlobalPanel ref="smsRef" :disabled="loading || !!saving || confirmingReload" class="mt-16" />
+    <!-- 升级短信：总开关 + 各租户独立网关（原“租户接入”卡片上的短信配置移到这里） -->
+    <div class="sms-section mt-16" aria-label="升级短信">
+      <SmsGlobalPanel ref="smsRef" :disabled="loading || !!saving || confirmingReload" />
+      <SmsTenantPanel v-if="canTenantSms" ref="smsTenantRef" :disabled="loading || !!saving || confirmingReload" class="mt-12" />
+    </div>
 
     <!-- 其他设置的入口 -->
     <div class="box mt-16 links">
@@ -79,8 +83,9 @@
         <span><b>台账字典</b>（业务系统）：资源台账 → 表格标题栏“字典”</span>
         <span><b>人员 / 负责人 / 通知联系人</b>：系统管理 → 用户管理（可仅登记人员，不开通登录）</span>
         <span><b>采集开关</b>（按资源类型启停）：系统管理 → 采集开关</span>
+        <span><b>ECS 采集策略</b>（各租户频率 / 范围 / 指标）：系统管理 → 巡检任务 → ECS 任务行的“租户策略”</span>
         <span><b>SMTP / IMAP 邮件服务</b>：通知管理 → 邮件服务与测试（页面保存，无需重启）</span>
-        <span><b>升级短信</b>：先配置租户卡片中的“短信配置”，再按需开启总开关和租户开关。</span>
+        <span><b>升级短信</b>：在本页“租户短信”中为租户配置网关并开启，再开启总开关。</span>
       </div>
     </div>
   </div>
@@ -91,14 +96,21 @@ import { Delete, Link, WarningFilled } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { getSettings, saveSetting } from '@/api'
+import { useUserStore } from '@/stores/user'
 import type { PlatformAlarmSetting, Retention, SettingItem } from '@/types'
 import { SEVERITY } from '@/utils/dict'
 import { fmtTime } from '@/utils/format'
 import CollectionPanel from './CollectionPanel.vue'
 import RecipientSelect from '@/components/RecipientSelect.vue'
 import SmsGlobalPanel from './SmsGlobalPanel.vue'
+import SmsTenantPanel from './SmsTenantPanel.vue'
 
 const SEV3 = ['P1', 'P2', 'P3'] as const
+const user = useUserStore()
+/** 数据保留 / 平台告警 / 采集并发需要“系统设置”权限；租户短信需要“管理租户接入”权限（两者可以只具备其一）。 */
+const canSettings = computed(() => user.can('setting:manage'))
+const canTenantSms = computed(() => user.can('tenant:manage'))
+const smsTenantRef = ref<{ reload: () => Promise<void> } | null>(null)
 const loading = ref(false)
 const saving = ref('')
 const confirmingReload = ref(false)
@@ -112,7 +124,7 @@ const ret = reactive<Record<string, number>>({})
 const pa = reactive<PlatformAlarmSetting & { recipient_user_ids: number[] }>({ enabled: true, task_fail_threshold: 3, auth_fail_alarm: true, notify_fail_alarm: true, heartbeat_timeout_min: 3, severity: 'P2', mail_to: [], recipient_user_ids: [] })
 
 async function load(group?: 'retention' | 'platform_alarm' | 'collect') {
-  if (loading.value) return
+  if (loading.value || !canSettings.value) return
   loading.value = true
   try {
     const s = await getSettings()
@@ -137,7 +149,7 @@ async function reload() {
     } catch { return }
     finally { confirmingReload.value = false }
   }
-  await Promise.all([load(), smsRef.value?.reload()])
+  await Promise.all([load(), smsRef.value?.reload(), smsTenantRef.value?.reload()])
 }
 defineExpose({ reload, busy })
 
@@ -186,6 +198,7 @@ async function savePa() {
 .foot { display: flex; align-items: center; gap: 8px; padding-top: 10px; border-top: 1px dashed var(--hi-border-light);
   .text-3 { margin-right: auto; font-size: 12px; } }
 .links .link-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 24px; font-size: 13px; color: var(--hi-text-2); }
+.mt-12 { margin-top: 12px; }
 @media (max-width: 767px) {
   :deep(.el-row) { row-gap: 16px; }
 }
