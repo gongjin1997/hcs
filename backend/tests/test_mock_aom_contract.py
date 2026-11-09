@@ -14,7 +14,7 @@ from sqlalchemy import select
 from app.collectors.base import RunContext
 from app.collectors.dcs import DcsCollector
 from app.collectors.ecs import EcsStatusCollector
-from app.collectors.gaussdb import GaussDBCollector
+from app.collectors.gaussdb import GaussDBCollector, GaussDBComponentsCollector, GaussDBStorageCollector
 from app.core.config import Settings
 from app.hcs import HcsError, auth, build_client, signer
 from app.ledger.sync import sync_ledger
@@ -429,7 +429,9 @@ def test_custom_aom_catalogue_does_not_call_legacy_ces_apis_or_metric_helpers(mo
 
 @pytest.mark.parametrize("service,collector,fields", [
     ("ecs", EcsStatusCollector, ("cpu_util", "mem_util", "disk_util")),
-    ("gaussdb", GaussDBCollector, ("cpu_usage", "mem_usage", "disk_usage")),
+    ("gaussdb", GaussDBCollector, ("cpu_usage", "mem_usage")),
+    ("gaussdb", GaussDBStorageCollector, ("disk_usage", "disk_used_gb", "disk_total_gb")),
+    ("gaussdb", GaussDBComponentsCollector, ("down_components", "unknown_components")),
 ])
 def test_ecs_aom_stays_disabled_and_gaussdb_keeps_independent_native_source(
         mock_client, monkeypatch, service, collector, fields, world, mem_db):
@@ -496,13 +498,39 @@ def test_ecs_aom_stays_disabled_and_gaussdb_keeps_independent_native_source(
     context = RunContext(client=client, account="mock-contract-only", project_id=TENANT_A["project_id"], tenant=account,
                          params={"aom": {"namespace": NAMESPACE, "dimension": "instance_id",
                                          "metrics": {field: field for field in fields}}})
+    calls = []
+    original = mock_client.send
+
+    def track_native(request, *args, **kwargs):
+        calls.append(request.url.path)
+        return original(request, *args, **kwargs)
+
+    monkeypatch.setattr(mock_client, "send", track_native)
     observations = collector().collect(context)
     assert context.errors == [] and context.stats["metrics_source"] == "GAUSSDB"
     assert "aom_matched_resources" not in context.stats
-    assert {row.check_item for row in observations} == {"instance_status", "disk", "components"}
-    assert observations[0].metrics["cpu_usage"] is observations[0].metrics["mem_usage"] is None
-    assert observations[1].metrics["disk_used_gb"] is not None
-    assert observations[1].metrics["disk_total_gb"] > 0
+    row, = observations
+    expected_item = {GaussDBCollector: "instance_status", GaussDBStorageCollector: "disk",
+                     GaussDBComponentsCollector: "components"}[collector]
+    assert row.check_item == expected_item
+    assert all("/ams/" not in path and "/aom/" not in path and not path.endswith("/samples")
+               and not path.startswith("/V1.0/") for path in calls)
+    expected_calls = [f"/gaussdb/v3.3/{TENANT_A['project_id']}/instances"]
+    if collector is GaussDBCollector:
+        assert row.metrics == {"cpu_usage": None, "mem_usage": None}
+        assert row.facts["status"] == "ACTIVE"
+    else:
+        suffix = "volume-usage" if collector is GaussDBStorageCollector else "components"
+        expected_calls.append(f"/gaussdb/v3/{TENANT_A['project_id']}/instances/{row.resource_id}/{suffix}")
+        assert row.status_raw is None
+        if collector is GaussDBStorageCollector:
+            assert row.storage_status == "AVAILABLE"
+            assert row.metrics["disk_used_gb"] is not None
+            assert row.metrics["disk_total_gb"] > 0
+        else:
+            assert row.facts == {"down_components": 0, "unknown_components": 0, "down_list": ""}
+            assert row.attrs["gaussdb_components"]["state"] == "AVAILABLE"
+    assert [path for path in calls if path != "/v3/auth/tokens"] == expected_calls
 
 
 def test_explicit_legacy_ces_mock_still_works_and_remains_tenant_scoped(mock_client, monkeypatch):

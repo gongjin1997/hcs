@@ -22,11 +22,19 @@ BUILTIN_TASKS: list[tuple] = [(t.code, t.name, t.service, t.interval_sec, *((t.c
 def ensure_tasks(db: Session) -> int:
     """补齐内置任务；已存在的任务不覆盖（保留页面上调整过的周期、启停状态）。"""
     added = 0
+    # 拆分已有任务时保持管理员原先批准的范围、周期与停用状态；新库仍按生产默认关闭。
+    old_gauss = db.get(InspectionTask, "gaussdb_status")
+    split_schedule = ({"interval_sec": old_gauss.interval_sec, "cron": old_gauss.cron,
+                       "enabled": old_gauss.enabled} if old_gauss is not None else None)
+    if old_gauss is not None and old_gauss.name == "GaussDB 实例状态与容量":
+        old_gauss.name = "GaussDB 实例状态"
     for spec in TASK_SPECS:
         if db.get(InspectionTask, spec.code) is None:
-            db.add(InspectionTask(code=spec.code, name=spec.name, service=spec.service, interval_sec=spec.interval_sec,
-                                  cron=spec.cron, params={},
-                                  enabled=get_settings().env != "prod" and spec.default_enabled))
+            schedule = {"interval_sec": spec.interval_sec, "cron": spec.cron,
+                        "enabled": get_settings().env != "prod" and spec.default_enabled}
+            if split_schedule is not None and spec.code in ("gaussdb_storage", "gaussdb_components"):
+                schedule.update(split_schedule)
+            db.add(InspectionTask(code=spec.code, name=spec.name, service=spec.service, params={}, **schedule))
             added += 1
     db.flush()
     return added

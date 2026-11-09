@@ -1,12 +1,12 @@
 """GaussDB 组件状态：§4.3.10 查询实例的组件列表（表 4-80 组件状态 Primary / Normal / Down / Standby / StateFollower /
-StateLeader / StateCandidate）。在线实例（ACTIVE、STORAGE FULL、BACKING UP）每轮查询磁盘用量与组件；全部为合成数据。"""
+StateLeader / StateCandidate）。在线实例（ACTIVE、STORAGE FULL、BACKING UP）独立查询组件；全部为合成数据。"""
 from datetime import UTC, datetime
 
 import pytest
 
 from app.collectors import gaussdb
 from app.collectors.base import RunContext
-from app.collectors.gaussdb import GaussDBCollector
+from app.collectors.gaussdb import GaussDBComponentsCollector, GaussDBStorageCollector
 from app.hcs import HcsError
 
 AT = datetime(2026, 11, 6, 8, 0, tzinfo=UTC)
@@ -39,33 +39,42 @@ class Cloud:
         return {"total_count": len(nodes), "nodes": list(nodes.values())}
 
 
-def collect(monkeypatch, cloud, previous=None):
+def collect(monkeypatch, cloud, previous=None, *, collector=GaussDBComponentsCollector):
     monkeypatch.setattr(gaussdb, "utcnow", lambda: AT)
     monkeypatch.setattr(gaussdb, "previous_attrs", lambda _ctx, _type, _ids, _key: previous or {})
     ctx = RunContext(client=cloud, account="a", project_id="p", tenant_id=1, project_ref=2)
-    rows = GaussDBCollector().collect(ctx)
+    rows = collector().collect(ctx)
     return {row.check_item: row for row in rows}, ctx
 
 
 @pytest.mark.parametrize("status", ["ACTIVE", "STORAGE FULL", "BACKING UP"])
-def test_online_instances_query_disk_and_components(monkeypatch, status):
+def test_online_instances_query_components_and_disk_independently(monkeypatch, status):
     cloud = Cloud(status)
     rows, ctx = collect(monkeypatch, cloud)
-    assert cloud.calls == ["instances", "volume-usage", "components"]
-    assert rows["disk"].facts == {"disk_usage": 25.0}                    # 磁盘满时正需要用量
+    assert cloud.calls == ["instances", "components"]
+    assert set(rows) == {"components"}
     assert rows["components"].facts == {"down_components": 0, "unknown_components": 0, "down_list": ""}
-    summary = rows["instance_status"].attrs["gaussdb_components"]
+    summary = rows["components"].attrs["gaussdb_components"]
     assert (summary["state"], summary["total"], summary["by_type"], summary["down"]) == ("AVAILABLE", 2, {"DN": 2}, 0)
     assert summary["observed_at"] == AT.isoformat() and ctx.errors == []
     assert ctx.stats["native_components"] == 1
+    cloud.calls.clear()
+    disks, disk_ctx = collect(monkeypatch, cloud, collector=GaussDBStorageCollector)
+    assert cloud.calls == ["instances", "volume-usage"]
+    assert set(disks) == {"disk"}
+    assert disks["disk"].facts == {"disk_usage": 25.0}                 # 磁盘满时正需要用量
+    assert disks["disk"].storage_status == "AVAILABLE" and disk_ctx.errors == []
 
 
 @pytest.mark.parametrize("status", ["BUILD", "REBOOTING", "FAILED", "SHUTDOWN", "FROZEN"])
 def test_offline_or_changing_instances_are_not_queried(monkeypatch, status):
     cloud = Cloud(status)
-    rows, _ = collect(monkeypatch, cloud)
-    assert cloud.calls == ["instances"] and "components" not in rows
-    assert "gaussdb_components" not in rows["instance_status"].attrs     # 不改写上次结果
+    rows, ctx = collect(monkeypatch, cloud)
+    assert cloud.calls == ["instances"] and set(rows) == {"components"}
+    assert rows["components"].facts == {"down_components": None, "unknown_components": None, "down_list": ""}
+    assert "gaussdb_components" not in rows["components"].attrs          # 不改写上次结果
+    assert rows["components"].metric_observed_at is None
+    assert ctx.errors == [] and ctx.stats["native_components"] == 0
 
 
 def test_down_components_are_counted_and_listed_with_their_node(monkeypatch):
@@ -74,36 +83,47 @@ def test_down_components_are_counted_and_listed_with_their_node(monkeypatch):
     rows, _ = collect(monkeypatch, Cloud(items=items))
     assert rows["components"].facts == {"down_components": 2, "unknown_components": 0,
                                         "down_list": "DN dn_6002（name-node-2）、GTM gtm_1（name-node-3）"}
-    assert rows["instance_status"].attrs["gaussdb_components"]["by_type"] == {"CN": 1, "DN": 1, "ETCD": 1, "GTM": 1}
+    assert rows["components"].attrs["gaussdb_components"]["by_type"] == {"CN": 1, "DN": 1, "ETCD": 1, "GTM": 1}
 
 
 def test_undocumented_component_status_is_counted_as_unknown(monkeypatch):
     rows, _ = collect(monkeypatch, Cloud(items=[component("dn_6001", status="ACTIVE")]))
     assert rows["components"].facts["unknown_components"] == 1
-    assert rows["instance_status"].attrs["gaussdb_components"]["warning"] == "部分组件状态未识别，组件告警暂不恢复"
+    assert rows["components"].attrs["gaussdb_components"]["warning"] == "部分组件状态未识别，组件告警暂不恢复"
 
 
 def test_empty_component_list_is_not_evidence_of_health(monkeypatch):
     rows, ctx = collect(monkeypatch, Cloud(items=[]))
-    assert "components" not in rows and ctx.errors == []
-    assert rows["instance_status"].attrs["gaussdb_components"]["state"] == "NO_DATA"
+    assert set(rows) == {"components"} and ctx.errors == []
+    assert rows["components"].facts == {"down_components": None, "unknown_components": None, "down_list": ""}
+    assert rows["components"].attrs["gaussdb_components"]["state"] == "NO_DATA"
+    assert rows["components"].metric_observed_at == AT
 
 
 def test_failure_keeps_the_previous_components_marked_stale_and_disk_still_collected(monkeypatch):
     previous = {"g1": {"state": "AVAILABLE", "observed_at": "2026-11-06T07:55:00+00:00", "total": 3, "down": 0,
                        "items": [{"component_id": "dn_6001"}]}}
-    rows, ctx = collect(monkeypatch, Cloud(error=HcsError(503, "DBS.5000", "synthetic")), previous)
-    assert "components" not in rows and rows["disk"].facts == {"disk_usage": 25.0}
-    summary = rows["instance_status"].attrs["gaussdb_components"]
+    cloud = Cloud(error=HcsError(503, "DBS.5000", "synthetic"))
+    rows, ctx = collect(monkeypatch, cloud, previous)
+    assert set(rows) == {"components"} and cloud.calls == ["instances", "components"]
+    assert rows["components"].facts == {"down_components": None, "unknown_components": None, "down_list": ""}
+    summary = rows["components"].attrs["gaussdb_components"]
     assert summary["state"] == "STALE" and summary["observed_at"] == previous["g1"]["observed_at"]
     assert summary["items"] == previous["g1"]["items"]
+    assert summary["total"] == 3 and summary["down"] == 0
+    assert summary["warning"] == "本轮组件查询失败，显示的是上次获取的组件"
     assert ctx.errors == ["GaussDB 组件状态查询失败（HTTP 503 / DBS.5000）"]
+    cloud.calls.clear()
+    disks, disk_ctx = collect(monkeypatch, cloud, collector=GaussDBStorageCollector)
+    assert cloud.calls == ["instances", "volume-usage"]
+    assert disks["disk"].facts == {"disk_usage": 25.0} and disk_ctx.errors == []
 
 
 def test_first_failure_without_history_is_an_error_state(monkeypatch):
     rows, _ = collect(monkeypatch, Cloud(error=HcsError(0, "NETWORK", "synthetic")))
-    assert rows["instance_status"].attrs["gaussdb_components"] == {
+    assert rows["components"].attrs["gaussdb_components"] == {
         "state": "ERROR", "observed_at": None, "warning": "组件查询失败"}
+    assert rows["components"].facts == {"down_components": None, "unknown_components": None, "down_list": ""}
 
 
 def test_component_rule_is_p2_critical_p1_and_recovers_only_at_zero():

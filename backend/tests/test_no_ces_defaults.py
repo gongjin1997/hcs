@@ -13,7 +13,7 @@ from app.collectors.base import RunContext
 from app.collectors.dcs import DcsCollector
 from app.collectors.ecs import EcsStatusCollector
 from app.collectors.ecs_metrics import EcsMetricsCollector
-from app.collectors.gaussdb import GaussDBCollector
+from app.collectors.gaussdb import GaussDBCollector, GaussDBComponentsCollector, GaussDBStorageCollector
 from app.collectors.mrs import MrsClusterCollector
 from app.core.config import Settings, get_settings
 from app.hcs import auth, client_for
@@ -292,7 +292,8 @@ def test_system_metadata_excludes_aom_and_keeps_ces_disabled_by_default():
 
 
 
-@pytest.mark.parametrize("collector", [EcsStatusCollector, GaussDBCollector, MrsClusterCollector])
+@pytest.mark.parametrize("collector", [EcsStatusCollector, GaussDBCollector, GaussDBStorageCollector,
+                                       GaussDBComponentsCollector, MrsClusterCollector])
 def test_default_collectors_query_native_services_only(collector):
     calls = []
 
@@ -323,7 +324,18 @@ def test_default_collectors_query_native_services_only(collector):
     assert all(row.check_item not in {"cpu", "memory"} for row in rows)
     assert all(row.check_item != "disk" or row.metrics["disk_usage"] == 8.11 for row in rows)
     if collector is GaussDBCollector:
-        assert any(service == "gaussdb" and path.endswith("/components") for service, path in calls)
+        assert calls == [("gaussdb", "/gaussdb/v3.3/{project_id}/instances")]
+        assert {row.check_item for row in rows} == {"instance_status"}
+        assert rows[0].metrics == {"cpu_usage": None, "mem_usage": None}
+    elif collector is GaussDBStorageCollector:
+        assert calls == [("gaussdb", "/gaussdb/v3.3/{project_id}/instances"),
+                         ("gaussdb", "/gaussdb/v3/{project_id}/instances/db-one/volume-usage")]
+        assert {row.check_item for row in rows} == {"disk"}
+        assert rows[0].storage_status == "AVAILABLE" and rows[0].status_raw is None
+    elif collector is GaussDBComponentsCollector:
+        assert calls == [("gaussdb", "/gaussdb/v3.3/{project_id}/instances"),
+                         ("gaussdb", "/gaussdb/v3/{project_id}/instances/db-one/components")]
+        assert {row.check_item for row in rows} == {"components"}
         assert next(row for row in rows if row.check_item == "components").facts["down_components"] == 0
 
 

@@ -14,7 +14,7 @@ from sqlalchemy import select
 
 from app.collectors.base import RunContext
 from app.collectors.dcs import DcsCollector
-from app.collectors.gaussdb import GaussDBCollector
+from app.collectors.gaussdb import GaussDBCollector, GaussDBComponentsCollector, GaussDBStorageCollector
 from app.core.config import get_settings
 from app.hcs import HcsError
 from app.ledger.fetchers import fetch_dcs, fetch_gaussdb
@@ -77,15 +77,18 @@ GAUSS_COMPONENTS = {"total_count": 1, "nodes": [{"id": "node-1", "name": "dn-1",
                                                                  "status": "Primary", "distributed_id": "group-1"}]}]}
 
 
-def native_volumes(instances):
+def native_reads(instances, collector):
     # §4.2.1 正式 URI：磁盘查询使用 v3，不继承实例列表版本号，不用配置 volume.size 计算。
-    # 在线实例（正常、磁盘满、备份中）同时查询 §4.3.10 组件列表，同样是 v3 前缀。
+    # §4.3.10 组件列表也使用 v3 前缀；两个独立采集器分别查询在线实例。
+    suffix = {GaussDBStorageCollector: "volume-usage", GaussDBComponentsCollector: "components"}.get(collector)
+    if suffix is None:
+        return {}
     reads = {}
     for row in instances:
         if row["status"] in GAUSS_ONLINE:
             prefix = f"/gaussdb/v3/{{project_id}}/instances/{row['id']}"
-            reads[("gaussdb", f"{prefix}/volume-usage")] = [{"used": "15.0", "total": "185.0"}]
-            reads[("gaussdb", f"{prefix}/components")] = [GAUSS_COMPONENTS]
+            reads[("gaussdb", f"{prefix}/{suffix}")] = [
+                {"used": "15.0", "total": "185.0"} if collector is GaussDBStorageCollector else GAUSS_COMPONENTS]
     return reads
 
 
@@ -100,7 +103,8 @@ def dcs_instance(index=0, **changes):
 
 
 @pytest.mark.parametrize("variant,path", GAUSSDB_PATHS)
-@pytest.mark.parametrize("consumer", ["collector", "ledger"])
+@pytest.mark.parametrize("consumer", [GaussDBCollector, GaussDBStorageCollector, GaussDBComponentsCollector, "ledger"],
+                         ids=["status", "storage", "components", "ledger"])
 def test_gaussdb_pdf_product_prefix_and_record_offsets(monkeypatch, variant, path, consumer):
     # 四个接口均明确为记录偏移，limit 最大 100；不使用 MySQL 或裸 /v3 路径。
     monkeypatch.setattr(get_settings(), "hcs_gaussdb_api_variant", variant)
@@ -108,22 +112,23 @@ def test_gaussdb_pdf_product_prefix_and_record_offsets(monkeypatch, variant, pat
     client = PdfResponses({("gaussdb", path): [
         {"instances": instances[:2], "total_count": 3},
         {"instances": instances[2:], "total_count": 3},
-    ], **native_volumes(instances)})
-    rows = GaussDBCollector().collect(context(client)) if consumer == "collector" else fetch_gaussdb(client, {})
-    statuses = [row for row in rows if getattr(row, "check_item", "instance_status") == "instance_status"]
-    assert [row.resource_id for row in statuses] == [item["id"] for item in instances]
+    ], **native_reads(instances, consumer)})
+    rows = fetch_gaussdb(client, {}) if consumer == "ledger" else consumer().collect(context(client))
+    assert [row.resource_id for row in rows] == [item["id"] for item in instances]
     expected = [("gaussdb", path, {"offset": 0, "limit": 100}), ("gaussdb", path, {"offset": 2, "limit": 100})]
-    if consumer == "collector":
-        expected += [(service, route, native_call(route)) for service, route in native_volumes(instances)]
-    assert client.calls == expected
+    assert client.calls[:2] == expected
+    expected_details = [(service, route, native_call(route)) for service, route in native_reads(instances, consumer)]
+    # 独立详情可并发，但路径、参数、请求次数及清单分页顺序仍须完全符合 PDF。
+    assert sorted(client.calls[2:], key=lambda call: call[1]) == sorted(expected_details, key=lambda call: call[1])
 
 
 @pytest.mark.parametrize("variant,path", GAUSSDB_PATHS)
-def test_gaussdb_pdf_no_version_or_product_fallback_after_404(monkeypatch, variant, path):
+@pytest.mark.parametrize("collector", [GaussDBCollector, GaussDBStorageCollector, GaussDBComponentsCollector])
+def test_gaussdb_pdf_no_version_or_product_fallback_after_404(monkeypatch, variant, path, collector):
     monkeypatch.setattr(get_settings(), "hcs_gaussdb_api_variant", variant)
     client = PdfResponses({("gaussdb", path): [HcsError(404, "SYNTHETIC.NOT_FOUND", "unavailable")]})
     with pytest.raises(HcsError):
-        GaussDBCollector().collect(context(client))
+        collector().collect(context(client))
     assert client.calls == [("gaussdb", path, {"offset": 0, "limit": 100})]
 
 
@@ -136,17 +141,25 @@ def test_gaussdb_volume_failure_has_safe_diagnostic(error, expected):
     path = GAUSSDB_PATHS[0][1]
     volume_path = f"/gaussdb/v3/{{project_id}}/instances/{item['id']}/volume-usage"
     component_path = f"/gaussdb/v3/{{project_id}}/instances/{item['id']}/components"
-    client = PdfResponses({("gaussdb", path): [{"instances": [item], "total_count": 1}],
+    client = PdfResponses({("gaussdb", path): [{"instances": [item], "total_count": 1}] * 2,
                            ("gaussdb", volume_path): [error], ("gaussdb", component_path): [GAUSS_COMPONENTS]})
     ctx = context(client)
 
-    rows = GaussDBCollector().collect(ctx)
+    rows = GaussDBStorageCollector().collect(ctx)
 
-    # 磁盘失败不影响组件查询：实例状态、组件、缺采的磁盘占位
-    assert [row.check_item for row in rows] == ["instance_status", "components", "disk"]
+    assert [row.check_item for row in rows] == ["disk"]
     assert rows[-1].storage_status == "ERROR"
+    assert rows[-1].facts == {"disk_usage": None} and rows[-1].status_raw is None
     assert ctx.errors == [f"GaussDB 原生磁盘用量查询失败（{expected}）"]
     assert "private endpoint detail" not in ctx.errors[0]
+    assert client.calls == [("gaussdb", path, {"offset": 0, "limit": 100}), ("gaussdb", volume_path, None)]
+    # 磁盘失败不影响独立组件查询。
+    component_ctx = context(client)
+    component, = GaussDBComponentsCollector().collect(component_ctx)
+    assert component.check_item == "components" and component_ctx.errors == []
+    assert component.facts == {"down_components": 0, "unknown_components": 0, "down_list": ""}
+    assert client.calls[2:] == [("gaussdb", path, {"offset": 0, "limit": 100}),
+                               ("gaussdb", component_path, {"offset": 0, "limit": 100})]
 
 
 @pytest.mark.parametrize("role", ["master", "slave", "offline", "secondary", "logger_dorado", "arbiter"])
@@ -156,20 +169,22 @@ def test_gaussdb_pdf_instance_nodes_preserve_roles_and_status(role):
     item = gaussdb_instance(nodes=[node])
     client = PdfResponses({("gaussdb", GAUSSDB_PATHS[0][1]): [
         {"instances": [item], "total_count": 1},
-    ], **native_volumes([item])})
-    row, disk, component = GaussDBCollector().collect(context(client))
+    ] * 3, **native_reads([item], GaussDBStorageCollector), **native_reads([item], GaussDBComponentsCollector)})
+    row, = GaussDBCollector().collect(context(client))
+    assert client.calls == [("gaussdb", GAUSSDB_PATHS[0][1], {"offset": 0, "limit": 100})]
     assert row.attrs["nodes"] == [{"name": "node-1", "role": role, "status": "ACTIVE"}]
-    assert row.metrics == {"cpu_usage": None, "mem_usage": None, "disk_usage": None,
-                           "disk_used_gb": None, "disk_total_gb": None}
+    assert row.metrics == {"cpu_usage": None, "mem_usage": None}
+    disk, = GaussDBStorageCollector().collect(context(client))
+    component, = GaussDBComponentsCollector().collect(context(client))
     assert disk.metrics == {"disk_usage": 8.11, "disk_used_gb": 15, "disk_total_gb": 185}
     assert row.attrs["memory_size"] == 64 and row.attrs["volume_size"] == 40
     assert row.attrs["memory_unit_verified"] is False and row.attrs["volume_unit_verified"] is False
     assert component.check_item == "components"
     assert component.facts == {"down_components": 0, "unknown_components": 0, "down_list": ""}
-    assert row.attrs["gaussdb_components"]["items"][0] == {
+    assert component.attrs["gaussdb_components"]["items"][0] == {
         "node_id": "node-1", "node_name": "dn-1", "availability_zone_id": "az-1", "component_id": "dn_6001",
         "component_type": "DN", "role": "master", "status": "Primary", "distributed_id": "group-1"}
-    assert len(client.calls) == 3
+    assert len(client.calls) == 5
 
 
 @pytest.mark.parametrize("variant,path", GAUSSDB_PATHS)
@@ -188,9 +203,10 @@ def test_gaussdb_pdf_instance_status_is_preserved_verbatim(status):
     item = gaussdb_instance(status=status)
     client = PdfResponses({("gaussdb", GAUSSDB_PATHS[0][1]): [
         {"instances": [item], "total_count": 1},
-    ], **native_volumes([item])})
+    ]})
     row = GaussDBCollector().collect(context(client))[0]
     assert row.status_raw == status and row.facts == {"status": status}
+    assert client.calls == [("gaussdb", GAUSSDB_PATHS[0][1], {"offset": 0, "limit": 100})]
 
 
 @pytest.mark.parametrize("consumer", ["collector", "ledger"])

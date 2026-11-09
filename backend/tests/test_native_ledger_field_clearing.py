@@ -76,19 +76,28 @@ def test_native_snapshot_clears_only_declared_invalid_old_fields(isolated_db, rt
 
 @pytest.mark.parametrize("verified,expected", [(False, None), (None, 64)])
 def test_gaussdb_status_collection_clears_only_explicitly_unverified_capacity(isolated_db, verified, expected):
+    disk = {"disk_usage": 25, "disk_used_gb": 50, "disk_total_gb": 200}
+    monitoring = {"status": "AVAILABLE", "observed_at": "2026-11-09T00:00:00+00:00"}
+    components = {"state": "AVAILABLE", "total": 1, "down": 0, "items": [{"component_id": "dn-1"}]}
     row = Resource(service="gaussdb", resource_type="gaussdb_instance", resource_id="one", name="one",
-                   memory_gb=64, storage_gb=64, spec="64 GB | 64 GB", attrs={"volume_gb": 64},
+                   memory_gb=64, storage_gb=64, spec="64 GB | 64 GB",
+                   attrs={"volume_gb": 64, "gaussdb_monitoring": monitoring, "gaussdb_components": components},
+                   metrics={"cpu_usage": 99, "mem_usage": 98, **disk},
                    tenant_id=101, project_ref=1001)
     isolated_db.add(row)
     isolated_db.commit()
     attrs = {} if verified is None else {"memory_unit_verified": verified, "volume_unit_verified": verified,
                                         "volume_gb": None, "type": "分布式", "vcpus": 8}
-    obs = Observation("gaussdb_instance", "one", "one", "instance_status", {"status": "ACTIVE"}, attrs=attrs)
+    obs = Observation("gaussdb_instance", "one", "one", "instance_status", {"status": "ACTIVE"}, attrs=attrs,
+                      metrics={"cpu_usage": None, "mem_usage": None})
     ctx = RunContext(client=None, account="contract", project_id="contract", tenant_id=101, project_ref=1001)
     result = upsert_resource(isolated_db, "gaussdb", [obs], utcnow(), ctx)
     assert result.id == row.id and result.memory_gb == expected and result.storage_gb == expected
     assert result.attrs["volume_gb"] == expected
     assert result.spec == ("分布式 | 8 vCPU" if verified is False else "64 GB | 64 GB")
+    assert result.metrics == {"cpu_usage": None, "mem_usage": None, **disk}
+    assert result.attrs["gaussdb_monitoring"] == monitoring
+    assert result.attrs["gaussdb_components"] == components
 
 
 @pytest.mark.parametrize("bad", ["field", "attr"])

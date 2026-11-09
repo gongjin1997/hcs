@@ -1,6 +1,7 @@
 <template>
-  <el-dialog v-model="visible" :title="title" width="880px" append-to-body destroy-on-close>
+  <el-dialog v-model="visible" :title="title" width="min(880px, calc(100vw - 24px))" class="collect-scope-dialog" append-to-body destroy-on-close>
     <div v-loading="saving" class="scope-dialog">
+      <div class="scope-editor" role="region" aria-label="采集范围规则" tabindex="0">
       <el-alert type="info" :closable="false" show-icon class="mb-12">
         <template #title>在“采集开关”开启的前提下，只采集（或屏蔽）这类资源里的一部分对象</template>
         <div class="tips">
@@ -11,7 +12,7 @@
       </el-alert>
 
       <div v-if="tenantId !== 0" class="mode">
-        <el-radio-group v-model="mode" :disabled="!canManage" aria-label="范围来源">
+        <el-radio-group v-model="mode" :disabled="!canManage" aria-label="范围来源" class="mode-options">
           <el-radio-button value="follow">跟随全局（{{ globalText }}）</el-radio-button>
           <el-radio-button value="own">单独设置</el-radio-button>
         </el-radio-group>
@@ -62,8 +63,9 @@
       <div v-else class="text-3 mb-12">当前使用全局默认：{{ globalText }}。</div>
 
       <el-alert v-if="errors.length" type="warning" :closable="false" show-icon class="mt-12" :title="errors.join('；')" />
+      </div>
 
-      <div v-if="canManage" class="preview" :class="{ stale: previewStale }">
+      <div v-if="canManage" class="preview" :class="{ stale: previewStale }" role="region" aria-label="采集范围影响预估" tabindex="0">
         <div class="preview-head">
           <b>影响预估</b>
           <el-button size="small" :loading="previewing" :disabled="!!errors.length" @click="runPreview">重新预估</el-button>
@@ -235,20 +237,46 @@ async function save() {
 </script>
 
 <style scoped lang="scss">
+// 弹窗通过 Teleport 渲染；仅约束本组件专用类，不影响其他弹窗。
+:global(.collect-scope-dialog) { display: flex; flex-direction: column; max-height: calc(100dvh - 24px); margin: 12px auto; }
+:global(.collect-scope-dialog .el-dialog__header), :global(.collect-scope-dialog .el-dialog__footer) { flex: none; }
+:global(.collect-scope-dialog .el-dialog__body) { display: flex; flex: 1; min-height: 0; overflow: hidden; }
+.scope-dialog { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
+.scope-editor { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .tips { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; font-size: 12px; line-height: 1.7; color: var(--hi-text-2);
   code { padding: 0 4px; border-radius: 3px; background: var(--hi-bg-soft); } }
 .mode { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
+.mode-options { min-width: 0; max-width: 100%; align-items: stretch;
+  :deep(.el-radio-button) { min-width: 0; }
+  :deep(.el-radio-button__inner) { max-width: 100%; height: 100%; white-space: normal; overflow-wrap: anywhere; line-height: 1.5; }
+}
 .empty-rules { padding: 4px 0; }
 .rule { margin-bottom: 12px; padding: 10px 12px; border: 1px solid var(--hi-border); border-radius: 8px; border-left-width: 4px;
   &.exclude { border-left-color: var(--hi-p2); } &.include { border-left-color: var(--hi-ok); }
-  .rule-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; .no { font-weight: 600; color: var(--hi-text-2); } .effect { width: 112px; } .note { flex: 1; } }
+  .rule-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 8px;
+    .no { flex: none; font-weight: 600; color: var(--hi-text-2); }
+    .effect { width: 112px; flex: none; }
+    .note { flex: 1 1 180px; min-width: 0; }
+  }
   .conds { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; width: 100%;
-    .cond { display: flex; align-items: center; gap: 8px; width: 100%; .dim { width: 84px; flex: none; color: var(--hi-text-2); font-size: 13px; } .values { flex: 1; } } } }
+    .cond { display: grid; grid-template-columns: 84px minmax(0, 1fr) auto; align-items: center; gap: 8px; width: 100%;
+      .dim { color: var(--hi-text-2); font-size: 13px; overflow-wrap: anywhere; }
+      .values { min-width: 0; }
+    }
+  }
+}
 .opt-hint { float: right; margin-left: 16px; color: var(--hi-text-3); font-size: 12px; }
-.add-rules { display: flex; gap: 8px; margin-bottom: 12px; }
-.preview { margin-top: 14px; padding: 10px 14px; border-radius: 8px; background: var(--hi-bg-soft); transition: opacity .2s;
+.add-rules { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px;
+  :deep(.el-button + .el-button) { margin-left: 0; }
+}
+.preview { flex: none; max-height: 40dvh; overflow-y: auto; margin-top: 14px; padding: 10px 14px; border-radius: 8px; background: var(--hi-bg-soft); transition: opacity .2s;
   &.stale { opacity: .55; }
   .preview-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
   .counts { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; .ok b { color: var(--hi-ok); } .out b { color: var(--hi-p2); } .warn { color: var(--hi-p1); } }
   .samples { margin-top: 6px; font-size: 12px; color: var(--hi-text-2); overflow-wrap: anywhere; } }
+@media (max-width: 600px) {
+  .rule .conds .cond { grid-template-columns: minmax(0, 1fr) auto;
+    .dim { grid-column: 1 / -1; }
+  }
+}
 </style>

@@ -1,8 +1,14 @@
 <template>
   <div v-loading="loading" class="switch-panel">
-    <el-alert type="info" :closable="false" show-icon class="mb-12">
-      <template #title>按租户和资源类型启停采集</template>
-      <div class="rules">
+    <el-alert type="info" :closable="false" show-icon class="rules-notice mb-12" :class="{ 'rules-expanded': rulesExpanded }">
+      <template #title>
+        <span class="rules-title">
+          <span>按租户和资源类型启停采集</span>
+          <el-button link type="primary" size="small" class="rules-toggle" :aria-expanded="rulesExpanded" aria-controls="collect-switch-rules"
+                     @click="rulesExpanded = !rulesExpanded">{{ rulesExpanded ? '收起说明' : '展开说明' }}</el-button>
+        </span>
+      </template>
+      <div id="collect-switch-rules" class="rules">
         <span><b>关闭后</b>：台账同步跳过该类资源（已有台账保留，不会标记为“已释放”）；对应巡检任务对该租户不再执行；该类资源的活动告警自动关闭并留处理记录。</span>
         <span><b>重新开启</b>：下一次台账同步 / 巡检自动恢复。租户设置优先于全局默认；“跟随全局”= 使用全局开关。</span>
         <span><b>采集范围</b>：开关开启后，还可以只采集一部分对象（例如 CCE 只关注某些命名空间、DCS 屏蔽某个实例、屏蔽某个工作空间下的作业）；点单元格里的“设置范围”配置。</span>
@@ -10,15 +16,17 @@
     </el-alert>
 
     <div class="toolbar">
-      <el-segmented v-model="category" :options="categoryOptions" />
-      <el-input v-model="keyword" clearable placeholder="资源类型 / 服务" :prefix-icon="Search" style="width: 200px" />
-      <el-checkbox v-model="onlyOff">只看有关闭的</el-checkbox>
-      <div class="ml-auto flex gap-8">
-        <span class="text-3">{{ offSummary }}</span>
-        <template v-if="canManage">
+      <div class="toolbar-filters">
+        <el-segmented v-model="category" :options="categoryOptions" class="category-filter" />
+        <el-input v-model="keyword" clearable placeholder="资源类型 / 服务" :prefix-icon="Search" class="keyword-filter" />
+        <el-checkbox v-model="onlyOff">只看有关闭的</el-checkbox>
+      </div>
+      <div class="toolbar-actions">
+        <span class="text-3 off-summary">{{ offSummary }}</span>
+        <div v-if="canManage" class="toolbar-buttons">
           <el-button :disabled="!dirtyCount" @click="discard">放弃修改</el-button>
           <el-button type="primary" :disabled="!dirtyCount" :loading="saving" @click="onSave">保存<template v-if="dirtyCount">（{{ dirtyCount }} 项）</template></el-button>
-        </template>
+        </div>
       </div>
     </div>
 
@@ -39,7 +47,7 @@
           </div>
         </template>
       </el-table-column>
-      <el-table-column label="全局默认" width="120" align="center">
+      <el-table-column label="全局默认" width="156" align="center">
         <template #header>
           <el-tooltip content="租户没有单独设置时使用全局开关；修改全局开关需要全部租户的数据权限" placement="top">
             <span>全局默认 <el-icon class="q"><QuestionFilled /></el-icon></span>
@@ -56,9 +64,12 @@
           </div>
         </template>
       </el-table-column>
-      <el-table-column v-for="t in data.tenants" :key="t.id" min-width="190" align="center">
+      <el-table-column v-for="t in data.tenants" :key="t.id" min-width="220" align="center">
         <template #header>
-          <span class="t-head"><i :style="{ background: t.color }" />{{ t.short_name || t.name }}<el-tag v-if="!t.enabled" size="small" type="info">已停用</el-tag></span>
+          <span class="t-head">
+            <span class="t-identity"><i :style="{ background: t.color }" /><span>{{ t.short_name || t.name }}</span></span>
+            <el-tag v-if="!t.enabled" size="small" type="info">已停用</el-tag>
+          </span>
         </template>
         <template #default="{ row }">
           <div class="cell-wrap" :class="[{ dirty: isDirty(row.code, t.id) }, effOf(row as SwitchType, t.id) ? 'on' : 'off']">
@@ -69,7 +80,7 @@
               <el-option value="off" label="关闭" />
             </el-select>
             <div class="eff">
-              <span class="dot" />{{ effOf(row as SwitchType, t.id) ? '采集中' : '已关闭' }}
+              <span class="eff-state"><span class="dot" />{{ effOf(row as SwitchType, t.id) ? '采集中' : '已关闭' }}</span>
               <span class="text-3">· 资源 {{ row.tenants[t.id]?.resources ?? 0 }}</span>
               <span v-if="row.tenants[t.id]?.active_alarms" class="alarms">· 告警 {{ row.tenants[t.id].active_alarms }}</span>
             </div>
@@ -145,6 +156,7 @@ const taskNames = ref<Record<string, string>>({})
 const category = ref('all')
 const keyword = ref('')
 const onlyOff = ref(false)
+const rulesExpanded = ref(false)
 /** 暂存的修改：key = `${type}|${tenantId}`（tenantId 0 = 全局）；值 null = 跟随全局 */
 const staged = reactive(new Map<string, boolean | null>())
 
@@ -259,21 +271,44 @@ async function doSave() {
 </script>
 
 <style scoped lang="scss">
+.switch-panel { min-width: 0; }
+.rules-title { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; }
+.rules-toggle { display: none; }
 .rules { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; font-size: 12px; line-height: 1.7; color: var(--hi-text-2); }
 .toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.toolbar-filters { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; flex: 1 1 560px; min-width: 0;
+  .category-filter { max-width: 100%; overflow-x: auto; }
+  .keyword-filter { width: 200px; max-width: 100%; }
+}
+.toolbar-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px 12px; margin-left: auto; min-width: 0; max-width: 100%; }
+.off-summary { overflow-wrap: anywhere; }
+.toolbar-buttons { display: flex; align-items: center; gap: 8px; flex: none;
+  :deep(.el-button + .el-button) { margin-left: 0; }
+}
 .matrix {
   :deep(.cat-col) { background: var(--hi-bg-soft); vertical-align: middle; }
   .cat { font-weight: 600; color: var(--hi-text-2); }
-  .type { display: flex; align-items: center; gap: 6px; }
-  .sub { margin-top: 2px; font-size: 12px; }
+  .type { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; overflow-wrap: anywhere;
+    b { min-width: 0; max-width: 100%; }
+    :deep(.el-tag) { flex: none; }
+  }
+  .sub { margin-top: 2px; font-size: 12px; overflow-wrap: anywhere; }
   .q { vertical-align: -2px; color: var(--hi-text-3); }
-  .t-head { display: inline-flex; align-items: center; gap: 6px; i { width: 8px; height: 8px; border-radius: 50%; } }
-  .cell-wrap { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 2px 0; border-radius: 6px;
+  .t-head { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 4px 6px;
+    .t-identity { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+    i { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+    :deep(.el-tag) { flex: none; }
+  }
+  .cell-wrap { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 4px 0; min-width: 0; border-radius: 6px;
     &.dirty { background: #fff7e6; box-shadow: 0 0 0 1px #ffd591 inset; }
-    .sel { width: 150px; }
-    .scope-line { display: flex; align-items: center; gap: 4px; font-size: 12px; }
-    .eff { font-size: 12px; display: flex; align-items: center; gap: 4px; color: var(--hi-text-2);
-      .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--hi-ok); }
+    .sel { width: 150px; max-width: 100%; }
+    .scope-line { display: flex; flex-direction: column; align-items: center; gap: 4px; max-width: 100%; font-size: 12px;
+      :deep(.el-tag) { max-width: 100%; height: auto; min-height: 20px; white-space: normal; overflow-wrap: anywhere; }
+    }
+    .eff { font-size: 12px; display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 0 4px; max-width: 100%; color: var(--hi-text-2);
+      > span { white-space: nowrap; }
+      .eff-state { display: inline-flex; align-items: center; gap: 4px; }
+      .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--hi-ok); flex: none; }
       .alarms { color: var(--hi-p2); } }
     &.off .eff { color: var(--hi-text-3); .dot { background: var(--hi-unknown); } } }
   :deep(.has-off td:not(.cat-col)) { background: #fafbfc; }
@@ -284,4 +319,16 @@ async function doSave() {
     .h { display: flex; align-items: center; gap: 6px; font-weight: 600; margin-bottom: 8px; }
     .tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
     .warn { font-size: 13px; color: var(--hi-p1); } } }
+@media (max-width: 767px) {
+  .rules-notice {
+    :deep(.el-alert__icon) { display: none; }
+    :deep(.el-alert__content) { min-width: 0; width: 100%; padding: 0; }
+    &:not(.rules-expanded) :deep(.el-alert__description) { display: none; }
+  }
+  .rules-title { justify-content: space-between; }
+  .rules-toggle { display: inline-flex; }
+  .toolbar-filters { flex-basis: 100%; .keyword-filter { width: 100%; } }
+  .toolbar-actions { width: 100%; }
+  .off-summary { flex-basis: 100%; }
+}
 </style>

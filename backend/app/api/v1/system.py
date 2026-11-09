@@ -37,6 +37,7 @@ from app.services import (
     catalog,
     collect_scope,
     collect_switch,
+    inspection_evidence,
     pipeline,
     platform_watch,
     settings_service,
@@ -181,6 +182,8 @@ def tasks(db: Session = Depends(get_db), scope: Scope = Depends(get_scope),
                     "cron": t.cron, "enabled": t.enabled, "params": t.params, "next_run": next_run,
                     "next_run_source": "scheduler" if nxt else "estimate",
                     "types": collect_switch.TASK_TYPES.get(t.code, []), "note": TASK_NOTES.get(t.code),
+                    "checks": list(catalog.TASK_BY_CODE[t.code].checks) if t.code in catalog.TASK_BY_CODE else [],
+                    "steps": list(catalog.TASK_STEPS.get(t.code, ())),
                     "min_interval": MIN_INTERVAL.get(t.code, 30), "skipped_tenants": _skipped(db, t.code, scope, tm),
                     "scopes": [TaskScopeOut(**{k: v for k, v in s.items() if k != "run"},
                                            tenant_name=_tenant_name(tm, s["tenant_id"])).model_dump() for s in current],
@@ -244,6 +247,9 @@ def update_task(code: str, body: TaskPatch, db: Session = Depends(get_db), audit
     if "aom" in data:
         after["aom"] = (t.params or {}).get("aom")
     diff = {k: [before[k], after[k]] for k in after if before[k] != after[k]}
+    if "enabled" in diff and code in ("gaussdb_status", "gaussdb_storage", "gaussdb_components"):
+        db.flush()
+        inspection_evidence.sync_gauss_task_requirements(db)
     if diff:
         audit.log("task.update", target_type="task", target_id=code, target_name=t.name, detail={"changes": diff})
     else:

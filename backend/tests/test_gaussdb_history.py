@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import func, select
 
 from app.collectors.base import Observation, RunContext
-from app.collectors.gaussdb import GaussDBCollector, GaussStorageObservation
+from app.collectors.gaussdb import GaussDBCollector, GaussDBStorageCollector, GaussStorageObservation
 from app.hcs import HcsError
 from app.models import GaussDBStorageSample, HcsAccount, HcsProject, Resource
 from app.services import gaussdb_monitoring as service
@@ -148,9 +148,6 @@ class CollectorCloud:
         if path.endswith("/instances"):
             return {"total_count": 1, "instances": [{"id": "same-cloud-instance", "name": "原生实例",
                 "status": self.status, "volume": {"size": 9999}, "flavor_info": {"mem": 8888}, "nodes": []}]}
-        if path.endswith("/components"):        # 组件状态与磁盘历史无关，这里给出一组正常组件
-            return {"total_count": 1, "nodes": [{"id": "node-1", "name": "dn-1", "components": [
-                {"id": "dn_6001", "type": "DN", "role": "master", "status": "Primary"}]}]}
         assert path == "/gaussdb/v3/{project_id}/instances/same-cloud-instance/volume-usage"
         if isinstance(self.volume, Exception):
             raise self.volume
@@ -172,7 +169,9 @@ def test_collector_pipeline_persist_actual_samples_and_failures_not_config(gauss
     monkeypatch.setattr("app.collectors.gaussdb.utcnow", lambda: START)
     cloud = CollectorCloud(volume, status)
     ctx = context(g, cloud)
-    observations = GaussDBCollector().collect(ctx)
+    observations = GaussDBStorageCollector().collect(ctx)
+    assert [o.check_item for o in observations] == ["disk"]
+    assert observations[0].status_raw is None and observations[0].storage_status == expected
     assert not any("disk_sample_status" in o.metrics for o in observations)
     process_observations(g.db, "gaussdb", observations, ctx, START)
     g.db.commit()
@@ -186,8 +185,20 @@ def test_collector_pipeline_persist_actual_samples_and_failures_not_config(gauss
     else:
         assert row.used_gb is row.total_gb is row.usage_percent is None
     assert g.db.get(Resource, 112).metrics["disk_usage"] == 97  # 同云 ID 的其他项目不变。
-    assert g.db.get(Resource, 111).metrics["cpu_usage"] is None
+    resource = g.db.get(Resource, 111)
+    assert resource.metrics["cpu_usage"] == 99 and resource.metrics["mem_usage"] == 98
+    assert resource.status_raw == "ACTIVE" and resource.attrs["memory_unit_verified"] is True
     assert all(service_name == "gaussdb" for service_name, _, _ in cloud.calls)
+    assert len(cloud.calls) == (1 if status == "BUILD" else 2)
+    disk_metrics = {key: resource.metrics[key] for key in ("disk_usage", "disk_used_gb", "disk_total_gb")}
+    monitoring = resource.attrs["gaussdb_monitoring"].copy()
+    before_status = len(cloud.calls)
+    process_observations(g.db, "gaussdb", GaussDBCollector().collect(ctx), ctx, START)
+    assert len(cloud.calls) == before_status + 1 and cloud.calls[-1][1].endswith("/instances")
+    assert resource.metrics["cpu_usage"] is resource.metrics["mem_usage"] is None
+    assert {key: resource.metrics[key] for key in disk_metrics} == disk_metrics
+    assert resource.attrs["gaussdb_monitoring"] == monitoring
+    assert g.db.scalar(select(func.count()).select_from(GaussDBStorageSample)) == 1
 
 
 @pytest.mark.parametrize("skip", ["snapshot", "unmonitored", "wrong_scope", "no_project", "naive"])
@@ -214,7 +225,7 @@ def test_pipeline_new_resource_flushes_before_sample_and_retries_are_idempotent(
     g = gauss_api
     monkeypatch.setattr("app.collectors.gaussdb.utcnow", lambda: START)
     ctx = context(g, CollectorCloud())
-    observations = GaussDBCollector().collect(ctx)
+    observations = GaussDBStorageCollector().collect(ctx)
     for observation in observations:
         observation.resource_id = "new-gauss-instance"
     process_observations(g.db, "gaussdb", observations, ctx, START)
@@ -288,7 +299,7 @@ def test_storage_history_received_time_never_uses_pipeline_clock(gauss_api, monk
     g = gauss_api
     monkeypatch.setattr("app.collectors.gaussdb.utcnow", lambda: START)
     ctx = context(g, CollectorCloud())
-    observations = GaussDBCollector().collect(ctx)
+    observations = GaussDBStorageCollector().collect(ctx)
     process_observations(g.db, "gaussdb", observations, ctx, START + timedelta(minutes=10))
     row = g.db.scalar(select(GaussDBStorageSample))
     assert row.observed_at == row.collected_at == START

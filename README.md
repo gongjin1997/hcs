@@ -81,7 +81,7 @@ make dev-mock      # 可选，终端 3：Mock HCS（:9000，两个租户）；ba
 | 命令 | 说明 |
 | --- | --- |
 | `make check` | 提交前检查（CI 同款）：ruff + mypy + vue-tsc + pytest + 前端构建 |
-| `make run-once task=<code>` | 手动执行一次任务：`dgc_realtime_status` `dgc_batch_instance` `mrs_cluster_status` `mrs_job_status` `gaussdb_status` `dcs_status` `ecs_status` `cce_pod_events` `ledger_sync` `data_cleanup` |
+| `make run-once task=<code>` | 手动执行一次任务：`dgc_realtime_status` `dgc_batch_instance` `mrs_cluster_status` `mrs_job_status` `gaussdb_status` `gaussdb_storage` `gaussdb_components` `dcs_status` `ecs_status` `cce_pod_events` `ledger_sync` `data_cleanup` |
 | `make report kind=<KIND>` | 手动生成上一周期报表：`DAILY` `WEEKLY` `MONTHLY` `LEDGER` |
 | `make status [args=--json]` | 平台自检：进程心跳、通知积压、任务健康、平台告警、迁移版本 |
 | `make probe args="--tenant tenant-a"` | HCS 接口探测（只读），核对字段映射；对 Mock 加 `--mock-url http://127.0.0.1:9000` |

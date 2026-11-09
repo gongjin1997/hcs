@@ -17,7 +17,7 @@ from app.api.v1.system import router
 from app.collectors import dataarts
 from app.collectors.base import Observation, RunContext
 from app.collectors.dcs import DcsCollector
-from app.collectors.gaussdb import GaussDBCollector
+from app.collectors.gaussdb import GaussDBCollector, GaussDBComponentsCollector, GaussDBStorageCollector
 from app.collectors.mrs import MrsJobCollector
 from app.core.db import get_db
 from app.core.deps import CurrentUser, get_current_user
@@ -387,7 +387,8 @@ def test_mrs_job_collector_skips_excluded_jobs_before_detail_queries_and_filters
     assert client.details() == ["/v1/{project_id}/jobs/job-a/instances/1"]            # job-tmp 的详情没有请求
 
 
-def test_dcs_and_gaussdb_collectors_trim_instances_before_statistics_and_volume_calls():
+@pytest.mark.parametrize("gauss_collector", [GaussDBCollector, GaussDBStorageCollector, GaussDBComponentsCollector])
+def test_dcs_and_gaussdb_collectors_trim_instances_before_statistics_and_detail_calls(gauss_collector):
     calls = []
 
     class Dcs:
@@ -411,19 +412,31 @@ def test_dcs_and_gaussdb_collectors_trim_instances_before_statistics_and_volume_
     class Gauss:
         def get(self, service, path, *, params=None):
             gauss_calls.append(path)
+            assert service == "gaussdb"
             if path.endswith("/instances"):
                 return {"total_count": 2, "instances": [
                     {"id": "g-1", "name": "prod-db", "status": "ACTIVE", "volume": {"size": 9999},
                      "flavor_info": {"mem": 8888}, "nodes": []},
                     {"id": "g-2", "name": "scratch-db", "status": "ACTIVE", "volume": {"size": 9999},
                      "flavor_info": {"mem": 8888}, "nodes": []}]}
+            if path.endswith("/components"):
+                assert params == {"offset": 0, "limit": 100}
+                return {"total_count": 1, "nodes": [{"id": "node-1", "components": [
+                    {"id": "dn-1", "type": "DN", "status": "Primary"}]}]}
+            assert path.endswith("/volume-usage")
             return {"used": "25", "total": "200"}
 
     ctx = RunContext(client=Gauss(), account="a", project_id="p", tenant_id=11)
     ctx.scopes = scopes(t0__gaussdb_instance=[include(id="g-1")])                      # 全局范围，所有租户适用
-    assert {r.resource_id for r in GaussDBCollector().collect(ctx)} == {"g-1"}
-    assert [p for p in gauss_calls if p.endswith("volume-usage")] == [
-        "/gaussdb/v3/{project_id}/instances/g-1/volume-usage"]
+    assert {r.resource_id for r in gauss_collector().collect(ctx)} == {"g-1"}
+    suffix = {GaussDBStorageCollector: "volume-usage", GaussDBComponentsCollector: "components"}.get(gauss_collector)
+    assert gauss_calls == ["/gaussdb/v3.3/{project_id}/instances"] + (
+        [f"/gaussdb/v3/{{project_id}}/instances/g-1/{suffix}"] if suffix else [])
+    assert ctx.errors == []
+    gauss_calls.clear()
+    ctx.scopes = scopes(t0__gaussdb_instance=[include(id="missing")])
+    assert gauss_collector().collect(ctx) == []
+    assert gauss_calls == ["/gaussdb/v3.3/{project_id}/instances"]
 
 
 # ---------------------------------------------------------------- CCE：集群 / 命名空间 / 工作负载

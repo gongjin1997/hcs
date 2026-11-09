@@ -1,9 +1,14 @@
 import logging
 import re
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from dataclasses import dataclass
 from datetime import datetime
+from time import perf_counter
+from typing import Any
 
+from app.core.logging import log_context
 from app.hcs import HcsError
 from app.hcs.gaussdb_api import gaussdb_instances_path
 from app.hcs.gaussdb_native import COMPONENT_STATES, components, volume_usage
@@ -44,108 +49,165 @@ def component_summary(items: list[dict], observed_at: datetime) -> tuple[dict, d
     return summary, {"down_components": len(down), "unknown_components": unknown, "down_list": listed}
 
 
-class GaussDBCollector:
-    """原生实例状态、磁盘使用量与组件状态；CPU/内存性能由独立原生巡检报告展示。"""
+@dataclass
+class _Detail:
+    value: Any
+    error: HcsError | ValueError | None
+    observed_at: datetime
+    duration_ms: float
 
-    code, service, name = "gaussdb_status", "gaussdb", "GaussDB 实例状态与容量"
+
+def _instances(ctx: RunContext) -> tuple[list[dict], float]:
+    started = perf_counter()
+    items = list(page_all(lambda p: ctx.client.get("gaussdb", gaussdb_instances_path(), params=p),
+                          "instances", total_key="total_count"))
+    scope = ctx.scope("gaussdb_instance")
+    if not scope.open:
+        items = [item for item in items if scope.keep({"id": item["id"], "name": item["name"]})]
+    return items, round((perf_counter() - started) * 1000, 2)
+
+
+def _online(item: dict) -> bool:
+    status = item.get("status")
+    return isinstance(status, str) and status in ONLINE_STATES
+
+
+def _stats(ctx: RunContext, phase: str, items: list[dict], started: float, list_ms: float,
+           results: dict[str, _Detail] | None = None, *, concurrency: int = 0, detail_ms: float = 0) -> None:
+    results = results or {}
+    durations = [item.duration_ms for item in results.values()]
+    summary = {"phase": phase, "instances": len(items),
+               "online": sum(_online(item) for item in items),
+               "queried": len(results), "failed": sum(item.error is not None for item in results.values()),
+               "concurrency": concurrency, "list_ms": list_ms, "detail_ms": round(detail_ms, 2),
+               "detail_total_ms": round(sum(durations), 2), "detail_max_ms": round(max(durations, default=0), 2),
+               "wall_ms": round((perf_counter() - started) * 1000, 2)}
+    ctx.stats.update(metrics_source="GAUSSDB", gaussdb=summary)
+    log.info("gaussdb_collection_finished", extra={"event": "gaussdb_collection_finished", **summary})
+
+
+def _details(ctx: RunContext, items: list[dict], phase: str) -> tuple[dict[str, _Detail], int, float]:
+    selected = [item for item in items if _online(item)]
+    if not selected:
+        return {}, 0, 0
+    # 复用客户端的全局/服务 QPS、在途上限与重试预算，不创建额外客户端绕过限流。
+    concurrency = min(len(selected), max(1, min(16, int(ctx.params.get("hcs_concurrency", 4)))),
+                      max(1, int(getattr(ctx.client, "max_concurrency", 2))))
+
+    def fetch(item: dict) -> _Detail:
+        started = perf_counter()
+        with log_context(collection_phase=phase, resource_id=item["id"]):
+            value, error = None, None
+            try:
+                value = volume_usage(ctx.client, item["id"]) if phase == "storage" else components(ctx.client, item["id"])
+            except (HcsError, ValueError) as exc:
+                error = exc
+                log_collection_failure(log, ctx, exc, cloud_service="gaussdb", phase=phase,
+                                       resource_id=item["id"], failure_kind=_failure_kind(exc))
+            elapsed = (perf_counter() - started) * 1000
+            log.info("gaussdb_detail_finished", extra={"event": "gaussdb_detail_finished", "phase": phase,
+                     "resource_id": item["id"], "duration_ms": round(elapsed, 2),
+                     "result": "ERROR" if error else "SUCCESS"})
+            return _Detail(value, error, utcnow(), elapsed)
+
+    started = perf_counter()
+    with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix=f"gaussdb-{phase}") as pool:
+        futures = [pool.submit(copy_context().run, fetch, item) for item in selected]
+        results = {item["id"]: future.result() for item, future in zip(selected, futures, strict=True)}
+    return results, concurrency, (perf_counter() - started) * 1000
+
+
+class GaussDBCollector:
+    """实例状态独立检查，不等待磁盘/组件接口，也不覆盖它们的采样结果。"""
+
+    code, service, name = "gaussdb_status", "gaussdb", "GaussDB 实例状态"
 
     def collect(self, ctx: RunContext) -> list[Observation]:
-        insts = list(page_all(lambda p: ctx.client.get("gaussdb", gaussdb_instances_path(), params=p),
-                              "instances", total_key="total_count"))
-        scope = ctx.scope("gaussdb_instance")      # 采集范围：范围外的实例不再逐个查询磁盘用量与组件
-        if not scope.open:
-            insts = [i for i in insts if scope.keep({"id": i["id"], "name": i["name"]})]
-        obs: list[Observation] = []
-        native_volume = native_components = 0
-        failed_components: list[GaussStorageObservation] = []
-        for i in insts:
-            iid, name, status = i["id"], i["name"], i.get("status")
-            known_status = isinstance(status, str) and status in NATIVE_STATES | {"FROZEN"}
-            if not known_status:
+        started = perf_counter()
+        items, list_ms = _instances(ctx)
+        observations = []
+        for item in items:
+            status = item.get("status")
+            known = isinstance(status, str) and status in NATIVE_STATES | {"FROZEN"}
+            if not known:
                 ctx.errors.append("GaussDB 实例状态缺失或未识别，本次不判定为正常")
             nodes = [{"name": n.get("name"), "role": n.get("role"), "status": n.get("status")}
-                     for n in i.get("nodes", [])]
-            attrs = {**gaussdb_attrs(i), "nodes": nodes, "metrics_source": "GAUSSDB"}
-            status_observation = GaussStorageObservation("gaussdb_instance", iid, name, "instance_status",
-                                   {"status": status if known_status else None},
-                                   status_raw=status, attrs=attrs,
-                                   metrics={"cpu_usage": None, "mem_usage": None, "disk_usage": None,
-                                            "disk_used_gb": None, "disk_total_gb": None}, metric_observed_at=utcnow())
-            obs.append(status_observation)
-            if status not in ONLINE_STATES:
-                continue
-            if self._volume(ctx, status_observation, obs):
-                native_volume += 1
-            try:
-                items = components(ctx.client, iid)
-            except (HcsError, ValueError) as exc:
-                detail = _failure_kind(exc)
-                ctx.errors.append(f"GaussDB 组件状态查询失败（{detail}）")
-                log_collection_failure(log, ctx, exc, cloud_service="gaussdb", phase="native_components",
-                                       failure_kind=detail)
-                failed_components.append(status_observation)
-                continue
-            native_components += 1
-            summary, facts = component_summary(items, utcnow())
-            attrs["gaussdb_components"] = summary
-            if items:       # 空清单不是“组件全部正常”的证据：按缺采处理，不恢复告警
-                obs.append(Observation("gaussdb_instance", iid, name, "components", facts,
-                                       metric_observed_at=utcnow()))
-        if failed_components:   # 查询失败：保留上次的组件清单并标注，不能让旧结果冒充本轮
-            previous = previous_attrs(ctx, "gaussdb_instance", [o.resource_id for o in failed_components],
-                                      "gaussdb_components")
-            for failed in failed_components:
-                last = previous.get(failed.resource_id) or {}
-                stale = last.get("state") in ("AVAILABLE", "STALE") and isinstance(last.get("observed_at"), str)
-                failed.attrs["gaussdb_components"] = (
-                    {**last, "state": "STALE", "warning": "本轮组件查询失败，显示的是上次获取的组件"} if stale else
-                    {"state": "ERROR", "observed_at": None, "warning": "组件查询失败"})
-        ctx.stats.update(metrics_source="GAUSSDB", native_volume=native_volume, native_components=native_components)
-        measured = {o.resource_id for o in obs if o.check_item == "disk"}
-        for state in list(obs):
-            if (isinstance(state, GaussStorageObservation) and state.check_item == "instance_status"
-                    and state.resource_id not in measured):
-                obs.append(GaussStorageObservation("gaussdb_instance", state.resource_id, state.name, "disk",
-                    {"disk_usage": None}, metrics={key: state.metrics.get(key)
-                    for key in ("disk_usage", "disk_used_gb", "disk_total_gb")},
-                    metric_observed_at=state.metric_observed_at, storage_status=state.storage_status))
-        for observation in obs:
-            if not isinstance(observation, GaussStorageObservation):
-                continue
-            observation.attrs["gaussdb_monitoring"] = {
-                "source": "GAUSSDB", "api_version": "v3", "endpoint": "volume-usage",
-                "time_basis": "RESPONSE_RECEIVED", "stale_after_sec": 900,
-                "observed_at": observation.metric_observed_at.isoformat() if observation.metric_observed_at else None,
-                "status": observation.storage_status,
-            }
-        return obs
+                     for n in item.get("nodes", [])]
+            observations.append(Observation("gaussdb_instance", item["id"], item["name"], "instance_status",
+                {"status": status if known else None}, status_raw=status if isinstance(status, str) else None,
+                attrs={**gaussdb_attrs(item), "nodes": nodes, "metrics_source": "GAUSSDB"},
+                metrics={"cpu_usage": None, "mem_usage": None}))
+        _stats(ctx, "status", items, started, list_ms)
+        return observations
 
-    @staticmethod
-    def _volume(ctx: RunContext, status_observation: "GaussStorageObservation", obs: list[Observation]) -> bool:
-        """§4.2.1 原生磁盘用量；成功时追加 disk 观测，失败只记局部错误（组件查询照常进行）。"""
-        iid, name = status_observation.resource_id, status_observation.name
-        try:
-            used, total, usage = volume_usage(ctx.client, iid)
-        except (HcsError, ValueError) as exc:
-            status_observation.storage_status = "ERROR"
-            status_observation.metric_observed_at = utcnow()
-            detail = _failure_kind(exc)
-            ctx.errors.append(f"GaussDB 原生磁盘用量查询失败（{detail}）")
-            log_fields: dict[str, object] = {"failure_kind": detail}
-            if isinstance(exc, HcsError):
-                log_fields.update(upstream_status=exc.status, upstream_code=_safe_code(exc.code))
-            log_collection_failure(log, ctx, exc, cloud_service="gaussdb", phase="native_volume", **log_fields)
-            return False
-        m = {"disk_used_gb": used, "disk_total_gb": total}
-        if usage is not None:
-            m["disk_usage"] = usage
-            obs.append(GaussStorageObservation("gaussdb_instance", iid, name, "disk", {"disk_usage": usage}, metrics=m,
-                                               metric_observed_at=utcnow(), storage_status="AVAILABLE"))
-        else:
-            status_observation.metrics.update(m)
-            status_observation.storage_status = "PARTIAL"
-            status_observation.metric_observed_at = utcnow()
-        return True
+
+class GaussDBStorageCollector:
+    """磁盘用量独立采集；失败/停机记缺采，不使用配置容量补造使用率。"""
+
+    code, service, name = "gaussdb_storage", "gaussdb", "GaussDB 磁盘容量"
+
+    def collect(self, ctx: RunContext) -> list[Observation]:
+        started = perf_counter()
+        items, list_ms = _instances(ctx)
+        results, concurrency, detail_ms = _details(ctx, items, "storage")
+        observations: list[Observation] = []
+        for item in items:
+            result = results.get(item["id"])
+            status, used, total, usage = "UNAVAILABLE", None, None, None
+            if result is not None:
+                if result.error:
+                    status = "ERROR"
+                    ctx.errors.append(f"GaussDB 原生磁盘用量查询失败（{_failure_kind(result.error)}）")
+                else:
+                    used, total, usage = result.value
+                    status = "AVAILABLE" if usage is not None else "PARTIAL"
+            at = result.observed_at if result is not None else utcnow()
+            observations.append(GaussStorageObservation("gaussdb_instance", item["id"], item["name"], "disk",
+                {"disk_usage": usage}, metrics={"disk_usage": usage, "disk_used_gb": used, "disk_total_gb": total},
+                metric_observed_at=at, storage_status=status,
+                attrs={"metrics_source": "GAUSSDB", "gaussdb_monitoring": {
+                    "source": "GAUSSDB", "api_version": "v3", "endpoint": "volume-usage",
+                    "time_basis": "RESPONSE_RECEIVED", "stale_after_sec": ctx.params.get("_inspection_stale_after_sec", 900),
+                    "observed_at": at.isoformat(), "status": status}}))
+        ctx.stats["native_volume"] = sum(item.error is None for item in results.values())
+        _stats(ctx, "storage", items, started, list_ms, results, concurrency=concurrency, detail_ms=detail_ms)
+        return observations
+
+
+class GaussDBComponentsCollector:
+    """组件单独采集；空清单/未识别/失败不当作正常，不恢复告警。"""
+
+    code, service, name = "gaussdb_components", "gaussdb", "GaussDB 组件健康"
+
+    def collect(self, ctx: RunContext) -> list[Observation]:
+        started = perf_counter()
+        items, list_ms = _instances(ctx)
+        results, concurrency, detail_ms = _details(ctx, items, "components")
+        failed = [iid for iid, result in results.items() if result.error is not None]
+        previous = previous_attrs(ctx, "gaussdb_instance", failed, "gaussdb_components")
+        observations = []
+        for item in items:
+            result = results.get(item["id"])
+            facts: dict[str, Any] = {"down_components": None, "unknown_components": None, "down_list": ""}
+            attrs: dict[str, Any] = {}
+            if result is not None:
+                if result.error:
+                    ctx.errors.append(f"GaussDB 组件状态查询失败（{_failure_kind(result.error)}）")
+                    last = previous.get(item["id"]) or {}
+                    stale = last.get("state") in ("AVAILABLE", "STALE") and isinstance(last.get("observed_at"), str)
+                    attrs["gaussdb_components"] = (
+                        {**last, "state": "STALE", "warning": "本轮组件查询失败，显示的是上次获取的组件"} if stale else
+                        {"state": "ERROR", "observed_at": None, "warning": "组件查询失败"})
+                else:
+                    summary, measured = component_summary(result.value, result.observed_at)
+                    attrs["gaussdb_components"] = summary
+                    if result.value:
+                        facts = measured
+            observations.append(Observation("gaussdb_instance", item["id"], item["name"], "components", facts,
+                attrs=attrs, metric_observed_at=result.observed_at if result is not None else None))
+        ctx.stats["native_components"] = sum(item.error is None for item in results.values())
+        _stats(ctx, "components", items, started, list_ms, results, concurrency=concurrency, detail_ms=detail_ms)
+        return observations
 
 
 def _safe_code(value: str) -> str | None:

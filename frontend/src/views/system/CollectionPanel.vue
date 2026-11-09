@@ -14,7 +14,7 @@
       </el-collapse-item>
     </el-collapse>
     <el-form label-width="180px" :disabled="!setting.editable || disabled || saving" @submit.prevent>
-      <el-form-item label="DataArts 明细并发数">
+      <el-form-item label="HCS 明细并发数">
         <el-input-number v-model="form.hcs_concurrency" :min="1" :max="16" :disabled="!setting.editable" />
       </el-form-item>
       <div class="qps-grid">

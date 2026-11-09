@@ -22,38 +22,61 @@
       <div v-if="schedule.note" class="sched-row text-3">{{ schedule.note }}</div>
     </div>
 
-    <el-table :data="tasks" row-key="code" :expand-row-keys="expanded" @expand-change="onExpand">
+    <div class="task-filters" role="search" aria-label="筛选巡检任务">
+      <el-select v-model="filters.service" aria-label="按服务筛选" placeholder="全部服务" class="service-filter">
+        <el-option label="全部服务" value="" />
+        <el-option v-for="service in serviceOptions" :key="service.value" :value="service.value" :label="service.label" />
+      </el-select>
+      <el-select v-model="filters.enabled" aria-label="按启停筛选" class="enabled-filter">
+        <el-option label="全部启停状态" value="all" /><el-option label="已启用" value="enabled" /><el-option label="已停用" value="disabled" />
+      </el-select>
+      <el-checkbox v-model="filters.abnormal" title="按各租户 / 项目最近一次执行判断；运行中和跳过不计异常">最近异常</el-checkbox>
+      <el-input v-model="filters.keyword" clearable aria-label="搜索巡检任务" placeholder="搜索任务、检查项或执行步骤" class="task-search" />
+      <el-button @click="resetFilters">重置</el-button>
+      <span class="text-3 filter-count" role="status" aria-live="polite">显示 {{ filteredTasks.length }} / {{ tasks.length }} 项</span>
+    </div>
+    <div v-if="filters.abnormal" class="text-3 filter-hint">异常按各租户 / 项目最近一次执行判断：失败、超时、部分成功、检查异常或详情失败；运行中和跳过不计入。</div>
+    <div class="text-3 scroll-hint">左右滑动表格，查看启停与操作等更多列。</div>
+    <div class="task-table-scroll" role="region" aria-label="巡检任务列表，可横向滚动" tabindex="0">
+    <el-table class="task-table" :data="filteredTasks" row-key="code" :expand-row-keys="expanded" :scrollbar-always-on="true" :empty-text="tasks.length ? '无匹配任务，请调整筛选条件' : '暂无巡检任务'" @expand-change="onExpand">
       <el-table-column type="expand">
         <template #default="{ row }">
           <div class="runs">
             <div class="sub-title">已展示 {{ row.runs.length }} 次运行（每个租户 / 项目各保留最近 12 次；未知项目单独保留）</div>
+            <div v-if="isGaussTask(row.code)" class="text-3 timing-note">累计详情耗时是各详情请求耗时之和，不是墙钟耗时；并发执行时可能大于明细阶段或整轮墙钟耗时。缺失统计显示“—”，不补零。</div>
             <el-table :data="row.runs" size="small" border>
               <el-table-column label="开始时间" width="140"><template #default="{ row: r }">{{ fmtTime(r.started_at) }}</template></el-table-column>
               <el-table-column label="租户" width="110"><template #default="{ row: r }"><TenantTag :id="r.tenant_id" :name="r.tenant_name" /></template></el-table-column>
               <el-table-column label="项目" min-width="170"><template #default="{ row: r }">{{ projectLabel(r as ProjectRun) }}</template></el-table-column>
               <el-table-column label="触发" width="70"><template #default="{ row: r }">{{ r.trigger_type === 'MANUAL' ? '手动' : '调度' }}</template></el-table-column>
-              <el-table-column label="状态" width="90"><template #default="{ row: r }"><el-tag :type="TASK_STATUS[r.status]?.type ?? 'info'" size="small">{{ TASK_STATUS[r.status]?.label ?? r.status }}</el-tag></template></el-table-column>
+              <el-table-column label="状态" width="90"><template #default="{ row: r }"><el-tag :type="taskStatus(r.status).type ?? 'info'" size="small">{{ taskStatus(r.status).label }}</el-tag></template></el-table-column>
               <el-table-column label="耗时" width="76"><template #default="{ row: r }">{{ r.finished_at ? `${secs(r as TaskRun)} s` : '-' }}</template></el-table-column>
               <el-table-column :label="cnt(row.code).b ? `${cnt(row.code).a} / ${cnt(row.code).b}` : cnt(row.code).a" width="96"><template #default="{ row: r }">{{ r.resource_total }}<template v-if="cnt(row.code).b"> / <b :class="{ danger: cnt(row.code).warn && r.abnormal_total }">{{ r.abnormal_total }}</b></template></template></el-table-column>
               <el-table-column label="API 调用" width="80" prop="api_calls" />
               <el-table-column label="API 错误" width="90"><template #default="{ row: r }">{{ r.stats?.hcs?.errors ?? '-' }}</template></el-table-column>
               <el-table-column label="限流等待" width="100"><template #default="{ row: r }">{{ r.stats?.hcs ? `${Math.round(r.stats.hcs.rate_limit_ms)} ms` : '-' }}</template></el-table-column>
-              <el-table-column label="采集明细" min-width="220"><template #default="{ row: r }"><span class="text-2">{{ statsText(row.code, r as TaskRun) || '-' }}</span></template></el-table-column>
+              <el-table-column label="采集明细" min-width="220"><template #default="{ row: r }"><span class="text-2 collection-detail">{{ statsText(row.code, r as TaskRun) || '-' }}</span></template></el-table-column>
               <el-table-column label="错误摘要" min-width="180" show-overflow-tooltip><template #default="{ row: r }"><span :class="{ danger: r.error_summary }">{{ r.error_summary ?? '-' }}</span></template></el-table-column>
             </el-table>
           </div>
         </template>
       </el-table-column>
-      <el-table-column label="任务" min-width="210">
+      <el-table-column label="任务" min-width="280">
         <template #default="{ row }">
           <b>{{ row.name }}</b>
           <div class="text-3 mono">{{ row.code }}</div>
-          <div v-if="row.note" class="text-3 note">{{ row.note }}</div>
-          <div v-if="ECS_POLICY_TASKS.includes(row.code)" class="text-3 note">各租户可单独设置频率、范围与指标（租户策略优先于这里的全局周期）。</div>
-          <div v-if="row.code === 'cce_cluster_health' && user.can('podevent:view')" class="text-3 note">采集哪些集群、启用哪些原生指标：<router-link :to="{ path: '/pod-events', query: { tab: 'clusters' } }">容器事件 → 集群与节点 → 采集配置</router-link></div>
+          <div class="text-2 check-summary" :title="row.details.codes.join('、')">检查：{{ row.details.checks.join('、') || (row.details.provided ? '无规则检查项' : '历史返回未提供') }}</div>
+          <details class="task-description">
+            <summary>执行步骤 / 任务说明<span v-if="row.details.steps.length">（{{ row.details.steps.length }} 步）</span></summary>
+            <ol v-if="row.details.steps.length" class="task-steps"><li v-for="(step, index) in row.details.steps" :key="index">{{ step }}</li></ol>
+            <div v-else class="text-3 note">历史返回未提供执行步骤。</div>
+            <div v-if="row.note" class="text-3 note">{{ row.note }}</div>
+            <div v-if="ECS_POLICY_TASKS.includes(row.code)" class="text-3 note">各租户可单独设置频率、范围与指标（租户策略优先于这里的全局周期）。</div>
+            <div v-if="row.code === 'cce_cluster_health' && user.can('podevent:view')" class="text-3 note">采集哪些集群、启用哪些原生指标：<router-link :to="{ path: '/pod-events', query: { tab: 'clusters' } }">容器事件 → 集群与节点 → 采集配置</router-link></div>
+          </details>
         </template>
       </el-table-column>
-      <el-table-column label="服务" width="110"><template #default="{ row }">{{ SERVICES[row.service] ?? row.service }}</template></el-table-column>
+      <el-table-column label="服务" width="110"><template #default="{ row }">{{ serviceLabel(row.service) }}</template></el-table-column>
       <el-table-column label="周期" width="130">
         <template #default="{ row }">
           <template v-if="row.cron"><div>{{ cronText(row.cron) }}</div><div class="mono text-3">{{ row.cron }}</div></template>
@@ -72,13 +95,13 @@
           <span v-else class="text-3">-</span>
         </template>
       </el-table-column>
-      <el-table-column label="各租户 / 项目最近一次" min-width="380">
+      <el-table-column label="各租户 / 项目最近一次" min-width="300">
         <template #default="{ row }">
           <div class="latest">
             <div v-for="r in latestByTenant(row as InspectionTask)" :key="`${r.tenant_id ?? 'global'}:${r.project_ref ?? 'unknown'}`" class="lt" :class="r.status.toLowerCase()">
               <TenantTag :id="r.tenant_id" :name="r.tenant_name" />
               <span class="text-3">{{ projectLabel(r) }}</span>
-              <el-tag :type="TASK_STATUS[r.status]?.type ?? 'info'" size="small" effect="plain">{{ TASK_STATUS[r.status]?.label ?? r.status }}</el-tag>
+              <el-tag :type="taskStatus(r.status).type ?? 'info'" size="small" effect="plain">{{ taskStatus(r.status).label }}</el-tag>
               <span class="text-3">{{ fromNow(r.started_at) }}</span>
               <span class="cnt">{{ cnt(row.code).a }} {{ r.resource_total }}<template v-if="cnt(row.code).b"> · {{ cnt(row.code).b }} <b :class="{ danger: cnt(row.code).warn && r.abnormal_total }">{{ r.abnormal_total }}</b></template></span>
             </div>
@@ -95,9 +118,9 @@
       <el-table-column label="已展示执行成功率" width="150">
         <template #default="{ row }"><el-progress v-if="successRate(row as InspectionTask) != null" :percentage="successRate(row as InspectionTask) ?? 0" :color="(successRate(row as InspectionTask) ?? 0) >= 90 ? '#2e7d32' : '#f57c00'" :stroke-width="8" /><span v-else class="text-3">未知（无已完成执行）</span></template>
       </el-table-column>
-      <el-table-column label="启用" width="64">
+      <el-table-column label="启用" width="64" fixed="right">
         <template #default="{ row }">
-          <el-switch :model-value="row.enabled" size="small" :disabled="!canEdit" :loading="toggling === row.code"
+          <el-switch :model-value="row.enabled" :aria-label="`${row.name}启用`" size="small" :disabled="!canEdit" :loading="toggling === row.code"
                      @change="(v: string | number | boolean) => toggle(row as InspectionTask, !!v)" />
         </template>
       </el-table-column>
@@ -109,6 +132,7 @@
         </template>
       </el-table-column>
     </el-table>
+    </div>
     <div class="tip text-3">巡检 / 台账同步 / 容器事件采集由调度进程（scheduler）按周期执行，单个租户认证或接口失败只影响该租户；修改周期后调度进程最迟 30 秒生效；
       手动执行范围跟随顶部租户切换{{ app.currentTenant ? `（当前：${app.currentTenant.name}）` : '（当前：全部租户）' }}。</div>
 
@@ -116,7 +140,7 @@
     <EcsPolicyDialog v-model="ecsPolicy.visible" :tenant-id="ecsPolicy.tenantId" :tenant-name="ecsPolicy.tenantName" @saved="load" />
 
     <!-- 修改任务周期 -->
-    <el-dialog v-model="edit.visible" :title="`修改任务：${edit.task?.name ?? ''}`" width="560px" append-to-body>
+    <el-dialog v-model="edit.visible" :title="`修改任务：${edit.task?.name ?? ''}`" width="min(560px, calc(100vw - 24px))" append-to-body>
       <el-form v-if="edit.task" label-width="92px" @submit.prevent>
         <el-form-item label="执行方式">
           <el-radio-group v-model="edit.mode">
@@ -125,14 +149,14 @@
           </el-radio-group>
         </el-form-item>
         <el-form-item v-if="edit.mode === 'interval'" label="周期">
-          <el-input-number v-model="edit.value" :min="1" :step="1" controls-position="right" style="width: 140px" />
-          <el-select v-model="edit.unit" style="width: 90px; margin-left: 8px">
+          <el-input-number v-model="edit.value" :min="1" :step="1" controls-position="right" class="interval-value" />
+          <el-select v-model="edit.unit" class="interval-unit">
             <el-option :value="1" label="秒" /><el-option :value="60" label="分钟" /><el-option :value="3600" label="小时" />
           </el-select>
           <div class="text-3 hint">最短 {{ humanize(edit.task.min_interval) }}；= {{ humanize(edit.value * edit.unit) }}。周期越短 HCS API 调用越多，建议 ≥ 1 分钟</div>
         </el-form-item>
         <el-form-item v-else label="crontab">
-          <el-input v-model="edit.cron" class="mono" placeholder="分 时 日 月 周，例如 30 3 * * *" style="width: 240px" />
+          <el-input v-model="edit.cron" class="mono cron-expression" placeholder="分 时 日 月 周，例如 30 3 * * *" />
           <span class="text-3 hint-inline">{{ edit.cron.trim() ? cronText(edit.cron.trim()) : '' }}</span>
           <div class="presets">
             <el-button v-for="p in CRON_PRESETS" :key="p.v" size="small" @click="edit.cron = p.v">{{ p.label }}</el-button>
@@ -147,7 +171,7 @@
           <div class="text-3 hint">近24小时同作业成功实例的有效耗时；样本不足时基线留空。</div>
         </el-form-item>
         <div v-if="edit.task.code === 'dcs_status'" class="text-3 hint">指标来自 DCS 原生接口，历史为实际采样记录。CPU 累计秒数不作为使用率，实例连接数暂无数据。</div>
-        <div v-if="edit.task.code === 'gaussdb_status'" class="text-3 hint">指标来自 GaussDB 原生接口；磁盘、慢 SQL、会话等在 GaussDB 面板查看，不使用 AOM 映射。</div>
+        <div v-if="isGaussTask(edit.task.code)" class="text-3 hint">GaussDB 实例状态、磁盘容量、组件状态分别启停并设置周期；以本任务检查项为准。使用原生只读接口，不使用 AOM 映射；慢 SQL、会话、巡检报告在 GaussDB 页面按需查询。</div>
         <el-form-item v-if="hasLegacyAom" label="旧配置">
           <el-checkbox v-model="edit.clearLegacyAom" :disabled="edit.saving">清除旧 AOM 映射</el-checkbox>
           <div class="text-3 hint">AOM 已停用，旧映射不再生效。勾选后保存清除，保留其他任务参数。</div>
@@ -160,7 +184,7 @@
     </el-dialog>
 
     <!-- 修改定时报表 -->
-    <el-dialog v-model="sched.visible" title="定时报表设置" width="640px" append-to-body>
+    <el-dialog v-model="sched.visible" title="定时报表设置" width="min(640px, calc(100vw - 24px))" append-to-body>
       <el-form label-width="110px" @submit.prevent>
         <el-form-item v-for="(_c, k) in schedule?.cron ?? {}" :key="k" :label="schedule?.kinds[k] ?? String(k)">
           <el-switch v-model="sched.enabled[k]" />
@@ -208,6 +232,65 @@ function openEcsPolicy() {
   Object.assign(ecsPolicy, { visible: true, tenantId: tenant?.id ?? null, tenantName: tenant ? tenant.short_name || tenant.name : '' })
 }
 const tasks = ref<InspectionTask[]>([])
+// 仅解释白名单字段，未知 code 按纯文本显示，不从对象原型取字典项。
+const own = (value: object, key: string) => Object.prototype.hasOwnProperty.call(value, key)
+const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
+const field = (value: unknown, key: string): unknown => record(value) && own(value, key) ? value[key] : undefined
+const strings = (value: unknown): string[] => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && !!item.trim()) : []
+const serviceLabel = (code: string) => own(SERVICES, code) ? SERVICES[code]! : code
+const taskStatus = (code: string) => own(TASK_STATUS, code) ? TASK_STATUS[code]! : { label: code, type: 'info' as const }
+const CHECK_LABELS = new Map<string, string>([
+  ['job_status', '作业状态'], ['node_status', '节点状态'], ['instance_status', '实例状态'], ['cluster_status', '集群状态'],
+  ['cpu', 'CPU 使用率'], ['memory', '内存使用率'], ['disk', '磁盘使用率'], ['components', '组件状态'], ['nodes', '逻辑节点状态'], ['reboot', '重启检测'],
+  ['pod_restart', '容器重启'], ['pod_oom', '容器内存溢出'], ['pod_crashloop', '容器循环崩溃'], ['pod_backpressure', '容器背压'], ['pod_evicted', '容器驱逐'],
+])
+function taskDetails(task: InspectionTask) {
+  const checks = field(task, 'checks')
+  const codes = strings(checks)
+  return { codes, provided: Array.isArray(checks), checks: codes.map(code => CHECK_LABELS.get(code) ?? code), steps: strings(field(task, 'steps')) }
+}
+const GAUSS_TASKS = new Set(['gaussdb_status', 'gaussdb_storage', 'gaussdb_components'])
+const isGaussTask = (code: string) => GAUSS_TASKS.has(code)
+const filters = reactive({ service: '', enabled: 'all', abnormal: false, keyword: '' })
+const serviceOptions = computed(() => [...new Set(tasks.value.map(task => task.service))].map(value => ({ value, label: serviceLabel(value) })))
+const taskRows = computed(() => tasks.value.map(task => ({ ...task, details: taskDetails(task) })))
+function hasRecentAbnormal(task: InspectionTask) {
+  return latestByTenant(task).some(run => !['RUNNING', 'SKIPPED'].includes(run.status) && (
+    ['FAILED', 'TIMEOUT', 'PARTIAL'].includes(run.status)
+    || (cnt(task.code).warn && run.abnormal_total > 0)
+    || (isGaussTask(task.code) && validCount(field(field(run.stats, 'gaussdb'), 'failed')) > 0)
+  ))
+}
+const filteredTasks = computed(() => {
+  const terms = filters.keyword.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean)
+  return taskRows.value.filter(task => {
+    if (filters.service && task.service !== filters.service) return false
+    if (filters.enabled === 'enabled' && !task.enabled || filters.enabled === 'disabled' && task.enabled) return false
+    if (filters.abnormal && !hasRecentAbnormal(task)) return false
+    const text = [task.name, task.code, task.service, serviceLabel(task.service), task.note, ...task.details.codes, ...task.details.checks, ...task.details.steps].join(' ').toLocaleLowerCase()
+    return terms.every(term => text.includes(term))
+  })
+})
+function resetFilters() { Object.assign(filters, { service: '', enabled: 'all', abnormal: false, keyword: '' }) }
+// 缺失、非有限数、负数与数值字符串均不冒充有效统计。
+function validCount(value: unknown): number { return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : -1 }
+function gaussStatsText(code: string, stats: unknown): string {
+  if (!isGaussTask(code)) return ''
+  const gauss = field(stats, 'gaussdb')
+  if (!record(gauss)) return ''
+  const phaseCode = field(gauss, 'phase')
+  const phase = typeof phaseCode === 'string' ? new Map([['status', '实例状态'], ['storage', '磁盘容量'], ['components', '组件状态']]).get(phaseCode) ?? '未知阶段' : '未知阶段'
+  const count = (key: string) => {
+    const value = validCount(field(gauss, key))
+    return value >= 0 ? String(value) : '—'
+  }
+  const ms = (key: string) => {
+    const value = field(gauss, key)
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? `${value} ms` : '—'
+  }
+  return [phase, `实例 ${count('instances')}`, `在线 ${count('online')}`, `已查询 ${count('queried')}`, `详情失败 ${count('failed')}`, `并发 ${count('concurrency')}`,
+    `清单 ${ms('list_ms')}`, `明细 ${ms('detail_ms')}`, `详情累计 ${ms('detail_total_ms')}`, `单次详情最大 ${ms('detail_max_ms')}`, `墙钟 ${ms('wall_ms')}`].join(' · ')
+}
 const schedule = ref<ReportSchedule | null>(null)
 const running = ref('')
 const expanded = ref<string[]>([])
@@ -220,7 +303,7 @@ async function load() {
     const [t, s] = await Promise.all([listTasks(), user.can('report:view') ? reportSchedule() : Promise.resolve(null)])
     tasks.value = t
     schedule.value = s
-    if (!expanded.value.length) expanded.value = t.filter((x) => x.runs.slice(0, 4).some((r) => r.status !== 'SUCCESS')).map((x) => x.code).slice(0, 1)
+    if (!expanded.value.length) expanded.value = t.filter(hasRecentAbnormal).map((x) => x.code).slice(0, 1)
   } finally { loading.value = false }
 }
 onMounted(load)
@@ -237,7 +320,7 @@ function cronText(c: string) {
   if (!/^\d+$/.test(m ?? '') || !/^\d+$/.test(hh ?? '') || mon !== '*') return c
   const t = `${hh.padStart(2, '0')}:${m.padStart(2, '0')}`
   if (d === '*' && w === '*') return `每天 ${t}`
-  if (d === '*' && WEEK[w.toLowerCase()]) return `每周${WEEK[w.toLowerCase()]} ${t}`
+  if (d === '*' && w && own(WEEK, w.toLowerCase())) return `每周${WEEK[w.toLowerCase()]} ${t}`
   if (/^\d+$/.test(d) && w === '*') return `每月 ${d} 日 ${t}`
   return c
 }
@@ -295,7 +378,10 @@ async function saveEdit() {
 const toggling = ref('')
 async function toggle(t: InspectionTask, on: boolean) {
   if (!canEdit.value || toggling.value) return
-  if (!on) await ElMessageBox.confirm(`停用后“${t.name}”不再自动执行，相关检查项不会产生新告警。确认停用？`, '停用任务', { type: 'warning' })
+  if (!on) {
+    try { await ElMessageBox.confirm(`停用后“${t.name}”不再自动执行，相关检查项不会产生新告警。确认停用？`, '停用任务', { type: 'warning' }) }
+    catch { return }
+  }
   toggling.value = t.code
   try {
     await updateTask(t.code, { enabled: on })
@@ -341,6 +427,8 @@ function successRate(t: InspectionTask): number | null {
 
 /** 各任务的附加统计（stats 字段，按任务类型解释） */
 function statsText(code: string, r: TaskRun): string {
+  const gauss = gaussStatsText(code, r.stats)
+  if (gauss) return gauss
   const s = r.stats ?? {}
   if (['ecs_status', 'ecs_metrics'].includes(code) && (s.servers != null || s.metrics_source != null || s.metrics_diagnostic != null)) {
     const source = typeof s.metrics_source === 'string' ? s.metrics_source : ''
@@ -430,12 +518,12 @@ async function run(t: InspectionTask) {
     const r = await runTask(t.code)
     const ok = r.status === 'SUCCESS'
     ElNotification({
-      title: `${t.name}：${TASK_STATUS[r.status]?.label ?? r.status}`,
+      title: `${t.name}：${taskStatus(r.status).label}`,
       type: ok ? 'success' : 'warning',
       duration: ok ? 4000 : 8000,
       message: h('div', { class: 'run-result' }, r.runs.map((x) => h('div', { style: 'line-height:1.8' }, [
         h('b', `${x.tenant_name ?? '平台'}　`),
-        `${TASK_STATUS[x.status]?.label ?? x.status} · ${cnt(t.code).a} ${x.resource_total}${cnt(t.code).b ? ` / ${cnt(t.code).b} ${x.abnormal_total}` : ''} · API ${x.api_calls} 次`,
+        `${taskStatus(x.status).label} · ${cnt(t.code).a} ${x.resource_total}${cnt(t.code).b ? ` / ${cnt(t.code).b} ${x.abnormal_total}` : ''} · API ${x.api_calls} 次`,
         x.error_summary ? h('div', { style: 'color:var(--hi-p1);font-size:12px' }, x.error_summary) : null,
       ]))),
     })
@@ -447,6 +535,27 @@ async function run(t: InspectionTask) {
 </script>
 
 <style scoped lang="scss">
+.task-panel { min-width: 0; max-width: 100%; }
+.task-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px;
+  .service-filter { width: 160px; }
+  .enabled-filter { width: 150px; }
+  .task-search { flex: 1 1 240px; min-width: 180px; }
+  .filter-count { white-space: nowrap; }
+  .el-button { margin-left: 0; }
+}
+.filter-hint { margin: 0 0 10px; font-size: 12px; }
+.scroll-hint { display: none; margin-bottom: 8px; font-size: 12px; }
+.task-table-scroll { min-width: 0; max-width: 100%; overflow-x: auto; }
+.check-summary { margin-top: 5px; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.task-description { margin-top: 5px; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere;
+  summary { color: var(--el-color-primary); cursor: pointer; }
+}
+.task-steps { margin: 6px 0; padding-left: 20px; }
+.timing-note { margin-bottom: 8px; font-size: 12px; line-height: 1.6; }
+.collection-detail { display: block; line-height: 1.6; overflow-wrap: anywhere; }
+.interval-value { width: 140px; max-width: 100%; }
+.interval-unit { width: 90px; margin-left: 8px; }
+.cron-expression { width: 240px; max-width: 100%; }
 .sched { margin-bottom: 14px; padding: 10px 14px; border-radius: var(--hi-radius-sm); background: var(--hi-bg-soft); border: 1px dashed var(--hi-border);
   font-size: 13px; color: var(--hi-text-2);
   .sched-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; line-height: 1.9; .el-icon { color: var(--el-color-primary); } }
@@ -468,4 +577,16 @@ async function run(t: InspectionTask) {
 .hint-inline { margin-left: 10px; font-size: 12px; }
 .presets { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; margin-top: 8px; .el-button + .el-button { margin-left: 0; } }
 .cron-in { width: 180px; margin-left: 12px; }
+@media (max-width: 600px) {
+  .scroll-hint { display: block; }
+  // 窄屏取消右侧吸附，避免操作列遮住任务名；列仍随表体内部横向滚动。
+  .task-table :deep(.el-table-fixed-column--right) { position: relative !important; right: auto !important; }
+  .task-table :deep(.el-table-fixed-column--right::before) { display: none; }
+  .task-filters { .service-filter, .enabled-filter { flex: 1 1 140px; width: auto; } .task-search { flex-basis: 100%; } }
+  .runs { padding: 4px 12px 12px; }
+  .sched { overflow-wrap: anywhere; .recv, .sched-row.text-3 { padding-left: 0; } }
+  .interval-value { width: 120px; }
+  .interval-unit { width: 72px; margin-left: 4px; }
+  .cron-in { width: 100%; margin: 6px 0 0; }
+}
 </style>

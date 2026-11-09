@@ -96,10 +96,22 @@ def upsert_resource(db: Session, service: str, group: list[Observation], now: da
                                            Resource.project_ref == (ctx.project_ref if ctx else None),
                                            Resource.tenant_id == (ctx.tenant_id if ctx else None)))
     if res is None:
-        res = Resource(service=service, resource_type=first.resource_type, resource_id=first.resource_id,
-                       name=first.name, labels={}, attrs={}, metrics={}, expected_state={}, first_seen=now,
-                       tenant_id=ctx.tenant_id if ctx else None, project_ref=ctx.project_ref if ctx else None)
-        db.add(res)
+        values = dict(service=service, resource_type=first.resource_type, resource_id=first.resource_id,
+                      name=first.name, labels={}, attrs={}, metrics={}, expected_state={}, first_seen=now,
+                      tenant_id=ctx.tenant_id if ctx else None, project_ref=ctx.project_ref if ctx else None)
+        if first.resource_type == "gaussdb_instance":
+            # 首次发现时没有旧行可锁。分项任务同时发现同一实例，竞争由自然键唯一索引裁决；
+            # 不回滚整个事务、不覆盖对方已写入的属性，插入后重读并锁定最新行。
+            insert = pg_insert if db.get_bind().dialect.name == "postgresql" else sqlite_insert
+            db.execute(insert(Resource).values(**values).on_conflict_do_nothing())
+            res = db.scalar(select(Resource).where(Resource.resource_type == first.resource_type,
+                Resource.resource_id == first.resource_id, Resource.project_ref == values["project_ref"],
+                Resource.tenant_id == values["tenant_id"]).with_for_update().execution_options(populate_existing=True))
+            if res is None:
+                raise ValueError("GaussDB 实例标识与已有租户/项目归属冲突")
+        else:
+            res = Resource(**values)
+            db.add(res)
     if ctx is not None:
         res.region = res.region or ctx.region or None
     status = next((o.status_raw for o in group if o.status_raw), None)
@@ -154,13 +166,14 @@ def upsert_resource(db: Session, service: str, group: list[Observation], now: da
                     metrics["disk_mount"] = None
     res.attrs, res.metrics, res.name, res.last_seen = attrs, metrics, first.name, now
     if first.resource_type == "gaussdb_instance":
-        if attrs.get("memory_unit_verified") is False:
+        observed_attrs = {key: value for observation in group for key, value in observation.attrs.items()}
+        if observed_attrs.get("memory_unit_verified") is False:
             res.memory_gb = None
-        elif attrs.get("memory_unit_verified") is True:
+        elif observed_attrs.get("memory_unit_verified") is True:
             res.memory_gb = attrs.get("memory_size")
-        if attrs.get("volume_unit_verified") is False:
+        if observed_attrs.get("volume_unit_verified") is False:
             res.storage_gb = None
-        if attrs.get("memory_unit_verified") is False or attrs.get("volume_unit_verified") is False:
+        if observed_attrs.get("memory_unit_verified") is False or observed_attrs.get("volume_unit_verified") is False:
             res.spec = gaussdb_spec(attrs)
     return res
 
@@ -182,12 +195,21 @@ def refresh_health(db: Session, resources: list[Resource], now: datetime | None 
 def _interrupt_task(db: Session, target: Target, task_code: str, now: datetime) -> None:
     context = inspection_evidence.ScopeContext(target.code, target.project_id, target.tenant_id, target.project_ref,
                                                {"_task_code": task_code})
+    _inspection_task_scope(db, context)
     if "ecs_server" in inspection_evidence.task_types(context):
         context.params["_collection_policy"] = collection_policy.effective(db, target.tenant_id).model_dump(mode="json")
     rules = rules_by_target(db, inspection_evidence.task_types(context))
     _states, resources, counts = inspection_evidence.interrupt_missing(db, context, rules, [], now)
     inspection_evidence.mark_missing_resources(resources, counts, context)
     refresh_health(db, list(resources.values()), now)
+
+
+def _inspection_task_scope(db: Session, ctx: RunContext | inspection_evidence.ScopeContext) -> None:
+    if "gaussdb_instance" in inspection_evidence.task_types(ctx):
+        configured = db.execute(select(InspectionTask.code, InspectionTask.enabled).where(
+            InspectionTask.code.in_(("gaussdb_status", "gaussdb_storage", "gaussdb_components")))).all()
+        if configured:
+            ctx.params["_inspection_tasks"] = [code for code, enabled in configured if enabled]
     db.flush()
 
 
@@ -269,12 +291,22 @@ def process_observations(db: Session, service: str, observations: list[Observati
     known: dict[tuple[str, str], Resource] = {}
     ids = sorted({k[1] for k in groups})
     types = {k[0] for k in groups}
-    for start in range(0, len(ids), 500):
-        for res in db.scalars(select(Resource).where(Resource.project_ref == ctx.project_ref,
-                Resource.tenant_id == ctx.tenant_id, Resource.resource_type.in_(types),
-                Resource.resource_id.in_(ids[start:start + 500])).order_by(Resource.resource_id, Resource.resource_type,
+    # Gauss 分项任务还会给未返回的同范围对象标记缺采；统一先锁完整租户/项目范围，
+    # 避免部分清单先锁 B、完整清单先锁 A，随后各自等待对方的锁。
+    batches = [None] if service == "gaussdb" else [ids[start:start + 500] for start in range(0, len(ids), 500)]
+    for batch in batches:
+        query = select(Resource).where(Resource.project_ref == ctx.project_ref, Resource.tenant_id == ctx.tenant_id,
+            Resource.resource_type.in_(("gaussdb_instance",) if service == "gaussdb" else types))
+        if batch is not None:
+            query = query.where(Resource.resource_id.in_(batch))
+        for res in db.scalars(query.order_by(Resource.resource_id, Resource.resource_type,
                 Resource.id).with_for_update().execution_options(populate_existing=True)):
             known[(res.resource_type, res.resource_id)] = res
+    if service == "gaussdb":
+        # 资源锁之后重读启停，避免等待云接口/并发写入期间保留下来的旧配置覆盖最新设置。
+        _inspection_task_scope(db, ctx)
+        if "_inspection_tasks" in ctx.params and ctx.params.get("_task_code") not in ctx.params["_inspection_tasks"]:
+            raise _CollectionPolicyChanged()
     # 采集范围的最终判定：范围外的对象不评估、不告警；已有记录的就地标记并关闭活动告警。
     # 云请求可能耗时很久；采集前的快照只用于裁剪，最终判定必须读取管理员最新保存的范围。
     in_scope = collect_scope.filter_groups(db, ctx.tenant_id, groups, known, collect_scope.load(db))
@@ -299,7 +331,9 @@ def process_observations(db: Session, service: str, observations: list[Observati
     groups = defaultdict(list)
     for o in observations:
         groups[(o.resource_type, o.resource_id)].append(o)
-    resources = {k: upsert_resource(db, service, g, now, ctx, known) for k, g in groups.items()}
+    ordered_groups = sorted(groups.items(), key=lambda item: (item[0][1], item[0][0])) \
+        if service == "gaussdb" else groups.items()
+    resources = {k: upsert_resource(db, service, g, now, ctx, known) for k, g in ordered_groups}
     db.flush()
     _save_dcs_memory_samples(db, groups, resources, ctx, now)
     if service == "dcs":
@@ -411,12 +445,8 @@ def process_observations(db: Session, service: str, observations: list[Observati
     if phase != "metrics":
         for resource in resources.values():
             known_count, missing_count = evaluated[resource.id]
-            resource.attrs = {**(resource.attrs or {}), "inspection_monitoring": {
-                "evaluated_at": now.isoformat(), "checked_rules": known_count,
-                "unavailable_rules": missing_count,
-                "stale_after_sec": ctx.params.get("_inspection_stale_after_sec", 900),
-                "task_code": ctx.params.get("_task_code"),
-            }}
+            inspection_evidence.record_inspection(resource, ctx, known_count, missing_count, now,
+                observations=groups[(resource.resource_type, resource.resource_id)])
     db.flush()
     refresh_health(db, list({**missing_resources, **{r.id: r for r in resources.values()}}.values()), now)
     db.commit()
@@ -484,6 +514,7 @@ def _run_task(db: Session, task_code: str, *, client: HcsClient | None, target: 
     phase = collection_policy.TASK_PHASES.get(task_code)
     policy = collection_policy.effective(db, target.tenant_id) if phase else None
     if (not collect_switch.load(db).task_enabled(target.tenant_id, task_code)
+            or collector.service == "gaussdb" and task is not None and not task.enabled
             or task_code == cce_settings.TASK_CODE and (
                 not cce_settings.effective(db, target.tenant_id).enabled or not task or not task.enabled)
             or phase is not None and not collection_policy.stage_enabled(db, target.tenant_id, phase, policy)):
@@ -512,6 +543,7 @@ def _run_task(db: Session, task_code: str, *, client: HcsClient | None, target: 
                          tenant_id=target.tenant_id, tenant_name=target.short_name, project_ref=target.project_ref,
                          region=target.region, db=db, tenant=target.tenant)
         ctx.params.update(_task_code=task_code)
+        _inspection_task_scope(db, ctx)
         _sync_scope(db, ctx, target, task_code)
         ctx.params["_inspection_stale_after_sec"] = inspection_evidence.inspection_ttl(db, ctx, task, policy, utcnow())
         # 任何资源任务都不传递旧 AOM 映射；不依赖各采集器自行判断。
@@ -524,6 +556,10 @@ def _run_task(db: Session, task_code: str, *, client: HcsClient | None, target: 
             if policy.prometheus is not None:
                 ctx.params["prometheus"] = dict(policy.prometheus.queries)
         observations = collector.collect(ctx)
+        if collector.service == "gaussdb":
+            _inspection_task_scope(db, ctx)
+            if "_inspection_tasks" in ctx.params and task_code not in ctx.params["_inspection_tasks"]:
+                raise _CollectionPolicyChanged()
         current_scopes = collect_scope.load(db)
         if ctx.scopes is not None and any(
                 ctx.scopes.rules(target.tenant_id, rtype) != current_scopes.rules(target.tenant_id, rtype)

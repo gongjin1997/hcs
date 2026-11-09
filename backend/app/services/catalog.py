@@ -144,10 +144,14 @@ TASK_SPECS: tuple[TaskSpec, ...] = (
                   "依赖 DataArts 工作空间配置，不调用 MRS 作业接口"),
     # GaussDB 没有实时 CPU / 内存接口（原生接口只有磁盘用量与巡检记录），所以不负责 cpu / memory 检查项：
     # 否则这两类规则每轮都“缺采”，实例永远是“部分覆盖”，无法判为健康
-    TaskSpec("gaussdb_status", "GaussDB 实例状态与容量", "gaussdb", 120, ("gaussdb_instance",),
-             ("instance_status", "disk", "components"),
-             note="使用 GaussDB 原生接口只读采集，不使用 AOM 映射；在线实例另查磁盘用量与组件状态"
-                  "（CN / DN / CMS / GTM / ETCD），慢 SQL、会话、巡检报告在 GaussDB 页面按需查询"),
+    TaskSpec("gaussdb_status", "GaussDB 实例状态", "gaussdb", 120, ("gaussdb_instance",), ("instance_status",),
+             note="只查询实例清单和状态，不等待磁盘用量或组件接口；容量与组件分别调度"),
+    TaskSpec("gaussdb_storage", "GaussDB 磁盘容量", "gaussdb", 300, ("gaussdb_instance",), ("disk",),
+             note="在线实例通过 GaussDB volume-usage 接口采集已用量、总量与使用率；明细有界并发，失败记缺采",
+             default_enabled=False),
+    TaskSpec("gaussdb_components", "GaussDB 组件健康", "gaussdb", 300, ("gaussdb_instance",), ("components",),
+             note="单独检查 CN / DN / CMS / GTM / ETCD 组件状态；慢 SQL、会话、巡检报告仍在 GaussDB 页面按需查询",
+             default_enabled=False),
     TaskSpec("dcs_status", "DCS 实例状态与内存", "dcs", 60, ("dcs_instance",), ("instance_status", "memory", "cpu", "nodes"),
              note="每轮批量查询一次逻辑节点（分片、主从、Proxy 及节点状态）；CPU 由两次 instances/statistic 的累计 CPU 秒数折算"
                   "（Δ秒 ÷ Δ时间 ÷ 主节点数），首次采样与实例重启后不输出"),
@@ -178,6 +182,23 @@ for _task in TASK_SPECS:
         TYPE_TASKS.setdefault(_t, []).append(_task.code)
 TASK_CHECKS: dict[str, set[str]] = {t.code: set(t.checks) for t in TASK_SPECS if t.collector}
 TASK_NOTES: dict[str, str] = {t.code: t.note for t in TASK_SPECS if t.note}
+TASK_STEPS: dict[str, tuple[str, ...]] = {
+    "dgc_realtime_status": ("读取已配置工作空间作业", "并发查询作业与节点状态", "评估状态规则"),
+    "dgc_batch_instance": ("查询批作业及最近实例", "计算有效执行耗时和 P90 基线", "检查失败与运行超时"),
+    "mrs_cluster_status": ("查询 MRS 集群", "检查集群状态"),
+    "mrs_job_status": ("读取 DataArts 作业实例", "检查 MRS 类节点执行结果"),
+    "gaussdb_status": ("查询 GaussDB 实例清单", "检查实例状态"),
+    "gaussdb_storage": ("查询实例清单并筛选在线实例", "并发查询磁盘用量", "保存容量历史并检查磁盘规则"),
+    "gaussdb_components": ("查询实例清单并筛选在线实例", "并发查询组件清单", "检查宕机与未识别状态"),
+    "dcs_status": ("查询 DCS 实例与统计", "批量读取逻辑节点", "检查状态、内存、CPU 与节点"),
+    "ecs_status": ("查询 ECS 状态", "读取已有有效指标采样", "评估状态与指标告警"),
+    "ecs_metrics": ("筛选已纳入采集的本地实例", "按租户配置查询指标源", "保存实际采样点"),
+    "ecs_quota": ("查询项目配额", "保存当前配额快照"),
+    "cce_pod_events": ("读取已配置集群 Events", "汇总容器事件", "执行已启用探针"),
+    "cce_cluster_health": ("筛选已启用集群", "读取节点与节点池", "查询显式启用的原生指标"),
+    LEDGER_TASK_CODE: ("按租户和类型读取资源清单", "对比新增与变更", "完整采集后确认释放"),
+    CLEANUP_TASK_CODE: ("读取数据保留设置", "分批清理过期记录", "记录清理数量"),
+}
 
 # 平台自身告警的对象类型（service = platform，见 app.services.platform_watch）：不进台账、不参与健康分、没有采集开关
 PLATFORM_TYPES: dict[str, dict] = {

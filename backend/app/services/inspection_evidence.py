@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.alarms.fingerprint import fingerprint
 from app.collectors.base import Observation, RunContext
 from app.collectors.dataarts import BATCH_STATES, REALTIME_STATES
+from app.collectors.gaussdb import NATIVE_STATES
 from app.collectors.mrs import CLUSTER_STATES, NODE_STATES
 from app.core.config import get_settings
 from app.metrics.dcs_samples import parse_observed_at
@@ -69,6 +70,133 @@ def scope_key(ctx: Context) -> str | None:
 
 def task_types(ctx: Context) -> set[str]:
     return set(collect_switch.TASK_TYPES.get(task_code(ctx) or "", ()))
+
+
+def _gauss_tasks() -> set[str]:
+    return {code for code, kinds in collect_switch.TASK_TYPES.items()
+            if "gaussdb_instance" in kinds and TASK_CHECKS.get(code)}
+
+
+def _configured_gauss_tasks(db: Session) -> list[str] | None:
+    configured = db.execute(select(InspectionTask.code, InspectionTask.enabled).where(
+        InspectionTask.code.in_(_gauss_tasks()))).all()
+    # 没有配置行是老调用/纯观测测试；[] 则是已经配置但全部停用，二者不可混用。
+    return sorted(code for code, enabled in configured if enabled) if configured else None
+
+
+def _owns_state(ctx: Context, data: dict, enabled: dict[str, Rule], fallback: Rule | None = None) -> bool:
+    """旧混合任务的 scope 不能凌驾于当前检查项归属。"""
+    meta = data.get(META)
+    meta = meta if isinstance(meta, dict) else {}
+    code = meta.get("rule_id")
+    rule = enabled.get(code) if isinstance(code, str) else fallback
+    kind = meta.get("resource_type") or (rule.resource_type if rule else None)
+    if kind != "gaussdb_instance" and "gaussdb_instance" not in task_types(ctx):
+        return True
+    check = meta.get("check_item") or (rule.check_item if rule else None)
+    allowed = TASK_CHECKS.get(task_code(ctx) or "", set())
+    return check in allowed and (rule is None or rule.check_item in allowed)
+
+
+def _task_results(raw: dict) -> dict[str, dict]:
+    tasks = raw.get("tasks")
+    if isinstance(tasks, dict):
+        return {code: dict(result) for code, result in tasks.items()
+                if code in _gauss_tasks() and isinstance(result, dict) and result.get("task_code") == code}
+    code = raw.get("task_code")
+    # 老混合结果只能保留在原 task 名下；绝不复制时间给尚未采样的新任务。
+    return {code: {key: value for key, value in raw.items() if key not in ("tasks", "required_tasks")}} \
+        if isinstance(code, str) and code in _gauss_tasks() else {}
+
+
+def _gauss_observation_available(observation: Observation) -> bool:
+    if observation.check_item == "instance_status":
+        status = observation.facts.get("status")
+        return isinstance(status, str) and status in NATIVE_STATES | {"FROZEN"}
+    if observation.check_item == "disk":
+        usage = observation.facts.get("disk_usage")
+        return (isinstance(usage, int | float) and not isinstance(usage, bool)
+                and 0 <= usage <= 100 and math.isfinite(usage))
+    if observation.check_item == "components":
+        down, unknown = observation.facts.get("down_components"), observation.facts.get("unknown_components")
+        return type(down) is int and down >= 0 and type(unknown) is int and unknown == 0
+    return False
+
+
+def record_inspection(resource: Resource, ctx: Context, checked_rules: int, unavailable_rules: int,
+                      evaluated_at: datetime | None, *, observations: list[Observation] | None = None) -> None:
+    """原地更新 attrs，不提交。None 表示缺采，只保留当前任务自己的上次评估时间。
+
+    Gauss 的 _inspection_tasks 是当前启用任务的完整列表（空列表也有意义）；
+    _task_code 标识本轮归属，_inspection_stale_after_sec 只适用于该任务。
+    observations 为本资源的本轮观测；零适用规则时，仍须验证真实采样才允许 FRESH。
+    """
+    raw = (resource.attrs or {}).get("inspection_monitoring")
+    raw = raw if isinstance(raw, dict) else {}
+    code = task_code(ctx)
+    gauss = resource.resource_type == "gaussdb_instance" and code is not None
+    if resource.resource_type == "gaussdb_instance" and code is None and "tasks" in raw:
+        return  # 无显式任务的老调用不能覆盖已经拆分的结果。
+    if gauss and (resource.tenant_id != ctx.tenant_id or resource.project_ref != ctx.project_ref):
+        raise ValueError("Gauss 巡检上下文与资源的租户/项目不匹配")
+    tasks = _task_results(raw) if gauss else {}
+    previous = tasks.get(code or "", {}) if gauss else raw
+    result = {"evaluated_at": evaluated_at.isoformat() if evaluated_at is not None else previous.get("evaluated_at"),
+              "checked_rules": checked_rules, "unavailable_rules": unavailable_rules,
+              "stale_after_sec": ctx.params.get("_inspection_stale_after_sec", previous.get("stale_after_sec", 900)
+                                                if evaluated_at is None else 900),
+              "task_code": code}
+    if not gauss:
+        resource.attrs = {**(resource.attrs or {}), "inspection_monitoring": result}
+        return
+    if checked_rules == unavailable_rules == 0 and evaluated_at is not None:
+        result["no_applicable_rules"] = True
+        result["observation_available"] = any(
+            item.resource_type == resource.resource_type and item.resource_id == resource.resource_id
+            and item.check_item in TASK_CHECKS.get(code or "", set()) and _gauss_observation_available(item)
+            for item in observations or [])
+    required = ctx.params.get("_inspection_tasks", raw.get("required_tasks"))
+    if not isinstance(required, list):
+        required = [code] if code in _gauss_tasks() else []
+    required = sorted({task for task in required if isinstance(task, str) and task in _gauss_tasks()})
+    if code in _gauss_tasks():
+        tasks[code] = {**result, SCOPE: scope_key(ctx)}
+    selected = [tasks.get(task, {}) for task in required]
+    times = [parse_observed_at(item.get("evaluated_at")) for item in selected]
+    valid_times = [at for at in times if at is not None]
+    checked = sum(item.get("checked_rules", 0) for item in selected if type(item.get("checked_rules")) is int
+                  and item["checked_rules"] > 0)
+    unavailable = sum(item.get("unavailable_rules", 0) for item in selected
+                      if type(item.get("unavailable_rules")) is int and item["unavailable_rules"] > 0)
+    unavailable += sum(not item or type(item.get("checked_rules")) is not int for item in selected)
+    thresholds = [item["stale_after_sec"] for item in selected
+                  if type(item.get("stale_after_sec")) is int and item["stale_after_sec"] >= 60]
+    # 扁平摘要供既有展示读取；健康判定始终逐任务计算有效期。
+    summary = {**result, "version": 2, "tasks": tasks, "required_tasks": required,
+               "evaluated_at": min(valid_times).isoformat() if valid_times and len(valid_times) == len(times) else None,
+               "checked_rules": checked, "unavailable_rules": unavailable,
+               "stale_after_sec": min(thresholds) if thresholds else result["stale_after_sec"]}
+    resource.attrs = {**(resource.attrs or {}), "inspection_monitoring": summary}
+
+
+def sync_gauss_task_requirements(db: Session) -> int:
+    """任务开关为全局配置；仅同步 Gauss 的需求元数据，不伪造采样或恢复告警。"""
+    db.flush()
+    # 先串行化资源更新，再读当前配置；等待锁之前的任务快照可能已经过时。
+    resources = list(db.scalars(select(Resource).where(Resource.resource_type == "gaussdb_instance")
+        .order_by(Resource.resource_id, Resource.resource_type, Resource.id).with_for_update()
+        .execution_options(populate_existing=True)))
+    required = _configured_gauss_tasks(db) or []
+    changed = 0
+    for resource in resources:
+        raw = (resource.attrs or {}).get("inspection_monitoring")
+        raw = raw if isinstance(raw, dict) else {}
+        if raw.get("required_tasks") == required and isinstance(raw.get("tasks"), dict):
+            continue
+        resource.attrs = {**(resource.attrs or {}), "inspection_monitoring": {
+            **raw, "version": 2, "tasks": _task_results(raw), "required_tasks": required}}
+        changed += 1
+    return changed
 
 
 def inspection_ttl(db: Session, ctx: Context, task: InspectionTask | None,
@@ -149,6 +277,7 @@ def evidence_facts(observation: Observation, resource: Resource, rule: Rule, ctx
     previous = parse_observed_at(data.get("_last_evaluated_at"))
     stale = ctx.params.get("_inspection_stale_after_sec", 900)
     changed = (prior.get("version") != 1 or data.get(SCOPE) != scope_key(ctx)
+               or prior.get("task_code") != task_code(ctx) or prior.get("check_item") != observation.check_item
                or prior.get("execution_id") != execution
                or since is None or since > now or previous is not None
                and (previous > now or (now - previous).total_seconds() > stale))
@@ -179,6 +308,7 @@ def interrupt_missing(db: Session, ctx: Context, rules: dict[tuple[str, str], li
     owner = scope_key(ctx)
     if owner is None or ctx.params.get("_collection_phase") == "metrics":
         return {}, {}, {}
+    gauss = "gaussdb_instance" in task_types(ctx)
     current = {fp for _, _, fp in checks}
     configured = ctx.params.get("_collection_policy") or {}
     policy = CollectionPolicy.model_validate(configured)
@@ -186,11 +316,26 @@ def interrupt_missing(db: Session, ctx: Context, rules: dict[tuple[str, str], li
                if not (kind == "ecs_server" and check in collection_policy.METRIC_CHECKS
                        and (not policy.metrics.enabled or collection_policy.METRIC_CHECKS[check] not in policy.metric_keys))}
     bound: dict[str, tuple[Resource, Rule, str]] = {}
-    resources = list(db.scalars(select(Resource).where(
+    resource_query = select(Resource).where(
         Resource.tenant_id == ctx.tenant_id, Resource.project_ref == ctx.project_ref,
-        Resource.resource_type.in_(task_types(ctx)))))
+        Resource.resource_type.in_(task_types(ctx)))
+    if gauss:
+        # 与成功观测的资源行锁串行，失败处理不能用旧 attrs 覆盖其他任务的新结果。
+        db.flush()
+        resource_query = resource_query.order_by(Resource.resource_id, Resource.resource_type, Resource.id) \
+            .with_for_update().execution_options(populate_existing=True)
+    resources = list(db.scalars(resource_query))
+    if gauss:
+        # failure ctx 也可能在等待资源锁期间遇到 TaskPatch，不能继续使用锁前快照。
+        configured = _configured_gauss_tasks(db)
+        if configured is not None:
+            ctx.params["_inspection_tasks"] = configured
+        required = ctx.params.get("_inspection_tasks")
+        if isinstance(required, list) and task_code(ctx) not in required:
+            return {}, {}, {}  # 停用任务不再中断证据；告警仍等待真实观测恢复。
     items = list(db.scalars(select(EvalState).where(EvalState.data[SCOPE].as_string() == owner)
                            .order_by(EvalState.fingerprint).with_for_update()))
+    items = [state for state in items if _owns_state(ctx, state.data or {}, enabled)]
     states = {state.fingerprint: state for state in items}
     for state in items:
         if ((state.data or {}).get(META) or {}).get("rule_id") not in enabled:
@@ -207,6 +352,7 @@ def interrupt_missing(db: Session, ctx: Context, rules: dict[tuple[str, str], li
     resources = [resource for resource in resources if not resource.scope_excluded and (
         resource.resource_type != "ecs_server" or collection_policy.resource_included(resource, policy)) and (
         resource.id in owned_refs or (resource.resource_type, resource.resource_id) in current_ids
+        or gauss
         or ((resource.attrs or {}).get("inspection_monitoring") or {}).get("task_code") in (None, task_code(ctx)))]
     by_id = {resource.id: resource for resource in resources}
     by_identity = {(r.resource_type, r.resource_id): r for r in resources}
@@ -258,10 +404,14 @@ def interrupt_missing(db: Session, ctx: Context, rules: dict[tuple[str, str], li
     for start in range(0, len(candidates), 500):
         for state in db.scalars(select(EvalState).where(EvalState.fingerprint.in_(candidates[start:start + 500]))
                                 .order_by(EvalState.fingerprint).with_for_update()):
-            if (state.data or {}).get(SCOPE) in (None, owner):
-                states[state.fingerprint] = state
+            # 也保留其他 scope 的存在性，不能因未接管而创建同指纹的重复主键。
+            states[state.fingerprint] = state
     observed_resources = {(observation.resource_type, observation.resource_id) for observation, _, _ in checks}
-    attributable = {binding[0].id for fp, binding in bound.items() if fp in states}
+    attributable = {binding[0].id for fp, binding in bound.items() if fp in states
+                    and (states[fp].data or {}).get(SCOPE) in (None, owner)
+                    and _owns_state(ctx, states[fp].data or {}, enabled, binding[1])}
+    if gauss and ctx.project_ref is not None:
+        attributable.update(resource.id for resource in resources)
     for item in items:
         reference = (item.data.get(META) or {}).get("resource_ref")
         if isinstance(reference, int) and not isinstance(reference, bool):
@@ -274,7 +424,11 @@ def interrupt_missing(db: Session, ctx: Context, rules: dict[tuple[str, str], li
         if fp in current:
             continue
         pending = states.get(fp)
-        if pending is not None and (pending.data or {}).get(SCOPE) not in (None, owner):
+        if pending is not None and ((pending.data or {}).get(SCOPE) not in (None, owner)
+                                    or not _owns_state(ctx, pending.data or {}, enabled, rule)):
+            if gauss and resource.id in attributable:
+                missing[resource.id] = resource
+                counts[resource.id] += 1
             continue
         if pending is None and resource.id not in attributable:
             continue  # 老库没有该项目/任务的指纹证据时，不能凭同类型资源猜测归属。
@@ -307,9 +461,4 @@ def interrupt_missing(db: Session, ctx: Context, rules: dict[tuple[str, str], li
 
 def mark_missing_resources(resources: dict[int, Resource], counts: dict[int, int], ctx: Context) -> None:
     for resource in resources.values():
-        previous = (resource.attrs or {}).get("inspection_monitoring") or {}
-        resource.attrs = {**(resource.attrs or {}), "inspection_monitoring": {
-            "evaluated_at": previous.get("evaluated_at"), "checked_rules": 0,
-            "unavailable_rules": counts[resource.id],
-            "stale_after_sec": ctx.params.get("_inspection_stale_after_sec", previous.get("stale_after_sec", 900)),
-            "task_code": task_code(ctx)}}
+        record_inspection(resource, ctx, 0, counts[resource.id], None)

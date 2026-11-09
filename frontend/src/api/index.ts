@@ -131,6 +131,8 @@ export interface InspectionTask {
   code: string; name: string; service: string; interval_sec: number; cron: string | null; enabled: boolean; params: object; runs: TaskRun[]
   next_run: string | null; next_run_source: 'scheduler' | 'estimate'; types: string[]; note: string | null; min_interval: number
   skipped_tenants: string[]
+  /** 新任务说明字段；历史服务可能尚未返回。 */
+  checks?: string[]; steps?: string[]
 }
 export interface TaskRunResult {
   status: string; skipped?: string[]

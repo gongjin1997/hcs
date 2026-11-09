@@ -22,7 +22,7 @@ _STATIC = frozenset("api apis auth tokens batch-query-metric-data metrics query 
                     "availability-zones availability_zones os-availability-zone os-server-groups detail config "
                     "databases configurations engines versions os-interface extensions dws elb lbaas "
                     "endpoints services domains roles users regions tenants token project metric-data "
-                    "cloudservers cluster_infos gaussdb".split())
+                    "cloudservers cluster_infos gaussdb volume-usage components".split())
 
 
 def logical_path(path: str) -> str:

@@ -8,12 +8,13 @@ from .dataarts import DataArtsBatchCollector, DataArtsRealtimeCollector
 from .dcs import DcsCollector
 from .ecs import EcsStatusCollector
 from .ecs_metrics import EcsMetricsCollector, EcsQuotaCollector
-from .gaussdb import GaussDBCollector
+from .gaussdb import GaussDBCollector, GaussDBComponentsCollector, GaussDBStorageCollector
 from .mrs import MrsClusterCollector, MrsJobCollector
 
 TASKS: dict[str, Collector] = {c.code: c for c in (
     DataArtsRealtimeCollector(), DataArtsBatchCollector(), MrsClusterCollector(), MrsJobCollector(),
-    GaussDBCollector(), DcsCollector(), EcsStatusCollector(), EcsMetricsCollector(), EcsQuotaCollector(), PodEventCollector(),
+    GaussDBCollector(), GaussDBStorageCollector(), GaussDBComponentsCollector(), DcsCollector(),
+    EcsStatusCollector(), EcsMetricsCollector(), EcsQuotaCollector(), PodEventCollector(),
     CceHealthCollector(),
 )}
 
