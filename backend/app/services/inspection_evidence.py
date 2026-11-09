@@ -336,6 +336,13 @@ def interrupt_missing(db: Session, ctx: Context, rules: dict[tuple[str, str], li
     items = list(db.scalars(select(EvalState).where(EvalState.data[SCOPE].as_string() == owner)
                            .order_by(EvalState.fingerprint).with_for_update()))
     items = [state for state in items if _owns_state(ctx, state.data or {}, enabled)]
+    if "ecs_server" in task_types(ctx):
+        included_refs = {resource.id for resource in resources
+                         if resource.resource_type == "ecs_server"
+                         and collection_policy.resource_included(resource, policy)}
+        # Only selected resources belong to this inspection; an omitted ECS
+        # instance must not have its pending rule state interrupted here.
+        items = [state for state in items if ((state.data or {}).get(META) or {}).get("resource_ref") in included_refs]
     states = {state.fingerprint: state for state in items}
     for state in items:
         if ((state.data or {}).get(META) or {}).get("rule_id") not in enabled:

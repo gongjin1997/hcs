@@ -60,7 +60,7 @@ def response(ctx, request):
         body = json.loads(request.content)
         assert body["obj_type_id"] == 562958543355904
         assert len(body["obj_ids"]) * len(body["indicator_ids"]) <= 100
-        assert body["projectIds"] == [ctx.project_id]
+        assert "projectIds" not in body
         assert body["interval"] == "MINUTE" and body["range"] == "LAST_5_MINUTE"
         now_ms = int(time.time() * 1000)
         metrics = {}
@@ -180,3 +180,80 @@ def test_native_mapping_marks_boot_time_unsupported_without_querying_it():
     assert body["indicator_ids"] == [INDICATORS["cpu_util"]]
     assert diagnostic["metrics"]["boot_time"]["status"] == "mapping_missing"
     assert diagnostic["metrics"]["boot_time"]["reason"] == "manageone_metric_unsupported"
+
+
+def test_aksk_signs_each_exact_request_without_sessions_or_inherited_auth(caplog):
+    from app.hcs import signer
+
+    ak, sk = 'synthetic-ops-access-key', 'synthetic-ops-secret-key'
+    history_ids = []
+
+    def signed_response(request):
+        ctx.requests.append(request)
+        assert signer.verify(request.method, request.url.path, request.url.params.multi_items(), dict(request.headers),
+                             request.content, lambda key: sk if key == ak else None) == ak
+        assert 'x-auth-token' not in request.headers and 'roarand' not in request.headers
+        assert 'cookie' not in request.headers and 'x-inherited-private' not in request.headers
+        assert 'x-project-id' not in request.headers  # 不继承 HCS 客户端的项目认证头。
+        if request.url.path.endswith('/resources/CLOUD_VM'):
+            assert request.method == 'GET' and dict(request.url.params) == {'limit': '1000', 'offset': '0'}
+            return httpx.Response(200, json={'objList': ctx.rows, 'totalNum': len(ctx.rows)})
+        assert request.url.path.endswith('/history-data/action/query') and request.method == 'POST'
+        body = json.loads(request.content)
+        assert set(body) == {'obj_type_id', 'indicator_ids', 'obj_ids', 'interval', 'range'}
+        history_ids.extend(body['obj_ids'])
+        now = str(int(time.time() * 1000) - 60000)
+        return httpx.Response(200, json={'data': {sid: {str(metric): {'series': [{now: '36.5'}]}
+            for metric in body['indicator_ids']} for sid in body['obj_ids']}})
+
+    ctx = Context(signed_response, count=3)
+    ctx.tenant.manageone_config = {'enabled': True, 'endpoint': 'https://manageone.integration.invalid:8443/gateway',
+                                  'auth_type': 'AKSK', 'access_key': ak, 'sk_cipher': encrypt(sk)}
+    ctx.client.http.headers.update({'x-auth-token': 'unrelated-token', 'x-inherited-private': 'private-default'})
+    ctx.client.http.auth = httpx.BasicAuth('unrelated-user', 'unrelated-password')
+    ctx.client.http.cookies.set('unrelated', 'secret-cookie')
+    diagnostic, out = result_shell()
+    collect_manageone(ctx, ['ecs-1'], ['cpu_util', 'mem_util', 'disk_util'], diagnostic, out)
+    assert [request.method for request in ctx.requests] == ['GET', 'POST']
+    assert all(request.url.host == 'manageone.integration.invalid' and request.url.port == 8443
+               and request.url.path.startswith('/gateway/rest/') for request in ctx.requests)
+    assert history_ids == ['object-1'] and set(out) == {'ecs-1'}
+    assert {point.value for point in out['ecs-1']} == {36.5}
+    assert ctx.errors == []
+    assert ak not in caplog.text and sk not in caplog.text and 'unrelated' not in caplog.text
+
+
+@pytest.mark.parametrize('code', [401, 403, 302])
+def test_aksk_failure_does_not_fallback_or_follow_redirect(code, caplog):
+    def rejected(request):
+        ctx.requests.append(request)
+        return httpx.Response(code, headers={'location': 'https://other.invalid/steal'},
+                              json={'message': 'untrusted upstream secret-value'})
+    ctx = Context(rejected)
+    ctx.tenant.manageone_config.update(auth_type='AKSK', access_key='synthetic-ak', sk_cipher=encrypt('synthetic-sk'))
+    diagnostic, out = result_shell()
+    collect_manageone(ctx, ['ecs-0'], ['cpu_util'], diagnostic, out)
+    assert len(ctx.requests) == 1 and ctx.requests[0].method == 'GET' and out == {}
+    assert ctx.errors and diagnostic['metrics']['cpu_util']['reason'] == 'query_failed'
+    assert 'synthetic-ak' not in caplog.text and 'synthetic-sk' not in caplog.text and 'secret-value' not in caplog.text
+
+
+@pytest.mark.parametrize('updates', [
+    {'sk_cipher': ''}, {'access_key': ''}, {'sk_cipher': 'plaintext-sk'}, {'auth_type': 'UNKNOWN'},
+    {'sk_cipher': 'ENC(AES256GCM:invalid)'}, {'access_key': 'bad\nkey'},
+])
+def test_invalid_aksk_config_never_reuses_password_or_iam(updates):
+    ctx = Context(lambda request: pytest.fail('invalid AK/SK must not issue requests'))
+    ctx.tenant.manageone_config.update(auth_type='AKSK', access_key='synthetic-ak', sk_cipher=encrypt('synthetic-sk'))
+    ctx.tenant.manageone_config.update(updates)
+    diagnostic, out = result_shell(['cpu_util'])
+    collect_manageone(ctx, ['ecs-0'], ['cpu_util'], diagnostic, out)
+    assert out == {} and ctx.errors
+
+
+def test_empty_selected_instances_do_not_authenticate_or_query():
+    ctx = Context(lambda request: pytest.fail('empty selection must not query ManageOne'))
+    ctx.tenant.manageone_config.update(auth_type='AKSK', access_key='synthetic-ak', sk_cipher=encrypt('synthetic-sk'))
+    diagnostic, out = result_shell(['cpu_util'])
+    collect_manageone(ctx, [], ['cpu_util'], diagnostic, out)
+    assert out == {} and ctx.requests == [] and ctx.errors == []

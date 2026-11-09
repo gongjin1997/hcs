@@ -1,4 +1,5 @@
-"""ManageOne 租户独立配置；密码仅允许写入，TLS 沿用全局 HCS 校验配置。"""
+"""ManageOne 租户独立配置；密码与 SK 仅允许写入。"""
+from typing import Literal
 from urllib.parse import unquote, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
@@ -11,11 +12,23 @@ class ManageOneConfigUpdate(BaseModel):
 
     enabled: bool = Field(False, strict=True)
     endpoint: str = Field("", max_length=512)
+    auth_type: Literal["PASSWORD", "AKSK"] = "PASSWORD"
+    access_key: str | None = Field(None, max_length=128, repr=False)
+    secret_key: str | None = Field(None, max_length=512, repr=False)
+    clear_secret_key: bool = Field(False, strict=True)
     username: str = Field("", max_length=128)
     organization: str | None = Field(None, max_length=128)
     password: str | None = Field(None, max_length=512, repr=False)
     clear_password: bool = Field(False, strict=True)
     select_source: bool = Field(False, strict=True)
+
+    @field_validator("access_key")
+    @classmethod
+    def safe_access_key(cls, value: str | None) -> str | None:
+        if value and (not value.isascii() or any(char.isspace() or ord(char) < 33 or ord(char) == 127
+                                               or char in "*,=" for char in value)):
+            raise ValueError("ManageOne AK 不能包含空白、控制字符或脱敏占位符")
+        return value
 
     @field_validator("endpoint")
     @classmethod
@@ -56,6 +69,9 @@ class ManageOneConfigOut(BaseModel):
     enabled: bool
     configured: bool
     endpoint: str
+    auth_type: Literal["PASSWORD", "AKSK"]
+    access_key_mask: str | None
+    secret_key_set: bool
     username: str
     organization: str | None
     secret_set: bool

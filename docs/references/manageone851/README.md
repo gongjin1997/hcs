@@ -28,7 +28,8 @@
 - FusionSphere OpenStack 来源的 CPU、内存、云硬盘使用率指标分别为 `cpuUsage` (`562958543421441`)、`memoryUsage` (`562958543486979`)、`diskUsage` (`562958543618052`)；单位均为 `%`，模型标记主动上报、周期 1 分钟、HCS 支持、不支持实时数据。
 - 资源查询的只读入口为 `GET /rest/tenant-resource/v1/tenant/resources/CLOUD_VM`，分页使用 URL query 参数 `limit`、`offset`；响应以 `nativeId` 对应输入 ECS ID，并要求 `projectId` 完全等于当前项目，性能请求的 `obj_ids` 使用唯一 `resId`。资源查询权限为“查询实例详情”。
 - 性能查询为 `POST /rest/performance/v1/data-svc/history-data/action/query`，请求 `obj_ids` 使用资源 `resId`，不是 ECS `nativeId`；每次对象数乘指标数不超过 100。文档接受 `IAM_OP` 或 `SSO` token。普通租户 IAM token 不能按文档推定为 `IAM_OP`。
-- 推荐的三方运维用户认证为 `PUT /rest/plat/smapp/v1/sessions`，请求 `grantType=password`、`userName`、`value`，可选 `organizationName`；响应 `accessSession` 用于后续 `x-auth-token`，非 GET 请求携带 `roarand`。不转发现有 HCS IAM 凭据。
+- 可选的账号密码方式为 `PUT /rest/plat/smapp/v1/sessions`，请求 `grantType=password`、`userName`、`value`，可选 `organizationName`；响应 `accessSession` 用于后续 `x-auth-token`，非 GET 请求携带 `roarand`。系统也支持按租户独立保存北向 AK/SK，并对查询请求使用 `SDK-HMAC-SHA256` 签名；两种凭据都不复用现有 HCS IAM 凭据。
+- 文档中两个性能/资源接口没有明确写出 APIG AK/SK 是否适用，其请求章节明确的 token 类型为 `IAM_OP` / `SSO`。当前签名接入依据现场提供的北向 AK/SK 可用信息；首次现场联调仍须确认上游对这两个请求的接受方式、权限和对象访问范围。
 - 资源模型将 `ownerId` 描述为“来源系统ID”、`ownerType` 描述为“系统类型”，但没有给出其取值到性能模型 `Source System Type=FusionSphere OpenStack` 的映射。当前实现要求 `ownerId` 为非空字符串或整数；`ownerType` 可以缺省，出现时须为字符串。它不据此确认来源就是 FusionSphere OpenStack，现网来源仍需独立确认。
 - `memoryUsage`、`diskUsage` 的正式名称与单位支持展示其使用率；文档没有定义分母、来宾/挂载点聚合口径或已用字节。磁盘 I/O、I/O 利用率不是磁盘空间使用量。`boot_time` 没有本来源指标映射。
 

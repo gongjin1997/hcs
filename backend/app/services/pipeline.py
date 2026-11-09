@@ -62,8 +62,7 @@ from .tenancy import Target, legacy_target, resolve_targets
 log = logging.getLogger(__name__)
 
 
-class _CollectionPolicyChanged(Exception):
-    """A configuration change invalidated the in-flight collector transaction."""
+_CollectionPolicyChanged = collection_policy.PolicyChanged
 
 
 def _log_failure(event: str, exc: Exception, **fields: object) -> None:
@@ -197,7 +196,8 @@ def _interrupt_task(db: Session, target: Target, task_code: str, now: datetime) 
                                                {"_task_code": task_code})
     _inspection_task_scope(db, context)
     if "ecs_server" in inspection_evidence.task_types(context):
-        context.params["_collection_policy"] = collection_policy.effective(db, target.tenant_id).model_dump(mode="json")
+        context.params["_collection_policy"] = collection_policy.lock_for_run(
+            db, target.tenant_id, {}).model_dump(mode="json")
     rules = rules_by_target(db, inspection_evidence.task_types(context))
     _states, resources, counts = inspection_evidence.interrupt_missing(db, context, rules, [], now)
     inspection_evidence.mark_missing_resources(resources, counts, context)
@@ -282,6 +282,13 @@ def _save_dcs_memory_samples(db: Session, groups: dict[tuple[str, str], list[Obs
 
 def process_observations(db: Session, service: str, observations: list[Observation], ctx: RunContext,
                          now: datetime) -> tuple[list[dict], int]:
+    ecs_target = (any(observation.resource_type == "ecs_server" for observation in observations)
+                  or "ecs_server" in inspection_evidence.task_types(ctx))
+    # Share the save transaction's guard before resource/evaluation/alarm locks.
+    # A policy saved after collection but before this point invalidates all of
+    # the run's pending samples, changes and observations; the caller rolls back.
+    policy = (collection_policy.lock_for_run(db, ctx.tenant_id, ctx.params) if ecs_target
+              else CollectionPolicy.model_validate({}))
     db.flush()
     switches = collect_switch.load(db)
     observations = [o for o in observations if switches.enabled(ctx.tenant_id, o.resource_type)]
@@ -314,8 +321,6 @@ def process_observations(db: Session, service: str, observations: list[Observati
         ctx.stats["out_of_scope"] = len(groups) - len(in_scope)
         observations = [o for o in observations if (o.resource_type, o.resource_id) in in_scope]
     phase = ctx.params.get("_collection_phase")
-    ecs_target = "ecs_server" in types | inspection_evidence.task_types(ctx)
-    policy = collection_policy.effective(db, ctx.tenant_id) if ecs_target else CollectionPolicy.model_validate({})
     if ecs_target or phase in ("metrics", "inspection", "quota"):
         ctx.params["_collection_policy"] = policy.model_dump(mode="json")
     ecs_phase_enabled = "ecs_server" in types and collection_policy.stage_enabled(
@@ -334,6 +339,8 @@ def process_observations(db: Session, service: str, observations: list[Observati
     ordered_groups = sorted(groups.items(), key=lambda item: (item[0][1], item[0][0])) \
         if service == "gaussdb" else groups.items()
     resources = {k: upsert_resource(db, service, g, now, ctx, known) for k, g in ordered_groups}
+    if ecs_target:
+        ctx.stats["processed_resources"] = len(resources)
     db.flush()
     _save_dcs_memory_samples(db, groups, resources, ctx, now)
     if service == "dcs":
@@ -550,6 +557,7 @@ def _run_task(db: Session, task_code: str, *, client: HcsClient | None, target: 
         ctx.params.pop("aom", None)
         if policy is not None:
             ctx.params.update(_collection_policy=policy.model_dump(mode="json"), _collection_phase=phase)
+            collection_policy.capture_run(db, target.tenant_id, ctx.params)
             # A saved tenant null explicitly removes a legacy global mapping.
             ctx.params.pop("aom", None)
             ctx.params.pop("prometheus", None)
@@ -577,8 +585,8 @@ def _run_task(db: Session, task_code: str, *, client: HcsClient | None, target: 
                             process_observations(db, collector.service, observations, ctx, now=utcnow()))
         run.resource_total = (int(ctx.stats.get("cce_health", {}).get("clusters", 0))
                               if task_code == cce_settings.TASK_CODE else
-                              len({(o.resource_type, o.resource_id) for o in observations})
-                              - int(ctx.stats.get("out_of_scope", 0)))
+                              int(ctx.stats.get("processed_resources", len({(o.resource_type, o.resource_id)
+                                  for o in observations}) - int(ctx.stats.get("out_of_scope", 0)))))
         run.abnormal_total = abnormal
         run.status = "PARTIAL" if ctx.errors else "SUCCESS"
         run.error_summary = "\n".join(ctx.errors[:20]) or None

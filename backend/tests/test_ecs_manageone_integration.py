@@ -47,7 +47,9 @@ def test_manageone_config_does_not_invalidate_other_sources(integrated):
 
 @pytest.mark.parametrize("field,value", [("endpoint", "https://another.integration.invalid"),
                                         ("username", "another-user"), ("organization", "another-org"),
-                                        ("secret_cipher", "changed-cipher"), ("enabled", False)])
+                                        ("secret_cipher", "changed-cipher"), ("enabled", False),
+                                        ("auth_type", "AKSK"), ("access_key", "different-ak"),
+                                        ("sk_cipher", "changed-sk-cipher")])
 def test_native_configuration_changes_invalidate_current_sample_signature(integrated, field, value):
     env = integrated
     env.tenant.metrics_source, env.tenant.manageone_config = "MANAGEONE", native_config()
@@ -124,3 +126,14 @@ def test_native_disabled_during_collection_cannot_commit_result(integrated, monk
     assert result.status == "PARTIAL"
     assert result.stats["metrics_skipped"] == "configuration_changed"
     assert list(env.db.scalars(select(EcsMetricSample))) == []
+
+
+@pytest.mark.parametrize("updates,expected", [
+    ({}, "MANAGEONE"), ({"enabled": False}, "NONE"), ({"access_key": ""}, "NONE"),
+    ({"sk_cipher": ""}, "NONE"), ({"auth_type": "unknown"}, "NONE"),
+])
+def test_aksk_source_selection_requires_its_own_credentials(updates, expected):
+    tenant = SimpleNamespace(metrics_source="MANAGEONE", manageone_config=native_config(
+        auth_type="AKSK", access_key="northbound-ak", sk_cipher=encrypt("northbound-sk")))
+    tenant.manageone_config.update(updates)
+    assert effective(tenant) == expected

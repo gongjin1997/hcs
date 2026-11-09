@@ -3,7 +3,7 @@
 METRIC_KEYS = ("cpu_util", "mem_util", "disk_util", "boot_time")
 REASONS = {
     "manageone_disabled": "ManageOne 性能接入未开启，请检查本租户的 ManageOne 配置",
-    "manageone_not_configured": "ManageOne 北向地址或集成账号未配置完整，请检查本租户的 ManageOne 配置",
+    "manageone_not_configured": "ManageOne 北向地址或认证凭据未配置完整，请检查本租户的 ManageOne 配置",
     "no_manageone_mapping": "ManageOne 未找到本项目 ECS 的唯一资源映射，请检查原生实例 ID 与项目 ID",
     "manageone_source_unverified": "ManageOne ECS 资源来源信息不完整，暂不能确认指标归属",
     "manageone_not_selected": "当前采集任务未选择 ManageOne 来源",

@@ -83,15 +83,9 @@ def policy_dict(db: Session, tenant_id: int | None) -> dict:
 
 
 def included(resource: Resource, policy: dict) -> bool:
-    if resource.lifecycle != "ACTIVE" or not resource.monitored or resource.scope_excluded:
-        return False
-    selection = policy.get("selection") or {}
-    mode = selection.get("mode", "all")
-    if mode == "critical":
-        return resource.critical
-    if mode == "selected":
-        return resource.id in selection.get("resource_ids", [])
-    return mode == "all"
+    from app.services.collection_policy import resource_included
+
+    return resource_included(resource, policy)
 
 
 def config_signature(tenant: object, policy: dict, source: str) -> str:

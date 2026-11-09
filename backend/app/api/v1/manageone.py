@@ -13,6 +13,10 @@ from app.schemas.manageone import ENDPOINT_ERROR, ManageOneConfigOut, ManageOneC
 from app.services import manageone_config
 
 _FIELD_ERRORS = {
+    "auth_type": "ManageOne 认证方式须为 PASSWORD 或 AKSK",
+    "access_key": "ManageOne AK 须为不含空白、控制字符和脱敏占位符的字符串，最长 128 字符",
+    "secret_key": "ManageOne SK 须为字符串，最长 512 字符；留空保留原 SK",
+    "clear_secret_key": "ManageOne 清除 SK 选项须为布尔值",
     "endpoint": ENDPOINT_ERROR,
     "username": "ManageOne 用户名须为不含控制字符的字符串，最长 128 字符",
     "organization": "ManageOne 组织须为空或不含控制字符的字符串，最长 128 字符",

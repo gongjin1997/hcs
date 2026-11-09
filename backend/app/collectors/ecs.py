@@ -46,9 +46,7 @@ class EcsStatusCollector:
         selected = None
         if ctx.db is not None:
             from app.services import collection_policy
-            from app.services.ecs_monitoring import policy_dict
-
-            policy = ctx.params.get("_collection_policy") or policy_dict(ctx.db, ctx.tenant_id)
+            policy = collection_policy.capture_run(ctx.db, ctx.tenant_id, ctx.params).model_dump(mode="json")
             if not collection_policy.stage_enabled(ctx.db, ctx.tenant_id, "inspection", policy):
                 return []
             selected = collection_policy.select_resources(ctx.db, ctx.tenant_id, ctx.project_ref, policy)
@@ -66,7 +64,7 @@ class EcsStatusCollector:
                 raise HcsError(0, "LOCAL.INVALID_RESPONSE", "ECS 列表 count 缺失或格式不正确，未使用不完整清单")
             return data
 
-        if policy is not None and policy["selection"]["mode"] != "all" and len(selected or []) <= 3:
+        if policy is not None and policy["selection"]["mode"] != "all":
             servers = []
             for resource in selected or []:
                 try:

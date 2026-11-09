@@ -5,18 +5,20 @@ import logging
 import math
 import time
 from collections import defaultdict
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
-from urllib.parse import urlsplit
 
 import httpx
 
 from app.core.crypto import decrypt
+from app.hcs import signer
 from app.hcs.diagnostics import network_error, record_attempt, request_id
 from app.hcs.errors import HcsError
 from app.hcs.ratelimit import acquire_cloud, consume_budget, remaining_time, request_budget
 from app.hcs.transport import send_bounded
 from app.metrics.ecs_diagnostics import REASONS
+from app.services.manageone_config import configured, get_config
 
 if TYPE_CHECKING:
     from app.collectors.base import RunContext
@@ -39,6 +41,26 @@ OBJECTS_PER_QUERY = 100
 MAX_RESOURCE_PAGES = 200
 
 
+@dataclass(frozen=True)
+class _Credentials:
+    """认证仅作用于显式配置的北向地址，不继承租户 IAM 认证。"""
+    access_key: str = field(default="", repr=False)
+    secret_key: str = field(default="", repr=False)
+    token: str = field(default="", repr=False)
+    roa_rand: str = field(default="", repr=False)
+
+    def apply(self, request: httpx.Request) -> None:
+        if self.access_key:
+            headers = {key: value for key, value in request.headers.items()
+                       if key in ("host", "content-type")}
+            request.headers.update(signer.sign(request.method, str(request.url), headers, request.content,
+                                               self.access_key, self.secret_key))
+        else:
+            request.headers["x-auth-token"] = self.token
+            if request.method != "GET":
+                request.headers["roarand"] = self.roa_rand
+
+
 def _record(ctx: RunContext, *, calls: int = 0, errors: int = 0, wait_ms: float = 0) -> None:
     observer = getattr(ctx.client, "_record", None)
     if callable(observer):
@@ -56,7 +78,8 @@ class _NoDefaultAuth:
 
 
 def _request(ctx: RunContext, base: str, path: str, method: str, *, body: dict | None = None,
-             headers: dict[str, str] | None = None, params: dict[str, int] | None = None) -> dict:
+             headers: dict[str, str] | None = None, params: dict[str, int] | None = None,
+             credentials: _Credentials | None = None) -> dict:
     method = method.upper()
     if (method, path) not in _READ_ONLY:
         raise HcsError(0, "LOCAL.READ_ONLY", "ManageOne adapter only allows its fixed authentication and query routes")
@@ -78,6 +101,8 @@ def _request(ctx: RunContext, base: str, path: str, method: str, *, body: dict |
         url = f"{base.rstrip('/')}{path}"
         request = httpx.Request(method, url, params=params, json=body,
             headers={"Accept": "application/json", "Content-Type": "application/json;charset=UTF-8", **(headers or {})})
+        if credentials is not None:
+            credentials.apply(request)
         calls = 1
         # Do not inherit HcsClient's auth, cookies, default headers, or IAM token.
         response = send_bounded(cast(httpx.Client, _NoDefaultAuth(http)), request,
@@ -120,28 +145,19 @@ def _request(ctx: RunContext, base: str, path: str, method: str, *, body: dict |
     return value
 
 
-def _config(ctx: RunContext) -> tuple[str, str, str, str]:
-    raw = getattr(ctx.tenant, "manageone_config", None)
-    if not isinstance(raw, dict) or raw.get("enabled") is not True:
+def _config(ctx: RunContext) -> tuple[str, dict, str]:
+    config = get_config(ctx.tenant)
+    if not config["enabled"]:
         raise HcsError(0, "MANAGEONE.DISABLED", "ManageOne 性能接入未开启")
-    endpoint, username, cipher = raw.get("endpoint"), raw.get("username"), raw.get("secret_cipher")
-    organization = raw.get("organization") or ""
-    if (not isinstance(endpoint, str) or not endpoint.strip() or not isinstance(username, str)
-            or not username.strip() or not isinstance(cipher, str) or not cipher.strip()
-            or not isinstance(organization, str)):
+    if not configured(config):
         raise HcsError(0, "MANAGEONE.NOT_CONFIGURED", "ManageOne 北向配置不完整")
     try:
-        parsed = urlsplit(endpoint)
-        if (parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username is not None
-                or parsed.password is not None or parsed.query or parsed.fragment):
-            raise ValueError
-        _ = parsed.port
-        password = decrypt(cipher)
+        secret = decrypt(config["sk_cipher"] if config["auth_type"] == "AKSK" else config["secret_cipher"])
     except Exception:
         raise HcsError(0, "MANAGEONE.NOT_CONFIGURED", "ManageOne 北向配置无效") from None
-    if not password:
-        raise HcsError(0, "MANAGEONE.NOT_CONFIGURED", "ManageOne 独立密码未配置")
-    return endpoint.rstrip("/"), username, password, organization
+    if not secret:
+        raise HcsError(0, "MANAGEONE.NOT_CONFIGURED", "ManageOne 北向凭据未配置")
+    return config["endpoint"].rstrip("/"), config, secret
 
 
 def _token(ctx: RunContext, base: str, username: str, password: str, organization: str) -> tuple[str, str]:
@@ -155,19 +171,20 @@ def _token(ctx: RunContext, base: str, username: str, password: str, organizatio
     return session, roa_rand
 
 
-def _resource_page(ctx: RunContext, base: str, token: str, offset: int) -> dict:
+def _resource_page(ctx: RunContext, base: str, credentials: _Credentials, offset: int) -> dict:
     return _request(ctx, base, RESOURCE_PATH, "GET", params={"limit": RESOURCE_LIMIT, "offset": offset},
-                    headers={"x-auth-token": token})
+                    credentials=credentials)
 
 
-def _map_resources(ctx: RunContext, base: str, token: str, wanted: set[str]) -> tuple[dict[str, str], set[str], set[str]]:
+def _map_resources(ctx: RunContext, base: str, credentials: _Credentials,
+                   wanted: set[str]) -> tuple[dict[str, str], set[str], set[str]]:
     found: dict[str, set[str]] = defaultdict(set)
     unverified_source: set[str] = set()
     wrong_project: set[str] = set()
     offset = 0
     total: int | None = None
     for _ in range(MAX_RESOURCE_PAGES):
-        result = _resource_page(ctx, base, token, offset)
+        result = _resource_page(ctx, base, credentials, offset)
         rows = result.get("objList")
         page_total = result.get("totalNum")
         if (not isinstance(rows, list) or isinstance(page_total, bool) or not isinstance(page_total, int)
@@ -276,10 +293,14 @@ def collect_manageone(ctx: RunContext, ids: list[str], aliases: list[str], diagn
     for alias in wanted_aliases:
         diagnostic["metrics"].setdefault(alias, {}).setdefault("timestamp_semantics", "source_sample")
     try:
-        base, username, password, organization = _config(ctx)
+        base, config, secret = _config(ctx)
         with request_budget(attempts=384, seconds=60):
-            token, roa_rand = _token(ctx, base, username, password, organization)
-            resource_map, source_unverified, wrong_project = _map_resources(ctx, base, token, set(ids))
+            if config["auth_type"] == "AKSK":
+                credentials = _Credentials(access_key=config["access_key"], secret_key=secret)
+            else:
+                token, roa_rand = _token(ctx, base, config["username"], secret, config["organization"] or "")
+                credentials = _Credentials(token=token, roa_rand=roa_rand)
+            resource_map, source_unverified, wrong_project = _map_resources(ctx, base, credentials, set(ids))
         missing = [sid for sid in ids if sid not in resource_map]
         if missing:
             for alias in wanted_aliases:
@@ -312,12 +333,11 @@ def collect_manageone(ctx: RunContext, ids: list[str], aliases: list[str], diagn
             batch = by_object[offset:offset + OBJECTS_PER_QUERY // len(metric_ids)]
             body = {"obj_type_id": OBJECT_TYPE_ID, "indicator_ids": metric_ids,
                     "obj_ids": [res_id for _native_id, res_id in batch], "interval": "MINUTE",
-                    "projectIds": [ctx.project_id],
                     "range": "LAST_5_MINUTE"}
             try:
                 with request_budget(attempts=384, seconds=60):
                     result = _request(ctx, base, HISTORY_PATH, "POST", body=body,
-                                      headers={"x-auth-token": token, "roarand": roa_rand})
+                                      credentials=credentials)
             except HcsError:
                 for alias in wanted_aliases:
                     entry = diagnostic["metrics"][alias]

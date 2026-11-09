@@ -4,7 +4,7 @@ All cloud-facing paths use in-process doubles. Run with INSPECTOR_ENV_FILE=''.
 """
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
-from threading import Barrier
+from threading import Barrier, Event
 from types import SimpleNamespace
 from unittest.mock import Mock
 from uuid import uuid4
@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
-from sqlalchemy import create_engine, event, func, select, update
+from sqlalchemy import create_engine, event, func, select, text, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
@@ -219,6 +219,206 @@ def test_api_rejects_foreign_and_deleted_local_ids_without_writes(mem_db, policy
         assert response.status_code == 400
     assert mem_db.scalar(select(SysSetting)) is None
     assert mem_db.scalar(select(AuditLog)) is None
+
+
+def test_api_selection_partial_saves_preserve_mode_and_reject_foreign_ids(mem_db, policy_api):
+    tenant(mem_db)
+    first = resource(mem_db)
+    foreign = resource(mem_db, tid=22, project=202)
+    api, _user = policy_api
+    path = "/api/v1/system/collection-policies/11/ecs_server"
+    response = api.put(path, json={"selection": {"mode": "selected", "resource_ids": [first.id]}})
+    assert response.status_code == 200, response.text
+    response = api.put(path, json={"metrics": {"interval_sec": 600}})
+    assert response.json()["data"]["policy"]["selection"] == {"mode": "selected", "resource_ids": [first.id]}
+    rejected = api.put(path, json={"selection": {"resource_ids": [foreign.id]}})
+    assert rejected.status_code == 400
+    assert policies.effective(mem_db, 11).selection.resource_ids == [first.id]
+    response = api.put(path, json={"selection": {"resource_ids": []}})
+    assert response.status_code == 200
+    assert response.json()["data"]["policy"]["selection"] == {"mode": "selected", "resource_ids": []}
+    assert policies.select_resources(mem_db, 11, 101, policies.effective(mem_db, 11)) == []
+
+
+def test_policy_guard_does_not_create_explicit_policy_or_override_legacy_schedule(mem_db):
+    mem_db.add(InspectionTask(code="ecs_status", name="status", service="ecs", interval_sec=600,
+                              cron="0 * * * *", enabled=True))
+    mem_db.commit()
+    policy = policies.lock_for_run(mem_db, 11, {})
+    mem_db.commit()
+    assert mem_db.get(SysSetting, policies.policy_key(11)) is None
+    assert policies.schedule(mem_db, 11, "inspection", policy) == (600, "0 * * * *", "task")
+
+
+def test_unselected_observations_do_not_update_resource_evaluate_or_interrupt_state(mem_db, monkeypatch):
+    tenant(mem_db)
+    selected = resource(mem_db, rid="selected")
+    excluded = resource(mem_db, rid="excluded")
+    store(mem_db)
+    setup_rule(mem_db)
+    now = utcnow()
+    ctx = RunContext(client=Client(), account="one", project_id="p1", tenant_id=11, project_ref=101, db=mem_db,
+                     params={"_task_code": "ecs_status", "_collection_phase": "inspection"})
+    observed = Observation("ecs_server", excluded.resource_id, excluded.name, "cpu", {"cpu_util": 99},
+                           metrics={"cpu_util": 99}, metric_observed_at=now)
+    pipeline.process_observations(mem_db, "ecs", [observed], ctx, now)
+    state = mem_db.scalar(select(EvalState))
+    before_state = dict(state.data)
+    before_resource = (dict(excluded.attrs), dict(excluded.metrics), excluded.last_seen, excluded.health)
+    policies.save(mem_db, 11, "ecs_server", CollectionPolicy(metrics={"enabled": False},
+        selection={"mode": "selected", "resource_ids": [selected.id]}), "scope-editor")
+    mem_db.commit()
+    evaluated = Mock(side_effect=AssertionError("unselected ECS must not be evaluated"))
+    monkeypatch.setattr(pipeline, "evaluate_rule", evaluated)
+    # Include hostile/unexpected observations to exercise the final pipeline gate,
+    # independent of a correctly behaving collector.
+    pipeline.process_observations(mem_db, "ecs", [observed,
+        Observation("ecs_server", "unknown", "unknown", "cpu", {"cpu_util": 99})], ctx, now)
+    assert not evaluated.called and ctx.stats["processed_resources"] == 0
+    assert state.data == before_state
+    assert (excluded.attrs, excluded.metrics, excluded.last_seen, excluded.health) == before_resource
+    assert mem_db.scalar(select(Resource).where(Resource.resource_id == "unknown")) is None
+
+
+def test_policy_save_after_outer_run_check_discards_observations(mem_db, monkeypatch):
+    tenant(mem_db)
+    host = resource(mem_db)
+    store(mem_db)
+    monkeypatch.setitem(pipeline.TASKS, "ecs_status", SimpleNamespace(service="ecs", collect=lambda ctx: [
+        Observation("ecs_server", host.resource_id, host.name, "instance_status", {"status": "ERROR"},
+                    status_raw="ERROR")]))
+    process = pipeline.process_observations
+
+    def save_before_persistence(db, service, observations, ctx, now):
+        policies.save(db, 11, "ecs_server", CollectionPolicy(selection={"mode": "selected", "resource_ids": []}), "editor")
+        db.commit()
+        return process(db, service, observations, ctx, now)
+
+    monkeypatch.setattr(pipeline, "process_observations", save_before_persistence)
+    result = pipeline.run_task(mem_db, "ecs_status", client=Client(), target=TARGET, trigger="MANUAL")
+    assert result.status == "SKIPPED" and result.stats["reason"] == "policy_changed"
+    assert mem_db.get(Resource, host.id).status_raw != "ERROR"
+    assert mem_db.scalar(select(EvalState)) is None
+    assert policies.effective(mem_db, 11).selection.resource_ids == []
+
+
+@pytest.mark.pg
+def test_pg_policy_save_while_worker_waits_discards_pending_changes_and_observations(mem_db):
+    tenant(mem_db)
+    host = resource(mem_db)
+    store(mem_db)
+    params = {"_task_code": "ecs_status", "_collection_phase": "inspection"}
+    policies.capture_run(mem_db, 11, params)
+    mem_db.rollback()
+    engine = mem_db.get_bind()
+    waiting = Event()
+
+    def before_execute(conn, _cursor, statement, _parameters, _context, _many):
+        if conn.info.get("ecs_scope_worker") and "hcs_account" in statement and "FOR UPDATE" in statement:
+            waiting.set()
+
+    def worker():
+        with Session(engine, expire_on_commit=False, autoflush=False) as db:
+            connection = db.connection()
+            connection_info = connection.info
+            connection_info["ecs_scope_worker"] = True
+            try:
+                db.execute(text("SET LOCAL lock_timeout = '5s'"))
+                db.add(ResourceChange(resource_ref=host.id, resource_type="ecs_server", resource_id=host.resource_id,
+                    name=host.name, tenant_id=11, change_type="REBOOT", changes=[], source="INSPECT", operator="worker"))
+                db.flush()
+                ctx = RunContext(client=Client(), account="one", project_id="p1", tenant_id=11, project_ref=101,
+                                 db=db, params=dict(params))
+                with pytest.raises(policies.PolicyChanged):
+                    pipeline.process_observations(db, "ecs", [Observation("ecs_server", host.resource_id, host.name,
+                        "instance_status", {"status": "ERROR"}, status_raw="ERROR")], ctx, utcnow())
+                db.rollback()
+            finally:
+                connection_info.pop("ecs_scope_worker", None)
+
+    event.listen(engine, "before_cursor_execute", before_execute)
+    try:
+        with Session(engine) as editor, ThreadPoolExecutor(max_workers=1) as pool:
+            policies.save(editor, 11, "ecs_server", CollectionPolicy(selection={"mode": "selected", "resource_ids": []}),
+                          "scope-editor")
+            future = pool.submit(worker)
+            try:
+                assert waiting.wait(3), "worker did not reach the tenant lock"
+                assert not future.done()
+            finally:
+                editor.commit()
+            future.result(timeout=6)
+    finally:
+        event.remove(engine, "before_cursor_execute", before_execute)
+    mem_db.expire_all()
+    assert mem_db.get(Resource, host.id).status_raw != "ERROR"
+    assert mem_db.scalar(select(ResourceChange)) is None
+    assert mem_db.scalar(select(EvalState)) is None
+    assert policies.effective(mem_db, 11).selection.resource_ids == []
+
+
+@pytest.mark.pg
+def test_pg_metrics_and_selection_wait_for_tenant_without_holding_guard_or_deadlocking(mem_db):
+    tenant(mem_db)
+    host = resource(mem_db)
+    policies.save(mem_db, 11, "ecs_server", CollectionPolicy(), "initial")
+    alarm = AlarmEvent(tenant_id=11, fingerprint="scope-lock", rule_id="scope-lock", service="ecs",
+        resource_type="ecs_server", resource_ref=host.id, resource_name=host.name, check_item="disk",
+        severity="P2", status="FIRING", first_seen=utcnow(), last_seen=utcnow(), title="disk", detail={})
+    mem_db.add(alarm)
+    mem_db.commit()
+    engine = mem_db.get_bind()
+    entered = {role: Event() for role in ("metrics", "selection")}
+
+    def before_execute(conn, _cursor, statement, _parameters, _context, _many):
+        role = conn.info.get("ecs_scope_lock_role")
+        if role in entered and "hcs_account" in statement and "FOR UPDATE" in statement:
+            entered[role].set()
+
+    def worker(role):
+        with Session(engine, autoflush=False) as db:
+            connection = db.connection()
+            connection_info = connection.info
+            connection_info["ecs_scope_lock_role"] = role
+            try:
+                db.execute(text("SET LOCAL lock_timeout = '5s'"))
+                if role == "metrics":
+                    policies.lock_for_run(db, 11, {})
+                    db.scalar(select(Resource).where(Resource.id == host.id).with_for_update())
+                    db.scalar(select(AlarmEvent).where(AlarmEvent.id == alarm.id).with_for_update())
+                else:
+                    policies.save(db, 11, "ecs_server",
+                                  CollectionPolicy(selection={"mode": "selected", "resource_ids": []}), "editor")
+                db.commit()
+            finally:
+                connection_info.pop("ecs_scope_lock_role", None)
+
+    event.listen(engine, "before_cursor_execute", before_execute)
+    try:
+        with Session(engine) as manageone_editor, ThreadPoolExecutor(max_workers=2) as pool:
+            # Same lock prefix as ManageOne save, using only synthetic rows and
+            # no credentials, endpoints or production configuration.
+            manageone_editor.scalar(select(HcsAccount).where(HcsAccount.id == 11).with_for_update())
+            manageone_editor.scalar(select(AlarmEvent).where(AlarmEvent.id == alarm.id).with_for_update())
+            futures = [pool.submit(worker, role) for role in entered]
+            try:
+                assert all(signal.wait(3) for signal in entered.values())
+                assert all(not future.done() for future in futures)
+                with Session(engine) as observer:
+                    # Neither waiting worker may hold the guard and wait back
+                    # on a tenant/alarm lock held by a ManageOne save.
+                    guard = observer.scalar(select(SysSetting).where(
+                        SysSetting.key == policies._guard_key(11)).with_for_update(nowait=True))
+                    assert guard is not None
+                    observer.rollback()
+            finally:
+                manageone_editor.commit()
+            for future in futures:
+                future.result(timeout=6)
+    finally:
+        event.remove(engine, "before_cursor_execute", before_execute)
+    mem_db.expire_all()
+    assert mem_db.get(AlarmEvent, alarm.id).status == "CLOSED"
 
 
 def test_disabling_inspection_closes_active_only_once_and_keeps_history(mem_db):
@@ -792,7 +992,7 @@ def test_affected_alarm_lookup_is_batched_without_per_resource_queries(mem_db):
     finally:
         event.remove(mem_db.get_bind(), "before_cursor_execute", record)
     assert result["closed_alarms"] == 600
-    assert len(reads) <= 7
+    assert len(reads) <= 8  # 固定一次租户锁读，用于在批量告警关闭前序列化策略变更。
     assert len([statement for statement in reads if "FROM alarm_event " in statement]) == 2
     assert all(alarm.status == "CLOSED" for alarm in alarms)
     assert mem_db.scalar(select(func.count()).select_from(AlarmEventLog)) == 600

@@ -114,6 +114,24 @@ describe('ECS 租户策略保存', () => {
     expect(model.instanceOptions.value).toEqual([])
     expect(model.policy.selection.resource_ids).toEqual([])
   })
+  it('实例标签包含名称、IP、原始资源 ID，搜索后保留已选实例的可识别标签', async () => {
+    const { model, reads, lookups } = setup()
+    reads[0].result.resolve(ecsPolicy()); await settle()
+    model.searchInstances('vm-11')
+    lookups[0].result.resolve({ items: [ecsInstance(11, 7)], total: 1, page: 1, page_size: 100 }); await settle()
+    expect(model.instanceOptions.value).toEqual([{ id: 11, label: '服务器 11 · 192.0.2.1 · vm-11' }])
+    model.policy.selection.resource_ids = [11]
+    model.searchInstances('other')
+    lookups[1].result.resolve({ items: [], total: 0, page: 1, page_size: 100 }); await settle()
+    expect(model.instanceOptions.value).toEqual([{ id: 11, label: '服务器 11 · 192.0.2.1 · vm-11' }])
+  })
+  it.each(['all', 'critical', 'selected'] as const)('打开策略时保留已有 %s 范围，不自动更改', async mode => {
+    const { model, reads } = setup()
+    const response = ecsPolicy()
+    response.policy.selection = { mode, resource_ids: mode === 'selected' ? [11] : [] }
+    reads[0].result.resolve(response); await settle()
+    expect(model.policy.selection).toEqual(response.policy.selection)
+  })
   it('重复点击保存仅发一次请求，关闭后旧失败不回填', async () => {
     const { model, reads, saves, saver, visible } = setup()
     reads[0].result.resolve(ecsPolicy()); await settle()

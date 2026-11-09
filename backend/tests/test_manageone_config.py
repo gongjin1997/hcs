@@ -19,7 +19,8 @@ from app.services import collect_switch, manageone_config
 PATH = "/api/v1/system/tenants/1/manageone"
 SECRET = "synthetic-manageone-password-never-return"
 SECOND_SECRET = "synthetic-manageone-replacement-password"
-PUBLIC_FIELDS = {"tenant_id", "enabled", "configured", "endpoint", "username", "organization", "secret_set", "selected"}
+PUBLIC_FIELDS = {"tenant_id", "enabled", "configured", "endpoint", "username", "organization", "secret_set", "selected",
+                 "auth_type", "access_key_mask", "secret_key_set"}
 
 
 @pytest.fixture
@@ -52,11 +53,13 @@ def test_defaults_are_disabled_independent_and_reads_do_not_write(manageone_api)
         assert response.json()["data"] == {
             "tenant_id": tenant_id, "enabled": False, "configured": False, "endpoint": "", "username": "",
             "organization": None, "secret_set": False, "selected": False,
+            "auth_type": "PASSWORD", "access_key_mask": None, "secret_key_set": False,
         }
         tenant = db.get(HcsAccount, tenant_id)
         assert tenant.manageone_config == {} and tenant.metrics_source == "AUTO"
         assert manageone_config.get_config(tenant) == {
             "enabled": False, "endpoint": "", "username": "", "organization": None, "secret_cipher": "",
+            "auth_type": "PASSWORD", "access_key": "", "sk_cipher": "",
         }
     assert db.scalars(select(AuditLog)).all() == []
     assert db.scalars(select(SysSetting)).all() == []
@@ -76,7 +79,8 @@ def test_encrypted_credentials_are_independent_and_never_returned_or_audited(man
     cipher = internal["secret_cipher"]
     assert cipher.startswith(PREFIX) and decrypt(cipher) == SECRET
     assert tenant.manageone_config == internal
-    assert set(internal) == {"enabled", "endpoint", "username", "organization", "secret_cipher"}
+    assert set(internal) == {"enabled", "endpoint", "username", "organization", "secret_cipher", "auth_type",
+                             "access_key", "sk_cipher"}
     assert tenant.iam_endpoint == "https://iam.example.invalid" and tenant.username == "iam-only-user-1"
     assert tenant.secret_cipher == "unchanged-iam-secret-1"
     assert db.get(HcsAccount, 2).manageone_config == {}
@@ -104,7 +108,7 @@ def test_blank_or_omitted_password_preserves_cipher(manageone_api, payload):
     assert db.get(HcsAccount, 1).manageone_config["secret_cipher"] == cipher
     assert result.json()["data"]["configured"]
     last = db.scalar(select(AuditLog).order_by(AuditLog.id.desc()))
-    assert last.detail == {"changes": {}, "password_changed": False, "closed_disk_alarms": 0}
+    assert last.detail == {"changes": {}, "password_changed": False, "secret_key_changed": False, "closed_disk_alarms": 0}
 
 
 @pytest.mark.parametrize("source", ["AUTO", "NONE", "PROMETHEUS", "AOM", "MANAGEONE"])
@@ -384,3 +388,85 @@ def test_registered_production_routes_have_safe_response_contract():
     assert set(paths[path]) == {"get", "put"}
     schema = production_app.openapi()["components"]["schemas"]["ManageOneConfigOut"]
     assert set(schema["properties"]) == PUBLIC_FIELDS
+
+
+AK = 'synthetic-northbound-access-key'
+SK = 'synthetic-northbound-secret-key-never-return'
+
+
+def aksk_config(**updates):
+    return {'enabled': True, 'endpoint': 'https://manageone.example.invalid:26335', 'auth_type': 'AKSK',
+            'access_key': AK, 'secret_key': SK, **updates}
+
+
+def test_aksk_config_is_tenant_specific_encrypted_and_masked(manageone_api, caplog):
+    client, db, _ = manageone_api
+    response = client.put(PATH, json=aksk_config(select_source=True))
+    assert response.status_code == 200, response.text
+    data = response.json()['data']
+    assert data['auth_type'] == 'AKSK' and data['configured'] and data['selected'] and data['secret_key_set']
+    assert not data['secret_set'] and data['access_key_mask'] != AK
+    tenant = db.get(HcsAccount, 1)
+    assert tenant.manageone_config['access_key'] == AK
+    assert decrypt(tenant.manageone_config['sk_cipher']) == SK
+    assert tenant.manageone_config['secret_cipher'] == ''
+    assert tenant.secret_cipher == 'unchanged-iam-secret-1'
+    assert db.get(HcsAccount, 2).manageone_config == {}
+    exposed = response.text + client.get(PATH).text + json.dumps(db.scalar(select(AuditLog)).detail) + caplog.text
+    assert AK not in exposed and SK not in exposed and tenant.manageone_config['sk_cipher'] not in exposed
+    cipher = tenant.manageone_config['sk_cipher']
+    assert client.put(PATH, json={'access_key': '', 'secret_key': ''}).status_code == 200
+    assert tenant.manageone_config['access_key'] == AK and tenant.manageone_config['sk_cipher'] == cipher
+
+
+@pytest.mark.parametrize('change', [{'endpoint': 'https://new.example.invalid'}, {'access_key': 'different-access-key'}])
+def test_changed_aksk_identity_requires_replacement_sk(manageone_api, change):
+    client, db, _ = manageone_api
+    assert client.put(PATH, json=aksk_config()).status_code == 200
+    before = deepcopy(db.get(HcsAccount, 1).manageone_config)
+    response = client.put(PATH, json=change)
+    assert response.status_code == 400 and '重新填写 SK' in response.json()['message']
+    assert db.get(HcsAccount, 1).manageone_config == before
+    assert client.put(PATH, json={**change, 'secret_key': 'replacement-sk'}).status_code == 200
+    assert decrypt(db.get(HcsAccount, 1).manageone_config['sk_cipher']) == 'replacement-sk'
+
+
+def test_authentication_switch_cannot_reuse_credentials(manageone_api):
+    client, db, _ = manageone_api
+    assert client.put(PATH, json=config()).status_code == 200
+    before = deepcopy(db.get(HcsAccount, 1).manageone_config)
+    assert client.put(PATH, json={'auth_type': 'AKSK', 'access_key': AK}).status_code == 400
+    assert db.get(HcsAccount, 1).manageone_config == before
+    assert client.put(PATH, json=aksk_config()).status_code == 200
+    values = db.get(HcsAccount, 1).manageone_config
+    assert not values['username'] and not values['organization'] and not values['secret_cipher']
+    assert client.put(PATH, json={'auth_type': 'PASSWORD', 'username': 'new-user'}).status_code == 400
+    assert client.put(PATH, json={'auth_type': 'PASSWORD', 'username': 'new-user', 'password': SECRET}).status_code == 200
+    values = db.get(HcsAccount, 1).manageone_config
+    assert not values['access_key'] and not values['sk_cipher']
+    assert decrypt(values['secret_cipher']) == SECRET
+
+
+def test_clearing_sk_requires_disabled_and_prevents_reenable(manageone_api):
+    client, db, _ = manageone_api
+    assert client.put(PATH, json=aksk_config()).status_code == 200
+    for body in ({'clear_secret_key': True}, {'enabled': False, 'clear_secret_key': True, 'secret_key': SK}):
+        assert client.put(PATH, json=body).status_code == 400
+    response = client.put(PATH, json={'enabled': False, 'clear_secret_key': True})
+    assert response.status_code == 200
+    assert not response.json()['data']['secret_key_set'] and not response.json()['data']['configured']
+    assert db.get(HcsAccount, 1).manageone_config['sk_cipher'] == ''
+    assert client.put(PATH, json={'enabled': True}).status_code == 400
+
+
+@pytest.mark.parametrize('change', [
+    {'auth_type': 'unknown'}, {'access_key': 'bad\nkey'}, {'access_key': '****'}, {'access_key': 'key,malformed'},
+    {'access_key': {'secret': SK}}, {'secret_key': [SK]}, {'secret_key': '********'}, {'secret_key': '   '},
+    {'clear_secret_key': 'true'}, {'password': SECRET},
+])
+def test_invalid_aksk_fields_never_leak_input(manageone_api, change, caplog):
+    client, db, _ = manageone_api
+    response = client.put(PATH, json=aksk_config(**change))
+    assert response.status_code == 400
+    assert AK not in response.text + caplog.text and SK not in response.text + caplog.text
+    assert not db.get(HcsAccount, 1).manageone_config

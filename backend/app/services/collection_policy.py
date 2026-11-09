@@ -41,6 +41,10 @@ METRIC_CHECKS = {"cpu": "cpu_util", "memory": "mem_util", "disk": "disk_util"}
 ALARM_BATCH = 500
 
 
+class PolicyChanged(Exception):
+    """Discard results collected before a tenant policy change."""
+
+
 def policy_key(tenant_id: int | None, rtype: str = RESOURCE_TYPE) -> str:
     return f"collection_policy:{tenant_id or 0}:{rtype}"
 
@@ -132,7 +136,8 @@ def _cron_trigger(spec: str) -> CronTrigger | None:
 
 def resource_included(resource: Resource, policy: CollectionPolicy | dict) -> bool:
     policy = CollectionPolicy.model_validate(policy)
-    if not resource.monitored or resource.scope_excluded or resource.lifecycle != "ACTIVE":
+    if (resource.resource_type != RESOURCE_TYPE or not resource.monitored
+            or resource.scope_excluded or resource.lifecycle != "ACTIVE"):
         return False
     selection = policy.selection
     return (selection.mode == "all" or selection.mode == "critical" and resource.critical
@@ -154,9 +159,10 @@ def select_resources(db: Session, tenant_id: int | None, project_ref: int | None
         ids = policy.selection.resource_ids
         rows: list[Resource] = []
         for start in range(0, len(ids), 500):
-            rows.extend(db.scalars(q.where(Resource.id.in_(ids[start:start + 500]))))
+            rows.extend(db.scalars(q.where(Resource.id.in_(ids[start:start + 500]))
+                                   .execution_options(populate_existing=True)))
         return sorted(rows, key=lambda r: r.id)
-    return list(db.scalars(q.order_by(Resource.id)))
+    return list(db.scalars(q.order_by(Resource.id).execution_options(populate_existing=True)))
 
 
 def stage_enabled(db: Session, tenant_id: int | None, phase: str,
@@ -176,6 +182,55 @@ def _insert(db: Session, key: str, value: dict, operator: str | None = None) -> 
     insert = pg_insert if db.get_bind().dialect.name == "postgresql" else sqlite_insert
     db.execute(insert(SysSetting).values(key=key, value=value, updated_by=operator)
                .on_conflict_do_nothing(index_elements=["key"]))
+
+
+def _guard_key(tenant_id: int | None) -> str:
+    # Separate from the policy: acquiring a lock must not turn legacy defaults
+    # into an explicit policy or change which schedule owns the task.
+    return f"collection_guard:{tenant_id or 0}:{RESOURCE_TYPE}"
+
+
+def revision(db: Session, tenant_id: int | None) -> str | None:
+    value = db.scalar(select(SysSetting.value).where(SysSetting.key == _guard_key(tenant_id)))
+    return value.get("revision") if isinstance(value, dict) else None
+
+
+def _lock_guard(db: Session, tenant_id: int | None) -> SysSetting:
+    if tenant_id is not None:
+        # ManageOne saves lock the tenant before alarms. Keep the same prefix:
+        # tenant -> policy guard -> resources/evaluation/alarm rows. The lock
+        # also prevents a credentials/source save between validation and commit.
+        db.execute(select(HcsAccount.id).where(HcsAccount.id == tenant_id).with_for_update())
+    key = _guard_key(tenant_id)
+    # The insert also obtains SQLite's write lock. PostgreSQL serializes on the
+    # guard row; both writers and workers acquire it before resource/alarm locks.
+    _insert(db, key, {})
+    row = db.scalar(select(SysSetting).where(SysSetting.key == key).with_for_update()
+                    .execution_options(populate_existing=True))
+    assert row is not None
+    return row
+
+
+def capture_run(db: Session, tenant_id: int | None, params: dict) -> CollectionPolicy:
+    """Capture before cloud I/O, without holding an administrator's save lock."""
+    current = effective(db, tenant_id)
+    expected = params.get("_collection_policy")
+    if expected is not None and CollectionPolicy.model_validate(expected) != current:
+        raise PolicyChanged()
+    params["_collection_policy"] = current.model_dump(mode="json")
+    params.setdefault("_collection_policy_revision", revision(db, tenant_id))
+    return current
+
+
+def lock_for_run(db: Session, tenant_id: int | None, params: dict) -> CollectionPolicy:
+    """Fence persistence through commit, including changes reverted during I/O."""
+    guard = _lock_guard(db, tenant_id)
+    current = effective(db, tenant_id)
+    if "_collection_policy_revision" in params and (
+            CollectionPolicy.model_validate(params["_collection_policy"]) != current
+            or params["_collection_policy_revision"] != guard.value.get("revision")):
+        raise PolicyChanged()
+    return current
 
 
 def _validate_selection(db: Session, tenant_id: int, rtype: str, policy: CollectionPolicy) -> None:
@@ -256,6 +311,8 @@ def save(db: Session, tenant_id: int, rtype: str, policy: CollectionPolicy, oper
     if rtype != RESOURCE_TYPE:
         raise BizError(ErrorCode.BAD_REQUEST, "当前采集策略仅支持 ECS 云服务器")
     _validate_selection(db, tenant_id, rtype, policy)
+    guard = _lock_guard(db, tenant_id)
+    _validate_selection(db, tenant_id, rtype, policy)
     fallback = effective(db, tenant_id, rtype)
     key = policy_key(tenant_id, rtype)
     _insert(db, key, {})
@@ -273,6 +330,8 @@ def save(db: Session, tenant_id: int, rtype: str, policy: CollectionPolicy, oper
         policy = CollectionPolicy.model_validate(merged)
         _validate_selection(db, tenant_id, rtype, policy)
     row.value, row.updated_by = policy.model_dump(mode="json"), operator
+    if before != policy:
+        guard.value = {"revision": uuid4().hex}
     closed = _close_excluded_alarms(db, tenant_id, rtype, before, policy, operator)
     db.flush()
     return {"policy": policy.model_dump(mode="json"), "closed_alarms": closed,

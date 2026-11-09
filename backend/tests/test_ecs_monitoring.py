@@ -312,6 +312,64 @@ def test_metrics_collector_queries_only_selected_local_machine_and_never_ecs_inv
     assert all(s.tenant_id == 1 and s.project_ref == 11 for s in ecs_world.scalars(select(EcsMetricSample)))
 
 
+def test_selected_machine_does_not_query_addresses_of_same_cloud_id_in_other_project(ecs_world, monkeypatch):
+    from app.collectors import ecs_metrics as module
+
+    db = ecs_world
+    db.get(Resource, 2).ip = "10.0.0.2"
+    setting = policy(selection={"mode": "selected", "resource_ids": [1]}, metric_keys=["cpu_util"])
+    db.add(SysSetting(key="collection_policy:1:ecs_server", value=setting))
+    db.commit()
+    requests = []
+
+    def collect(ctx, ids, index, **kwargs):
+        requests.append((ids, index))
+        return EcsReadingsResult({"shared-cloud-id": [point(0)]}, "PROMETHEUS", {"status": "ready"})
+
+    monkeypatch.setattr(module, "collect_readings", collect)
+    ctx = RunContext(client=SimpleNamespace(), account="ecs-1", project_id="project-11", tenant_id=1,
+        project_ref=11, tenant=db.get(HcsAccount, 1), db=db)
+    assert len(EcsMetricsCollector().collect(ctx)) == 1
+    assert requests == [(["shared-cloud-id"], {"10.0.0.1": "shared-cloud-id"})]
+
+
+@pytest.mark.parametrize("change", ["empty_selection", "add_selection", "revert_selection", "cadence"])
+def test_policy_save_during_metric_io_discards_all_points_before_persistence(ecs_world, monkeypatch, change):
+    from app.collectors import ecs_metrics as module
+    from app.services import collection_policy
+
+    db = ecs_world
+    initial = CollectionPolicy(selection={"mode": "selected", "resource_ids": [1]}, metric_keys=["cpu_util"])
+    collection_policy.save(db, 1, "ecs_server", initial, "initial")
+    db.commit()
+    requested = []
+
+    def collect(ctx, ids, index, **kwargs):
+        requested.append(ids)
+        updated = initial.model_copy(deep=True)
+        if change == "add_selection":
+            updated.selection.resource_ids.append(2)
+        elif change == "cadence":
+            updated.metrics.interval_sec = 600
+        else:
+            updated.selection.resource_ids = []
+        collection_policy.save(db, 1, "ecs_server", updated, "concurrent-editor")
+        db.commit()
+        if change == "revert_selection":
+            collection_policy.save(db, 1, "ecs_server", initial, "concurrent-editor")
+            db.commit()
+        return EcsReadingsResult({"shared-cloud-id": [point(90)]}, "PROMETHEUS", {"status": "ready"})
+
+    monkeypatch.setattr(module, "collect_readings", collect)
+    ctx = RunContext(client=SimpleNamespace(), account="ecs-1", project_id="project-11", tenant_id=1,
+        project_ref=11, tenant=db.get(HcsAccount, 1), db=db)
+    assert EcsMetricsCollector().collect(ctx) == []
+    assert requested == [["shared-cloud-id"]]
+    assert ctx.stats["metrics_skipped"] == "configuration_changed"
+    assert db.scalar(select(func.count()).select_from(EcsMetricSample)) == 0
+    assert all("ecs_monitoring" not in resource.attrs for resource in db.scalars(select(Resource)))
+
+
 def test_inspection_uses_fresh_local_samples_without_querying_metric_source(ecs_world):
     row, tenant, setting = snapshot(ecs_world)
     ctx = RunContext(client=SimpleNamespace(), account="ecs-1", project_id="project-11", tenant_id=1,

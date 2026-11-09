@@ -5,7 +5,7 @@ import dayjs from 'dayjs'
 import { reactive } from 'vue'
 import type { InspectionTask, ReportSchedule, TaskRun } from '../src/api'
 import { mountBusinessScript } from './businessViewHarness'
-import { allNodes, findNode, mountPersonnel, settlePersonnel, textOf } from './personnelHarness'
+import { allNodes, clickButton, findNode, mountPersonnel, settlePersonnel, textOf } from './personnelHarness'
 
 const dispose: (() => void)[] = []
 afterEach(() => { dispose.splice(0).forEach(stop => stop()) })
@@ -226,5 +226,20 @@ describe('TaskPanel 实际 Vue 模板的筛选和详情连接', () => {
     await settlePersonnel()
     expect((findNode(view.root, 'Table').props.data as unknown[])).toHaveLength(2)
     expect(textOf(view.root)).toContain('显示 2 / 2 项')
+  })
+
+  it('ECS 巡检任务行有明确的监控配置入口并带入当前租户', async () => {
+    const rows = [task('ecs_status', { service: 'ecs', name: 'ECS 云服务器状态' })]
+    const view = mountPersonnel('system/TaskPanel.vue', { api: {
+      listTasks: vi.fn(async () => rows), reportSchedule: vi.fn(async () => schedule),
+    }, dependencies: {
+      dayjs: { default: dayjs },
+      '@/stores/app': { useAppStore: () => ({ currentTenant: { id: 7, name: '测试租户', short_name: '测试' }, tenants: [{ id: 7, name: '测试租户' }] }) },
+    } })
+    dispose.push(view.unmount)
+    await settlePersonnel()
+    await clickButton(view.root, '监控配置')
+    const dialog = findNode(view.root, 'Component', item => 'tenant-id' in item.props)
+    expect(dialog.props).toMatchObject({ modelValue: true, 'tenant-id': 7, 'tenant-name': '测试' })
   })
 })

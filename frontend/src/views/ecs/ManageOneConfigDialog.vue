@@ -34,7 +34,7 @@ async function onSave() {
   <el-dialog :model-value="modelValue" :title="`${tenantName || '租户'} · ManageOne 配置`" width="min(620px, calc(100vw - 24px))" append-to-body destroy-on-close
     :close-on-click-modal="!saving" :close-on-press-escape="!saving" :show-close="!saving" @update:model-value="emit('update:modelValue', $event)">
     <div v-loading="loading" class="manageone-config">
-      <p class="text-3">使用 ManageOne 运维北向集成账号，与 IAM 凭据独立；无需安装 Prometheus。</p>
+      <p class="text-3">使用 ManageOne 运维北向独立凭据；无需安装 Prometheus。</p>
       <p class="text-3">仅查询 CPU、内存、云硬盘使用率；开机时间暂不支持。</p>
       <el-alert v-if="error" :title="error" type="error" :closable="false" show-icon />
       <el-alert v-if="validationError" :title="validationError" type="warning" :closable="false" show-icon />
@@ -45,15 +45,36 @@ async function onSave() {
         <el-form :disabled="!editable || loading || saving" label-width="130px" @submit.prevent="onSave">
           <el-form-item label="启用配置"><el-switch v-model="form.enabled" aria-label="启用 ManageOne 配置" /></el-form-item>
           <el-form-item label="运维北向 baseURL"><el-input v-model="form.endpoint" aria-label="ManageOne 运维北向 baseURL" placeholder="填写运维北向 baseURL" autocomplete="off" /></el-form-item>
-          <el-form-item label="集成账号"><el-input v-model="form.username" aria-label="ManageOne 集成账号" autocomplete="off" /></el-form-item>
-          <el-form-item label="组织（可选）"><el-input v-model="form.organization" aria-label="ManageOne 组织" autocomplete="off" /></el-form-item>
-          <el-form-item label="密码">
-            <el-input v-if="editable" v-model="form.password" type="password" aria-label="ManageOne 密码" autocomplete="new-password" placeholder="留空保留已保存密码" />
-            <span v-else>{{ loaded.secret_set ? '已设置（不回显）' : '未设置' }}</span>
-            <p v-if="editable" class="password-hint text-3">修改地址、账号或组织后须重新填写密码。</p>
-            <el-checkbox v-if="editable && loaded.secret_set" v-model="form.clear_password" :disabled="form.enabled" aria-label="清除 ManageOne 密码">清除已保存密码（须先关闭配置）</el-checkbox>
+          <el-form-item label="认证方式">
+            <el-select v-model="form.auth_type" aria-label="ManageOne 认证方式">
+              <el-option value="AKSK" label="AK/SK" /><el-option value="PASSWORD" label="账号密码" />
+            </el-select>
+            <p v-if="editable" class="password-hint text-3">切换方式需重新填写凭据。</p>
           </el-form-item>
-          <el-form-item v-if="editable" label="指标来源"><el-checkbox v-model="form.select_source" :disabled="!form.enabled || form.clear_password">用于 ECS 指标采集</el-checkbox></el-form-item>
+          <template v-if="form.auth_type === 'AKSK'">
+            <el-form-item label="AK">
+              <el-input v-if="editable" v-model="form.access_key" type="password" aria-label="ManageOne AK" autocomplete="new-password" :placeholder="loaded.auth_type === 'AKSK' && loaded.access_key_mask ? '留空保留已保存 AK' : '填写 AK'" />
+              <span v-if="loaded.auth_type === 'AKSK' && loaded.access_key_mask" class="credential-mask">{{ loaded.access_key_mask }}</span>
+              <span v-else-if="!editable">未设置</span>
+            </el-form-item>
+            <el-form-item label="SK">
+              <el-input v-if="editable" v-model="form.secret_key" type="password" aria-label="ManageOne SK" autocomplete="new-password" :placeholder="loaded.auth_type === 'AKSK' && loaded.secret_key_set ? '留空保留已保存 SK' : '填写 SK'" />
+              <span v-else>{{ loaded.secret_key_set ? '已设置（不回显）' : '未设置' }}</span>
+              <p v-if="editable" class="password-hint text-3">修改地址或 AK 后须重填 SK，或关闭并清除。</p>
+              <el-checkbox v-if="editable && loaded.auth_type === 'AKSK' && loaded.secret_key_set" v-model="form.clear_secret_key" :disabled="form.enabled" aria-label="清除 ManageOne SK">清除已保存 SK（须先关闭配置）</el-checkbox>
+            </el-form-item>
+          </template>
+          <template v-else>
+            <el-form-item label="集成账号"><el-input v-model="form.username" aria-label="ManageOne 集成账号" autocomplete="off" /></el-form-item>
+            <el-form-item label="组织（可选）"><el-input v-model="form.organization" aria-label="ManageOne 组织" autocomplete="off" /></el-form-item>
+            <el-form-item label="密码">
+              <el-input v-if="editable" v-model="form.password" type="password" aria-label="ManageOne 密码" autocomplete="new-password" :placeholder="loaded.auth_type === 'PASSWORD' && loaded.secret_set ? '留空保留已保存密码' : '填写密码'" />
+              <span v-else>{{ loaded.secret_set ? '已设置（不回显）' : '未设置' }}</span>
+              <p v-if="editable" class="password-hint text-3">修改地址、账号或组织后须重填密码，或关闭并清除。</p>
+              <el-checkbox v-if="editable && loaded.auth_type === 'PASSWORD' && loaded.secret_set" v-model="form.clear_password" :disabled="form.enabled" aria-label="清除 ManageOne 密码">清除已保存密码（须先关闭配置）</el-checkbox>
+            </el-form-item>
+          </template>
+          <el-form-item v-if="editable" label="指标来源"><el-checkbox v-model="form.select_source" :disabled="!form.enabled || (form.auth_type === 'AKSK' ? form.clear_secret_key : form.clear_password)">用于 ECS 指标采集</el-checkbox></el-form-item>
         </el-form>
         <p class="text-3">选择来源不启用全局任务、租户采集阶段或总开关；关闭配置不自动切换来源。</p>
       </template>
@@ -73,8 +94,9 @@ async function onSave() {
   padding-right: 4px;
 }
 .manageone-config > p, .password-hint { margin: 0; font-size: 12px; line-height: 1.7; }
-.config-status { display: flex; gap: 8px; }
+.config-status { display: flex; flex-wrap: wrap; gap: 8px; }
 .password-hint { width: 100%; }
+.credential-mask { width: 100%; overflow-wrap: anywhere; font-size: 12px; }
 @media (max-width: 520px) {
   .manageone-config :deep(.el-form-item) { flex-direction: column; align-items: stretch; }
   .manageone-config :deep(.el-form-item__label) { width: auto !important; justify-content: flex-start; }

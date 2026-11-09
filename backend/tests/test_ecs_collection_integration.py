@@ -260,6 +260,72 @@ def test_selection_limits_sampling_and_uses_one_native_host_state_get(integrated
 
 
 @pytest.mark.parametrize("stage", ["ecs_metrics", "ecs_status"])
+def test_selected_empty_means_no_queries_samples_or_inspection(integrated, stage):
+    env = integrated
+    install_policy(env, selection={"mode": "selected", "resource_ids": []})
+    before = {row.id: (deepcopy(row.attrs), deepcopy(row.metrics), row.last_seen, row.health)
+              for row in env.resources.values()}
+    result = run(env, stage)
+    assert result.status == "SUCCESS", result.error_summary
+    assert result.resource_total == 0 and result.api_calls == 0
+    assert env.telemetry.calls == [] and samples(env) == []
+    assert env.db.scalar(select(func.count()).select_from(EvalState)) == 0
+    assert env.db.scalar(select(func.count()).select_from(AlarmEvent)) == 0
+    assert {row.id: (row.attrs, row.metrics, row.last_seen, row.health)
+            for row in env.resources.values()} == before
+
+
+@pytest.mark.parametrize("selection", ["selected", "critical"])
+def test_four_selected_servers_never_fall_back_to_full_inventory(integrated, selection):
+    env = integrated
+    for name, address in (("d", "10.0.0.4"), ("e", "10.0.0.5")):
+        server = deepcopy(env.telemetry.servers[0])
+        server.update(id=f"host-{name}", name=f"Synthetic {name}")
+        server["addresses"]["private"][0]["addr"] = address
+        env.telemetry.servers.append(server)
+    result = inventory.sync_ledger(env.db, client=env.client, target=env.target, types=["ecs_server"], trigger="MANUAL")
+    assert result.status == "SUCCESS"
+    rows = list(env.db.scalars(select(Resource).order_by(Resource.id)))
+    for row in rows[:4]:
+        row.critical = True
+    env.db.commit()
+    install_policy(env, selection={"mode": selection, "resource_ids": [row.id for row in rows[:4]]
+                                  if selection == "selected" else []})
+    env.telemetry.calls.clear()
+    result = run(env, "ecs_status")
+    assert result.status == "SUCCESS", result.error_summary
+    assert result.resource_total == result.api_calls == 4
+    assert {request.url.path for request in env.telemetry.calls} == {
+        f"/v1/synthetic-project/cloudservers/{row.resource_id}" for row in rows[:4]}
+    assert all(request.method == "GET" for request in env.telemetry.calls)
+    assert "inspection_monitoring" not in rows[4].attrs
+
+
+def test_ces_metric_requests_and_rule_evaluation_use_only_selected_instance(integrated, monkeypatch):
+    env = integrated
+    monkeypatch.setattr(get_settings(), "hcs_ces_enabled", True)
+    env.tenant.metrics_source = "CES"
+    env.db.commit()
+    chosen = env.resources["host-a"]
+    install_policy(env, selection={"mode": "selected", "resource_ids": [chosen.id]})
+    evaluated = []
+    evaluate = pipeline.evaluate_rule
+
+    def evaluate_selected(rule, facts, data, severity):
+        evaluated.append(data[pipeline.inspection_evidence.META]["resource_ref"])
+        return evaluate(rule, facts, data, severity)
+
+    monkeypatch.setattr(pipeline, "evaluate_rule", evaluate_selected)
+    assert run(env, "ecs_metrics").status == "SUCCESS"
+    batches = [json.loads(request.content)["metrics"] for request in env.telemetry.calls if request.method == "POST"]
+    assert batches and all({dimension["value"] for metric in batch for dimension in metric["dimensions"]
+                            if dimension["name"] == "instance_id"} == {"host-a"} for batch in batches)
+    assert {sample.resource_ref for sample in samples(env)} == {chosen.id}
+    evaluate_without_metrics(env)
+    assert evaluated and set(evaluated) == {chosen.id}
+
+
+@pytest.mark.parametrize("stage", ["ecs_metrics", "ecs_status"])
 @pytest.mark.parametrize("gate", ["master", "stage"])
 def test_manual_runs_bypass_cadence_but_still_honor_master_and_phase_gates(integrated, stage, gate):
     env = integrated

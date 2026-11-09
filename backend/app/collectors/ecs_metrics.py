@@ -16,7 +16,6 @@ from app.services.ecs_monitoring import (
     config_signature,
     number,
     parse_at,
-    policy_dict,
     save_readings,
     timestamp_semantics,
 )
@@ -45,7 +44,7 @@ class EcsMetricsCollector:
         if ctx.db is None:
             ctx.errors.append("ECS 指标采样需要本地资源台账")
             return []
-        policy = ctx.params.get("_collection_policy") or policy_dict(ctx.db, ctx.tenant_id)
+        policy = collection_policy.capture_run(ctx.db, ctx.tenant_id, ctx.params).model_dump(mode="json")
         if not collect_switch.load(ctx.db).enabled(ctx.tenant_id, "ecs_server") or not policy["metrics"]["enabled"]:
             ctx.stats["metrics_skipped"] = "disabled"
             return []
@@ -61,13 +60,20 @@ class EcsMetricsCollector:
         all_resources = list(ctx.db.scalars(select(Resource).where(Resource.tenant_id == ctx.tenant_id,
             Resource.resource_type == "ecs_server", Resource.lifecycle == "ACTIVE")))
         index = ip_index(all_resources)
-        selected_ids = {r.resource_id for r in resources}
-        index = {address: sid for address, sid in index.items() if sid in selected_ids}
+        # Cloud IDs can repeat in another project. Restrict by the selected
+        # local rows before mapping their addresses to provider IDs.
+        selected_index = ip_index(resources)
+        index = {address: sid for address, sid in index.items() if selected_index.get(address) == sid}
         expected_signature = config_signature(ctx.tenant, policy, ecs_source(ctx.tenant, policy, client=ctx.client))
         result = collect_readings(ctx, [r.resource_id for r in resources], index,
             metrics=policy.get("metric_keys", list(METRICS)), config=policy)
         now = utcnow()
-        current_policy = policy_dict(ctx.db, ctx.tenant_id)
+        try:
+            current_policy = collection_policy.lock_for_run(ctx.db, ctx.tenant_id, ctx.params).model_dump(mode="json")
+        except collection_policy.PolicyChanged:
+            ctx.stats["metrics_skipped"] = "configuration_changed"
+            ctx.errors.append("ECS 采样期间监控策略已变更，本次结果未入库")
+            return []
         current_tenant = ctx.tenant
         if ctx.tenant_id is not None:
             state = ctx.db.execute(select(HcsAccount.id, HcsAccount.enabled, HcsAccount.metrics_source,
@@ -89,11 +95,13 @@ class EcsMetricsCollector:
             ctx.stats["metrics_skipped"] = "source_mismatch"
             ctx.errors.append("ECS 返回指标来源与当前配置不一致，本次结果未入库")
             return []
-        allowed = {r.id for r in collection_policy.select_resources(ctx.db, ctx.tenant_id, ctx.project_ref, current_policy)}
-        refs = [r.id for r in resources if r.id in allowed]
+        refs = [r.id for r in resources]
         resources = list(ctx.db.scalars(select(Resource).where(Resource.id.in_(refs), Resource.tenant_id == ctx.tenant_id,
             Resource.project_ref == ctx.project_ref).order_by(Resource.resource_id)
             .with_for_update().execution_options(populate_existing=True)))
+        # Flags can change while waiting for the resource locks; ORM objects and
+        # a previously selected set are not authoritative after that wait.
+        resources = [resource for resource in resources if collection_policy.resource_included(resource, current_policy)]
         signature = config_signature(ctx.tenant, policy, result.source)
         accepted, rejected = save_readings(ctx.db, resources, result.readings, now,
             diagnostic=result.diagnostic, signature=signature)

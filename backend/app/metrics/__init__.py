@@ -67,9 +67,12 @@ def effective(tenant: object, *, client: object | None = None) -> str:
     """旧显式 AOM 返回 NONE，不擅自切换其他数据源；原生字段不受影响。"""
     if mode(tenant) == "MANAGEONE":
         config = getattr(tenant, "manageone_config", None)
+        auth_type = config.get("auth_type", "PASSWORD") if isinstance(config, dict) else None
+        fields = ("access_key", "sk_cipher") if auth_type == "AKSK" else ("username", "secret_cipher")
         return "MANAGEONE" if (isinstance(config, dict) and config.get("enabled") is True
+            and auth_type in ("PASSWORD", "AKSK")
             and all(isinstance(config.get(key), str) and config[key].strip()
-                    for key in ("endpoint", "username", "secret_cipher"))) else "NONE"
+                    for key in ("endpoint", *fields))) else "NONE"
     if use_ces(tenant):
         return "CES"
     return "PROMETHEUS" if use_prometheus(tenant, client=client) else "NONE"

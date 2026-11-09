@@ -128,7 +128,7 @@
         <template #default="{ row }">
           <el-button v-perm="'task:run'" link type="primary" :icon="VideoPlay" :loading="running === row.code" :disabled="!row.enabled" @click="run(row as InspectionTask)">立即执行</el-button>
           <el-button v-if="canEdit" link type="primary" @click="openEdit(row as InspectionTask)">修改</el-button>
-          <el-button v-if="ECS_POLICY_TASKS.includes(row.code)" link type="primary" @click="openEcsPolicy">租户策略</el-button>
+          <el-button v-if="ECS_POLICY_TASKS.includes(row.code)" link type="primary" @click="openEcsPolicy">监控配置</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -461,7 +461,7 @@ function statsText(code: string, r: TaskRun): string {
       no_source: '未配置指标来源',
       mapping_missing: '缺少指标映射',
       manageone_disabled: 'ManageOne 接入已关闭',
-      manageone_not_configured: 'ManageOne 地址或账号未配置',
+      manageone_not_configured: 'ManageOne 北向认证凭据未配置',
       no_manageone_mapping: 'ManageOne 资源未唯一映射',
       manageone_source_unverified: 'ManageOne 来源信息未核实',
       manageone_not_selected: '未选择 ManageOne 来源',

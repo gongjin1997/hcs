@@ -15,11 +15,17 @@ export function useEcsPolicy(options: {
   const error = shallowRef(''), validationError = shallowRef(''), optionsError = shallowRef('')
   const instances = shallowRef<EcsInstance[]>([])
   const instancesTotal = shallowRef(0), instancePage = shallowRef(1), keyword = shallowRef('')
+  const knownInstances = shallowRef(new Map<number, EcsInstance>())
   let controller: AbortController | null = null, saveController: AbortController | null = null, instancesController: AbortController | null = null
   const canSave = computed(() => options.canManage() && !!loaded.value && options.tenantId() === loaded.value.tenant_id && !request.loading.value && !saveRequest.loading.value)
   const instanceOptions = computed(() => {
-    const rows = instances.value.map(item => ({ id: item.id, label: `${item.name} · ${item.project_name || item.resource_id} · #${item.id}` }))
-    return [...rows, ...policy.selection.resource_ids.filter(id => !rows.some(row => row.id === id)).map(id => ({ id, label: `已选实例 #${id}` }))]
+    const label = (item: EcsInstance) => `${item.name || '未命名'} · ${item.ip || '无 IP'} · ${item.resource_id}`
+    const rows = instances.value.map(item => ({ id: item.id, label: label(item) }))
+    const selected = policy.selection.resource_ids.filter(id => !rows.some(row => row.id === id)).map(id => {
+      const item = knownInstances.value.get(id)
+      return { id, label: item ? label(item) : `已选实例 · 本地台账 #${id}` }
+    })
+    return [...rows, ...selected]
   })
   function apply(value: EcsPolicyOut) {
     loaded.value = { ...value, policy: { ...value.policy, aom: null } }
@@ -32,6 +38,7 @@ export function useEcsPolicy(options: {
     loaded.value = null
     error.value = ''; validationError.value = ''; optionsError.value = ''
     instances.value = []; instancesTotal.value = 0; instancePage.value = 1; keyword.value = ''
+    knownInstances.value = new Map()
     Object.assign(policy, blankEcsPolicy()); prometheusJson.value = 'null'
     const tenantId = options.tenantId()
     if (!options.visible() || !tenantId) return
@@ -52,6 +59,7 @@ export function useEcsPolicy(options: {
         const scoped = value.items.filter(item => item.tenant_id === tenantId)
         const merged = more ? [...instances.value, ...scoped] : scoped
         instances.value = [...new Map(merged.map(item => [item.id, item])).values()]
+        knownInstances.value = new Map([...knownInstances.value, ...scoped.map(item => [item.id, item] as const)])
         instancesTotal.value = value.total; instancePage.value = nextPage
       })
     } catch (cause) { if (!local.signal.aborted) optionsError.value = errorText(cause, '实例选项加载失败') }
