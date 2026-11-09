@@ -162,9 +162,13 @@ def subject_of(resource_type: str, resource_id: str, name: str | None, attrs: Ma
         else:
             workspace = resource_id.split("/", 1)[0] if "/" in resource_id else ""
         return {"workspace": workspace, "job": name or ""}
-    if resource_type == "mrs_job":
+    if resource_type == "dgc_mrs_node" or (resource_type == "mrs_job"
+                                           and attrs.get("source") == "dataarts_instance_detail"):
         return {"workspace": _text(attrs.get("workspace")), "job": _text(attrs.get("job_name")),
                 "node": _text(attrs.get("node_name"))}
+    if resource_type == "mrs_job":
+        return {"cluster": (_text(attrs.get("cluster_id")), _text(attrs.get("cluster"))),
+                "job": _text(attrs.get("job_name")) or name or "", "id": (resource_id, _text(attrs.get("job_id")))}
     if resource_type == "cce_workload":
         parts = resource_id.split("/")            # 集群ID/命名空间/类型/名称
         cid, namespace, workload = (parts[0], parts[1], parts[3]) if len(parts) == 4 else ("", "", "")

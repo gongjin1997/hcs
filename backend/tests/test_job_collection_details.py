@@ -1,13 +1,19 @@
 """作业面板所需原始执行状态、结果和实例信息必须由采集事实提供。"""
 from app.collectors.base import RunContext
 from app.collectors.dataarts import DataArtsBatchCollector, DataArtsRealtimeCollector
-from app.collectors.mrs import MrsJobCollector
+from app.collectors.mrs import DataArtsMrsNodeCollector
 
 
 class DetailClient:
     def get(self, service, path, **kwargs):
         if path.endswith("/jobs"):
-            return {"jobs": [{"name": "stream-a", "jobType": "REAL_TIME", "engine": "Flink"}], "total": 1}
+            if kwargs["params"]["jobType"] == "BATCH":
+                return {"jobs": [{"name": name, "jobType": "BATCH"} for name in ("batch-a", "batch-waiting")], "total": 2}
+            return {"jobs": [{"name": "stream-a", "jobType": "REAL_TIME"}], "total": 1}
+        if path in ("/v1/{project_id}/jobs/stream-a", "/v1/{project_id}/jobs/batch-a", "/v1/{project_id}/jobs/batch-waiting"):
+            name = path.rsplit("/", 1)[1]
+            return {"name": name, "processType": "REAL_TIME" if name == "stream-a" else "BATCH",
+                    "singleNodeJobType": "FlinkSQL" if name == "stream-a" else None, "nodes": []}
         if path.endswith("/status"):
             return {"status": "NORMAL", "startTime": 1000,
                     "nodes": [{"name": "source", "status": "NORMAL"},
@@ -59,7 +65,7 @@ def test_batch_instance_times_and_missing_duration_are_distinct():
 
 
 def test_mrs_nodes_keep_node_status_instance_status_and_retry_facts():
-    failed, waiting = MrsJobCollector().collect(context())
+    failed, waiting = DataArtsMrsNodeCollector().collect(context())
     assert failed.resource_id == "workspace-a/batch-a/spark" and failed.attrs["node_type"] == "MRSSpark"
     assert failed.status_raw == "fail" and failed.facts["node_status"] == "fail"
     assert failed.facts["job_status"] == "success"  # 节点失败不改写所属实例状态

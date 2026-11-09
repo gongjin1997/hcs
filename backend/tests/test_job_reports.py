@@ -87,18 +87,19 @@ def report(client, panel="dgc", **params):
     ("dgc_batch_job", "SUBMITTED", "SUBMITTED", "已提交"),
     ("dgc_batch_job", "CANCELED", "CANCELED", "已取消"),
     ("dgc_batch_job", "CANCELLED", "CANCELED", "已取消"),
-    ("mrs_job", "waiting", "WAITING", "等待中"),
-    ("mrs_job", "running", "RUNNING", "运行中"),
-    ("mrs_job", "success", "SUCCEEDED", "成功"),
-    ("mrs_job", "fail", "FAILED", "失败"),
-    ("mrs_job", "skip", "SKIPPED", "已跳过"),
-    ("mrs_job", "pause", "PAUSED", "暂停"),
-    ("mrs_job", "manual-stop", "CANCELED", "已取消"),
+    ("dgc_mrs_node", "waiting", "WAITING", "等待中"),
+    ("dgc_mrs_node", "running", "RUNNING", "运行中"),
+    ("dgc_mrs_node", "success", "SUCCEEDED", "成功"),
+    ("dgc_mrs_node", "fail", "FAILED", "失败"),
+    ("dgc_mrs_node", "skip", "SKIPPED", "已跳过"),
+    ("dgc_mrs_node", "pause", "PAUSED", "暂停"),
+    ("dgc_mrs_node", "manual-stop", "CANCELED", "已取消"),
 ])
 def test_known_text_states(mem_db, report_api, kind, raw, display, label):
     client, _, _ = report_api
     resource(mem_db, kind, raw)
-    data = report(client, "mrs" if kind == "mrs_job" else "dgc")
+    data = report(client, "mrs" if kind == "dgc_mrs_node" else "dgc",
+                  **({"resource_type": kind} if kind == "dgc_mrs_node" else {}))
     row = data["items"][0]
     assert (row["status_raw"], row["display_status"], row["status_label"], row["status_known"]) == (
         raw, display, label, True)
@@ -113,18 +114,18 @@ def test_known_text_states(mem_db, report_api, kind, raw, display, label):
 ])
 def test_mrs_node_state_uses_the_exact_dataarts_node_enum(mem_db, report_api, state, display, known):
     client, _, _ = report_api
-    resource(mem_db, "mrs_job", state, attrs={"node_status": state, "node_type": "MRSSpark"})
-    row = report(client, "mrs")["items"][0]
+    resource(mem_db, "dgc_mrs_node", state, attrs={"node_status": state, "node_type": "MRSSpark"})
+    row = report(client, "mrs", resource_type="dgc_mrs_node")["items"][0]
     assert row["execution_state"] == state and row["status_raw"] == state
     assert (row["display_status"], row["status_known"]) == (display, known)
 
 
 def test_mrs_node_type_defines_engine_and_flink_panel_membership(mem_db, report_api):
     client, _, _ = report_api
-    flink = resource(mem_db, "mrs_job", "running", attrs={"node_type": "MRSFlinkJob", "node_status": "running"})
-    spark = resource(mem_db, "mrs_job", "success", attrs={"node_type": "MRSSpark", "node_status": "success"})
-    assert {row["id"] for row in report(client, "flink")["items"]} == {flink.id}
-    rows = {row["id"]: row for row in report(client, "mrs")["items"]}
+    flink = resource(mem_db, "dgc_mrs_node", "running", attrs={"node_type": "MRSFlinkJob", "node_status": "running"})
+    spark = resource(mem_db, "dgc_mrs_node", "success", attrs={"node_type": "MRSSpark", "node_status": "success"})
+    assert {row["id"] for row in report(client, "flink", resource_type="dgc_mrs_node")["items"]} == {flink.id}
+    rows = {row["id"]: row for row in report(client, "mrs", resource_type="dgc_mrs_node")["items"]}
     assert (rows[flink.id]["engine"], rows[spark.id]["engine"]) == ("Flink", "Spark")
     assert rows[spark.id]["job_type"] == "MRSSpark"
 
@@ -134,7 +135,8 @@ def test_unknown_missing_legacy_and_empty_data_are_not_success(mem_db, report_ap
     empty = report(client, "mrs")
     assert empty["summary"] == {"total": 0, "status_counts": {}, "by_source": {}, "by_engine": {}, "by_type": {},
                                 "unknown_total": 0, "no_data_total": 0, "active_alarms": 0,
-                                "latest_update_at": None, "data_status": "NO_DATA"}
+                                "latest_update_at": None, "data_status": "NO_DATA",
+                                "by_collection_source": {}, "by_object_level": {}}
     for raw in ("VendorCustom", "42", "UNDEFINED", None, "", "   "):
         resource(mem_db, "mrs_job", raw)
     data = report(client, "mrs")
@@ -170,7 +172,7 @@ def test_panel_membership_requires_actual_flink_engine_or_type(mem_db, report_ap
     resource(mem_db, "mrs_job", "RUNNING", lifecycle="DELETED", attrs={"job_type": "Flink"})
     expected = {
         "dgc": {rt.id, batch.id, rt_flink.id, typed.id}, "realtime": {rt.id, rt_flink.id},
-        "batch": {batch.id, typed.id}, "mrs": {flink.id, spark.id}, "flink": {flink.id, rt_flink.id, typed.id},
+        "batch": {batch.id, typed.id}, "mrs": {flink.id, spark.id}, "flink": {rt_flink.id, typed.id},
     }
     for panel, ids in expected.items():
         data = report(client, panel)
@@ -181,7 +183,7 @@ def test_panel_membership_requires_actual_flink_engine_or_type(mem_db, report_ap
         "dgc_realtime_job": 2, "dgc_batch_job": 2,
     }
     assert report(client, "dgc", resource_type="dgc_batch_job")["summary"]["by_type"] == {"dgc_batch_job": 2}
-    assert report(client, "flink", lifecycle="ALL")["total"] == 4
+    assert report(client, "flink", lifecycle="ALL")["total"] == 2
     assert report(client, "mrs", engine="spark")["items"][0]["id"] == spark.id
     assert report(client, "realtime", job_type="real_time")["items"][0]["engine"] is None
 
@@ -306,3 +308,18 @@ def test_large_report_uses_sql_pagination_and_two_selects(mem_db, report_api):
     query = _filtered_snapshot(scope_of(user, None), "flink", JobReportFilters(status=["RUNNING"]), "postgresql")
     compiled = str(select(query).compile(dialect=postgresql.dialect()))
     assert "JSONB" in compiled and "?" in compiled
+
+
+def test_http_source_and_object_level_filters_are_forwarded_and_validated(mem_db, report_api):
+    client, _, _ = report_api
+    native = resource(mem_db, "mrs_job", "RUNNING", attrs={"source": "mrs_job_execution", "job_id": "native-id",
+        "job_type": "Flink", "job_state": "RUNNING", "job_result": "UNDEFINED"})
+    node = resource(mem_db, "dgc_mrs_node", "running", attrs={"source": "dataarts_instance_detail",
+        "node_status": "running", "node_type": "MRSFlinkJob"})
+    assert {row["id"] for row in report(client, "mrs", object_level="EXECUTION")["items"]} == {native.id}
+    assert {row["id"] for row in report(client, "mrs", object_level="NODE")["items"]} == {node.id}
+    assert {row["id"] for row in report(client, "mrs", source="dataarts_instance_detail")["items"]} == {node.id}
+    assert report(client, "mrs", object_level="EXECUTION", source="dataarts_instance_detail")["total"] == 0
+    for params in ({"source": "unknown"}, {"object_level": "unknown"}):
+        assert client.get("/api/v1/job-reports/mrs", params=params).status_code == 400
+        assert client.get("/api/v1/job-reports/mrs/export", params=params).status_code == 400

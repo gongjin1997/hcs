@@ -9,7 +9,7 @@ import pytest
 
 from app.collectors.base import RunContext
 from app.collectors.dataarts import DataArtsBatchCollector, DataArtsRealtimeCollector
-from app.collectors.mrs import MrsJobCollector
+from app.collectors.mrs import DataArtsMrsNodeCollector
 from app.hcs import HcsError
 from app.ledger import fetchers
 from app.ledger.fetchers import fetch_eip
@@ -67,7 +67,7 @@ def test_native_inventory_failure_never_probes_other_services_or_versions(resour
 
 @pytest.mark.parametrize("collector,path", [
     (DataArtsRealtimeCollector, "/v1/{project_id}/jobs"),
-    (DataArtsBatchCollector, "/v1/{project_id}/jobs/instances/detail"),
+    (DataArtsBatchCollector, "/v1/{project_id}/jobs"),
 ])
 def test_dataarts_list_failure_keeps_workspace_error_and_does_not_fallback(collector, path):
     client = Client([HcsError(404, "SYNTHETIC.ERROR", "synthetic rejection")])
@@ -100,6 +100,6 @@ def test_mrs_job_dataarts_instance_list_failure_is_a_workspace_error_not_an_empt
     client = Client([HcsError(404, "SYNTHETIC.ERROR", "synthetic unsupported API")])
     context = RunContext(client=client, account="synthetic", project_id="synthetic-project",
                          workspaces=["workspace-test"])
-    assert MrsJobCollector().collect(context) == [] and len(context.errors) == 1
-    # MRS 作业只经 DataArts 作业实例读取，不再向 MRS 发作业查询
+    assert DataArtsMrsNodeCollector().collect(context) == [] and len(context.errors) == 1
+    # DataArts MRS 节点采集与 MRS 原生执行独立
     assert [call[:2] for call in client.calls] == [("dataarts", "/v1/{project_id}/jobs/instances/detail")]

@@ -73,12 +73,13 @@ TYPES = {"ecs.servers": ["ecs_server"], "ecs.server": ["ecs_server"], "ecs.quota
          "vpc.subnets": ["vpc_subnet"], "elb.loadbalancers": ["elb"], "vpc.publicips": ["eip"],
          "gaussdb.instances": ["gaussdb_instance"], "dcs.instances": ["dcs_instance"],
          "dcs.statistics": ["dcs_instance"], "dcs.nodes": ["dcs_instance"],
-         "mrs.clusters": ["mrs_cluster"],
+         "mrs.clusters": ["mrs_cluster", "mrs_job"], "mrs.jobs": ["mrs_job"],
          "dws.clusters": ["dws_cluster"], "cce.clusters": ["cce_cluster", "cce_workload"],
          "cce.nodes": ["cce_cluster"], "cce.nodepools": ["cce_cluster"],
          "k8s.pods": ["cce_workload"], "k8s.events": ["cce_workload"],
          "dataarts.jobs": ["dgc_realtime_job"], "dataarts.job_status": ["dgc_realtime_job"],
-         "dataarts.instances": ["dgc_batch_job", "mrs_job"], "dataarts.instance_detail": ["mrs_job"]}
+         "dataarts.batch_jobs": ["dgc_batch_job"], "dataarts.job_definition": ["dgc_realtime_job"],
+         "dataarts.instances": ["dgc_batch_job", "dgc_mrs_node"], "dataarts.instance_detail": ["dgc_mrs_node"]}
 PROBES: list[Probe] = [
     P("ecs.servers", "ecs", "ECS 云服务器列表", "/v1/{project_id}/cloudservers/detail", "servers", ["id", "name"],
       ["status", "flavor.id", "flavor.vcpus", "flavor.ram", "addresses", "OS-EXT-AZ:availability_zone",
@@ -157,7 +158,7 @@ PROBES: list[Probe] = [
     P("dataarts.instance_detail", "dataarts", "DataArts 作业实例详情（第一个实例的节点）",
       "/v1/{project_id}/jobs/{job_name}/instances/{instance_id}", "nodes", ["nodeName", "status", "type"],
       ["startTime", "endTime", "retryTimes", "logPath"], ["type", "status"], limit_param=None, needs="dgc_instance",
-      used_by="MRS 作业巡检（type 为 MRSSpark / MapReduce / MRSFlinkJob / MRSHetuEngine 的节点）"),
+      used_by="DGC 编排节点巡检（MRS/Spark SQL/Hive SQL 节点；不是原生执行）"),
     P("ces.metrics", "ces", "CES 指标列表（SYS.ECS）", "/V1.0/{project_id}/metrics", "metrics", [],
       ["namespace", "metric_name", "dimensions[].name", "unit"], ["metric_name"], {"namespace": "SYS.ECS"},
       used_by="旧部署显式启用的 CES 兼容指标（不用于 DCS 内存）"),
@@ -166,6 +167,21 @@ PROBES: list[Probe] = [
       limit_param=None, used_by="所有资源均停用 AOM；保留此条目用于输出跳过说明",
       method="POST", body={"metricItems": [{"namespace": "PAAS.NODE"}]}),
 ]
+
+PROBES.extend([
+    P("dataarts.batch_jobs", "dataarts", "DataArts 批作业定义", "/v1/{project_id}/jobs", "jobs", ["name", "jobType"],
+      ["status", "lastInstanceStatus", "lastInstanceEndTime"], ["jobType", "status"],
+      {"jobType": "BATCH", "offset": 0}, "total", needs="workspace", used_by="批定义清单；不受24小时实例窗口限制"),
+    P("dataarts.job_definition", "dataarts", "DataArts 作业定义与引擎（第一个实时作业）",
+      "/v1/{project_id}/jobs/{job_name}", "", ["name", "processType"],
+      ["singleNodeJobType", "nodes[].type"], ["processType", "singleNodeJobType", "nodes[].type"],
+      limit_param=None, needs="dgc_job", used_by="FlinkSQL/FlinkJar及编排引擎识别"),
+    P("mrs.jobs", "mrs", "MRS 原生作业执行（第一个集群）",
+      "/v2/{project_id}/clusters/{cluster_id}/job-executions", "job_list", ["job_id", "job_name"],
+      ["job_type", "job_state", "job_result", "submitted_time", "started_time", "finished_time", "elapsed_time"],
+      ["job_type", "job_state", "job_result"], {"offset": 1}, "total_record", needs="mrs_cluster",
+      used_by="MRS 原生执行兼容接口；与DGC节点分开，elapsed_time单位不猜测"),
+])
 
 PROBES.append(P("ecs.quotas", "ecs", "ECS 项目实际配额", "/v1/{project_id}/cloudservers/limits", "",
     required=["absolute"], optional=[f"absolute.{field}" for quota in QUOTAS
@@ -280,6 +296,10 @@ class Runner:
             if not self.ctx.get("workspace"):
                 return {**res, "result": "SKIP", "message": "项目未配置 DataArts 工作空间（租户接入 → 项目 → 工作空间）"}
             headers = self._headers()
+        if p.needs == "mrs_cluster":
+            if not self.ctx.get("mrs_cluster"):
+                return {**res, "result": "SKIP", "message": "没有 MRS 集群（或集群列表调用失败）"}
+            path = path.replace("{cluster_id}", quote(self.ctx["mrs_cluster"], safe=""))
         if p.needs == "cce_cluster":
             if not self.ctx.get("cce_cluster"):
                 return {**res, "result": "SKIP", "message": "没有 CCE 集群（或 CCE 集群列表调用失败）"}
@@ -334,7 +354,8 @@ class Runner:
                 return {**res, "result": "WARN" if p.capability else "FAIL", "message": _safe_error(error)}
         if p.total:
             res["total"] = data.get(p.total) if isinstance(data, dict) else None
-            if p.code in ("ecs.servers", "mrs.clusters", "dataarts.jobs", "dataarts.instances"):
+            if p.code in ("ecs.servers", "mrs.clusters", "mrs.jobs", "dataarts.jobs", "dataarts.batch_jobs",
+                          "dataarts.instances"):
                 try:
                     total = response_total(data, p.total, required=True, allow_string=p.code == "mrs.clusters")
                     if total is not None and (len(items) > total or not items and total > 0):

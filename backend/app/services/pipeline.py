@@ -50,6 +50,7 @@ from . import (
     collect_switch,
     collection_policy,
     inspection_evidence,
+    job_selection,
     platform_watch,
     settings_service,
     silence_service,
@@ -316,7 +317,8 @@ def process_observations(db: Session, service: str, observations: list[Observati
             raise _CollectionPolicyChanged()
     # 采集范围的最终判定：范围外的对象不评估、不告警；已有记录的就地标记并关闭活动告警。
     # 云请求可能耗时很久；采集前的快照只用于裁剪，最终判定必须读取管理员最新保存的范围。
-    in_scope = collect_scope.filter_groups(db, ctx.tenant_id, groups, known, collect_scope.load(db))
+    in_scope = collect_scope.filter_groups(db, ctx.tenant_id, groups, known, collect_scope.load(db),
+                                          project_ref=ctx.project_ref)
     if len(in_scope) != len(groups):
         ctx.stats["out_of_scope"] = len(groups) - len(in_scope)
         observations = [o for o in observations if (o.resource_type, o.resource_id) in in_scope]
@@ -569,7 +571,7 @@ def _run_task(db: Session, task_code: str, *, client: HcsClient | None, target: 
             if "_inspection_tasks" in ctx.params and task_code not in ctx.params["_inspection_tasks"]:
                 raise _CollectionPolicyChanged()
         current_scopes = collect_scope.load(db)
-        if ctx.scopes is not None and any(
+        if job_selection.selection_changed(ctx) or ctx.scopes is not None and any(
                 ctx.scopes.rules(target.tenant_id, rtype) != current_scopes.rules(target.tenant_id, rtype)
                 for rtype in collect_switch.TASK_TYPES.get(task_code, [])):
             # CCE 健康快照不经过 process_observations，也必须丢弃范围变更前的未提交结果。

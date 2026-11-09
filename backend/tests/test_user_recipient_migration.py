@@ -205,7 +205,7 @@ def test_reconcile_reports_safe_duplicate_identities_and_never_revives_explicit_
     assert report["created_out_of_scope_users"] == 1
     assert report["created_unknown_users"] == 1
     assert rows(engine, "hcs_account")[0]["report_user_ids"] == []
-    assert rows(engine, "sys_setting")[1]["value"] == {
+    assert next(row for row in rows(engine, "sys_setting") if row["key"] == "report")["value"] == {
         "recipient_user_ids": [], "mail_to": ["ignored@example.com"], "other": 7}
     before = rows(engine, "sys_user")
     with engine.begin() as connection:
@@ -270,9 +270,17 @@ def test_ambiguous_directory_users_and_contact_ids_are_stable_across_upgrade_dow
         add_setting(connection, tables, "report", {"mail_to": ["duplicate@example.com", "new@example.com"]})
     command.upgrade(cfg, "head")
     before = {name: rows(engine, name) for name in ("sys_user", "contact", "hcs_account", "sys_setting")}
+    # 0022 的可逆日志在重新升级时有新的时间戳；收件人业务配置必须逐字保持。
+    before["sys_setting"] = [row for row in before["sys_setting"] if row["key"] != "migration:mrs-split-0022"]
     command.downgrade(cfg, "0008")
     command.upgrade(cfg, "head")
-    assert all(rows(engine, name) == value for name, value in before.items())
+    for name, expected in before.items():
+        actual = rows(engine, name)
+        if name == "sys_setting":
+            journal, = [row for row in actual if row["key"] == "migration:mrs-split-0022"]
+            assert journal["updated_by"] == "system:mrs-split-0022" and journal["value"]["node_refs"] == []
+            actual = [row for row in actual if row["key"] != "migration:mrs-split-0022"]
+        assert actual == expected, name
 
 
 def test_generated_username_collisions_long_display_names_and_malformed_json_are_safe(legacy_recipients):

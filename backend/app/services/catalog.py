@@ -77,10 +77,13 @@ RESOURCE_TYPES: dict[str, dict] = {
     "dgc_batch_job": {"service": "dataarts", "name": "批作业", "category": "job", "group": "dgc_batch",
                       "tag": "DataArts批作业", "ledger": False,
                       "columns": [_c("attrs.workspace", "工作空间", 120), _c("attrs.schedule", "调度", 120)]},
-    # MRS 作业经 DataArts 作业实例详情的 MRS 类节点获取（数据治理中心 API §5.3.16/§5.3.17），不调用 MRS 作业接口
-    "mrs_job": {"service": "mrs", "name": "MRS 作业", "category": "job", "group": "mrs", "tag": "MRS作业",
-                "ledger": False, "columns": [_c("attrs.workspace", "工作空间", 120), _c("attrs.job_name", "所属作业", 140),
-                                             _c("attrs.node_type", "节点类型", 110)]},
+    "mrs_job": {"service": "mrs", "name": "MRS 原生作业执行", "category": "job", "group": "mrs", "tag": "MRS作业",
+                "ledger": False, "columns": [_c("attrs.cluster", "集群", 140), _c("attrs.job_id", "执行 ID", 160),
+                                             _c("attrs.job_type", "作业类型", 110)]},
+    "dgc_mrs_node": {"service": "dataarts", "name": "DataArts MRS 节点", "category": "job", "group": "dgc_batch",
+                     "tag": "DataArtsMRS节点", "ledger": False,
+                     "columns": [_c("attrs.workspace", "工作空间", 120), _c("attrs.job_name", "所属作业", 140),
+                                 _c("attrs.node_type", "节点类型", 110)]},
     # ---- 容器工作负载：由 CCE 容器事件采集汇总（Deployment / StatefulSet ...），只巡检，不进台账 ----
     "cce_workload": {"service": "cce", "name": "容器工作负载", "category": "container", "group": "cce", "tag": "CCE",
                      "ledger": False,
@@ -104,7 +107,8 @@ LEDGER_SCOPE_DIMS = ("env", "business", "owner", "critical")
 _SCOPE_SPECIFIC: dict[str, tuple[str, ...]] = {
     "dgc_realtime_job": ("workspace", "job"),
     "dgc_batch_job": ("workspace", "job"),
-    "mrs_job": ("workspace", "job", "node"),
+    "mrs_job": ("cluster", "job", "id"),
+    "dgc_mrs_node": ("workspace", "job", "node"),
     "cce_workload": ("cluster", "namespace", "workload"),
     "cce_cluster": ("cluster",),
 }
@@ -138,10 +142,14 @@ TASK_SPECS: tuple[TaskSpec, ...] = (
     TaskSpec("dgc_realtime_status", "DataArts 实时作业状态", "dataarts", 60, ("dgc_realtime_job",),
              ("job_status", "node_status")),
     TaskSpec("dgc_batch_instance", "DataArts 批作业实例", "dataarts", 300, ("dgc_batch_job",), ("instance_status",)),
-    TaskSpec("mrs_cluster_status", "MRS 集群状态", "mrs", 120, ("mrs_cluster",), ("cluster_status",)),
-    TaskSpec("mrs_job_status", "MRS 作业执行", "mrs", 300, ("mrs_job",), ("job_status",),
-             note="经 DataArts 作业实例详情读取 MRS 类节点（MRSSpark / MapReduce / MRSFlinkJob / MRSHetuEngine）的执行状态；"
-                  "依赖 DataArts 工作空间配置，不调用 MRS 作业接口"),
+    TaskSpec("mrs_cluster_status", "MRS 集群状态", "mrs", 120, ("mrs_cluster",), ("cluster_status",),
+             default_enabled=False),
+    TaskSpec("mrs_job_status", "MRS 原生作业执行", "mrs", 300, ("mrs_job",), ("job_status",),
+             note="只读 MRS cluster_infos + V2 job-executions；局点已有调用证据，上传的 8.5.1 PDF 未列出 V2 作业；"
+                  "状态与结果分离，不猜 elapsed_time 单位，不按 Flink 类型推断流批", default_enabled=False),
+    TaskSpec("dgc_mrs_node_status", "DataArts MRS 节点状态", "dataarts", 300, ("dgc_mrs_node",), ("job_status",),
+             note="独立读取 DataArts 实例详情的 MRSSpark/MapReduce/MRSFlinkJob/MRSHetuEngine/HiveSQL/SparkSQL 节点；"
+                  "仅依赖 DataArts 工作空间，不代表 MRS 原生执行全集", default_enabled=False),
     # GaussDB 没有实时 CPU / 内存接口（原生接口只有磁盘用量与巡检记录），所以不负责 cpu / memory 检查项：
     # 否则这两类规则每轮都“缺采”，实例永远是“部分覆盖”，无法判为健康
     TaskSpec("gaussdb_status", "GaussDB 实例状态", "gaussdb", 120, ("gaussdb_instance",), ("instance_status",),
@@ -186,7 +194,8 @@ TASK_STEPS: dict[str, tuple[str, ...]] = {
     "dgc_realtime_status": ("读取已配置工作空间作业", "并发查询作业与节点状态", "评估状态规则"),
     "dgc_batch_instance": ("查询批作业及最近实例", "计算有效执行耗时和 P90 基线", "检查失败与运行超时"),
     "mrs_cluster_status": ("查询 MRS 集群", "检查集群状态"),
-    "mrs_job_status": ("读取 DataArts 作业实例", "检查 MRS 类节点执行结果"),
+    "mrs_job_status": ("读取 MRS 集群清单", "分页读取每个集群的原生作业执行", "分别检查状态与结果"),
+    "dgc_mrs_node_status": ("读取 DataArts 作业实例", "检查实例详情中的 MRS 类节点"),
     "gaussdb_status": ("查询 GaussDB 实例清单", "检查实例状态"),
     "gaussdb_storage": ("查询实例清单并筛选在线实例", "并发查询磁盘用量", "保存容量历史并检查磁盘规则"),
     "gaussdb_components": ("查询实例清单并筛选在线实例", "并发查询组件清单", "检查宕机与未识别状态"),

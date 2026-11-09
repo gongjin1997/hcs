@@ -11,6 +11,11 @@
         </div>
       </el-alert>
 
+      <el-alert v-if="isJobType" type="info" :closable="false" class="mb-12">
+        <template #title>作业精确名单与这里的通用规则共同生效；清空通用规则不会清空或放宽指定作业名单。</template>
+        <el-button v-if="tenantId > 0" link type="primary" @click="jobSelectionVisible = true">按项目 / 工作空间选择监控作业</el-button>
+        <span v-else>请在具体租户下设置项目 / 工作空间的监控作业名单。</span>
+      </el-alert>
       <div v-if="tenantId !== 0" class="mode">
         <el-radio-group v-model="mode" :disabled="!canManage" aria-label="范围来源" class="mode-options">
           <el-radio-button value="follow">跟随全局（{{ globalText }}）</el-radio-button>
@@ -22,7 +27,7 @@
 
       <template v-if="mode === 'own'">
         <div v-if="!drafts.length" class="empty-rules">
-          <el-empty description="没有规则：该类资源全部采集" :image-size="56" />
+          <el-empty :description="isJobType ? '没有通用规则：不额外限制，仍以已保存的监控名单为准' : '没有规则：该类资源全部采集'" :image-size="56" />
         </div>
         <div v-for="(draft, index) in drafts" :key="index" class="rule" :class="draft.effect">
           <div class="rule-head">
@@ -83,6 +88,7 @@
         <div v-if="!preview && !previewing" class="text-3">修改规则后自动预估；只统计已采集或同步过的资源，新出现的对象按规则实时判定。</div>
       </div>
     </div>
+    <JobSelectionDialog v-if="isJobType && tenantId > 0" v-model="jobSelectionVisible" :resource-type="jobSelectionType" :tenant-id="tenantId" @saved="emit('saved')" />
     <template #footer>
       <el-button @click="visible = false">{{ canManage ? '取消' : '关闭' }}</el-button>
       <el-button v-if="canManage" type="primary" :loading="saving" :disabled="!dirty || !!errors.length" @click="save">保存范围</el-button>
@@ -96,6 +102,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { collectScopeCandidates, previewCollectScope, saveCollectScope } from '@/api'
 import type { ScopeCandidate, ScopeDimension, ScopePreview, ScopeType } from '@/types'
+import JobSelectionDialog from './JobSelectionDialog.vue'
+import type { JobSelectionType } from '@/api/job-selection'
 import {
   DIMENSION_HINTS, EFFECT_OPTIONS, describeRule, draftErrors, newDraft, sameRules, toDrafts, toPayload, type RuleDraft,
 } from './collect-scope'
@@ -106,6 +114,9 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ 'update:modelValue': [value: boolean]; saved: [] }>()
 const visible = computed({ get: () => props.modelValue, set: (v) => emit('update:modelValue', v) })
+const jobSelectionVisible = ref(false)
+const isJobType = computed(() => ['dgc_realtime_job', 'dgc_batch_job'].includes(props.type?.code ?? ''))
+const jobSelectionType = computed(() => props.type?.code as JobSelectionType)
 
 const mode = ref<'follow' | 'own'>('own')
 const drafts = ref<RuleDraft[]>([])
@@ -135,6 +146,7 @@ function invalidatePreview() {
 }
 function invalidateContext() {
   ++contextVersion
+  jobSelectionVisible.value = false
   invalidatePreview()
   saving.value = false
 }

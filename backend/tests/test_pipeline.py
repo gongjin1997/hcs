@@ -65,7 +65,7 @@ def test_dataarts_and_mrs_pipeline(mem_db):
     client = _client()
     for _ in range(2):
         run_task(mem_db, "dgc_realtime_status", client=client)
-    run = run_task(mem_db, "mrs_job_status", client=client)
+    run = run_task(mem_db, "dgc_mrs_node_status", client=client)
     assert run.status == "SUCCESS"
     got = {(a.resource_name, a.rule_id, a.sub_object): a.severity for a in mem_db.scalars(select(AlarmEvent))}
     assert got[("rt_payment_risk", "R-DGC-RT-001", "")] == "P1"

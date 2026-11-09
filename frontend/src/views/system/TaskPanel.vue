@@ -65,6 +65,8 @@
         <template #default="{ row }">
           <b>{{ row.name }}</b>
           <div class="text-3 mono">{{ row.code }}</div>
+          <el-button v-if="DATAARTS_SELECTION_TASKS[row.code] && user.can('collect:manage')" link type="primary"
+                     @click="openJobSelection(row.code)">监控作业 · 按项目 / 工作空间选择</el-button>
           <div class="text-2 check-summary" :title="row.details.codes.join('、')">检查：{{ row.details.checks.join('、') || (row.details.provided ? '无规则检查项' : '历史返回未提供') }}</div>
           <details class="task-description">
             <summary>执行步骤 / 任务说明<span v-if="row.details.steps.length">（{{ row.details.steps.length }} 步）</span></summary>
@@ -138,6 +140,7 @@
 
     <!-- ECS 租户采集策略：顶部选了租户时直接编辑该租户，否则在对话框里选择租户 -->
     <EcsPolicyDialog v-model="ecsPolicy.visible" :tenant-id="ecsPolicy.tenantId" :tenant-name="ecsPolicy.tenantName" @saved="load" />
+    <JobSelectionDialog v-model="jobSelection.visible" :resource-type="jobSelection.type" :tenant-id="jobSelection.tenantId" @saved="load" />
 
     <!-- 修改任务周期 -->
     <el-dialog v-model="edit.visible" :title="`修改任务：${edit.task?.name ?? ''}`" width="min(560px, calc(100vw - 24px))" append-to-body>
@@ -213,6 +216,8 @@ import { type InspectionTask, type ReportSchedule, type TaskRun, listTasks, repo
 import TenantTag from '@/components/TenantTag.vue'
 import RecipientSelect from '@/components/RecipientSelect.vue'
 import EcsPolicyDialog from '@/views/ecs/EcsPolicyDialog.vue'
+import JobSelectionDialog from './JobSelectionDialog.vue'
+import type { JobSelectionType } from '@/api/job-selection'
 import { useAppStore } from '@/stores/app'
 import { useUserStore } from '@/stores/user'
 import { METRICS_SOURCE, SERVICES, TASK_STATUS, historicalMetricsSourceLabel, typeName } from '@/utils/dict'
@@ -226,6 +231,15 @@ const canReportConfig = computed(() => globalConfigScope.value && user.can('repo
 const loading = ref(false)
 /** 这些任务按租户 ECS 采集策略调度（collection_policy.TASK_PHASES）；策略原先放在“租户接入”卡片上 */
 const ECS_POLICY_TASKS = ['ecs_status', 'ecs_metrics', 'ecs_quota']
+const DATAARTS_SELECTION_TASKS: Record<string, JobSelectionType> = {
+  dgc_realtime_status: 'dgc_realtime_job', dgc_batch_instance: 'dgc_batch_job',
+}
+const jobSelection = reactive({ visible: false, type: 'dgc_realtime_job' as JobSelectionType, tenantId: null as number | null })
+function openJobSelection(code: string) {
+  const type = DATAARTS_SELECTION_TASKS[code]
+  if (!type || !user.can('collect:manage')) return
+  Object.assign(jobSelection, { visible: true, type, tenantId: app.currentTenant?.id ?? null })
+}
 const ecsPolicy = reactive({ visible: false, tenantId: null as number | null, tenantName: '' })
 function openEcsPolicy() {
   const tenant = app.currentTenant

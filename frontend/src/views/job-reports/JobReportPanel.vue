@@ -4,7 +4,7 @@
 
     <section class="hi-card filters" aria-label="报表筛选">
       <div class="scope-top">
-        <strong>作业概况</strong><span class="text-3">{{ app.tenantLabel }} · 最新观测快照</span>
+        <strong>作业概况</strong><span class="text-3">{{ app.tenantLabel }} · {{ config.desc }}</span>
       </div>
       <div class="filter-bar">
         <el-input :model-value="query.keyword" placeholder="搜索作业名称 / 资源 ID" aria-label="关键词" clearable :maxlength="255" :prefix-icon="Search"
@@ -16,6 +16,9 @@
         <el-select :model-value="query.engine" filterable allow-create default-first-option clearable placeholder="全部引擎" aria-label="引擎"
                    @update:model-value="value => setFilters({ engine: value ?? '' })">
           <el-option v-for="engine in engineOptions" :key="engine" :label="engine" :value="engine" />
+        </el-select>
+        <el-select :model-value="objectLevel" aria-label="来源与对象层级" @update:model-value="value => setFilters({ object_level: value, source: undefined, resource_type: undefined })">
+          <el-option v-for="level in levelOptions" :key="level" :label="OBJECT_LEVEL_LABELS[level]" :value="level" />
         </el-select>
         <el-button @click="reset">重置</el-button>
       </div>
@@ -33,15 +36,16 @@
     <div v-if="!report && loading" class="hi-card"><el-skeleton :rows="8" animated /></div>
     <template v-if="report">
       <div v-loading="loading" class="report-content" :aria-busy="loading">
-        <section class="kpi-grid" aria-label="作业统计">
-          <div class="hi-card kpi"><span>{{ config.totalLabel }}</span><strong class="num">{{ report.summary.total }}</strong><small>当前筛选</small></div>
+        <el-alert v-if="!report.total" :title="emptyReportText(report)" :type="report.collection_status?.state === 'FAILED' ? 'error' : 'info'" :closable="false" show-icon />
+        <section v-if="report.total" class="kpi-grid" aria-label="作业统计">
+          <div class="hi-card kpi"><span>{{ totalLabel }}</span><strong class="num">{{ report.summary.total }}</strong><small>当前筛选</small></div>
           <div v-for="status in config.focus" :key="status" class="hi-card kpi">
             <span>{{ statusMeta(status).label }}</span><strong class="num" :style="{ color: statusMeta(status).color }">{{ report.summary.status_counts[status] ?? 0 }}</strong>
           </div>
           <div class="hi-card kpi"><span>活动告警</span><strong class="num" :class="{ 'text-danger': report.summary.active_alarms > 0 }">{{ report.summary.active_alarms }}</strong></div>
         </section>
 
-        <div class="exhibit-grid">
+        <div v-if="report.total" class="exhibit-grid">
           <section class="hi-card status-section">
             <div class="hi-card__title">状态分布</div>
             <div class="status-overview">
@@ -61,7 +65,7 @@
             <div v-if="!dimensionEntries.length" class="dimension-empty">无来源数据</div>
             <div class="section-title">引擎分布</div>
             <div class="engine-list">
-              <div v-for="engine in engineEntries" :key="engine.key" class="dimension-row"><span>{{ engine.key === 'UNKNOWN' ? '未识别引擎' : engine.key }}</span><b class="num">{{ engine.count }} 条</b></div>
+              <div v-for="engine in engineEntries" :key="engine.key" class="dimension-row"><span>{{ engine.key === 'UNKNOWN' ? '未识别引擎' : engine.key === 'MULTIPLE' ? '多引擎' : engine.key }}</span><b class="num">{{ engine.count }} 条</b></div>
               <div v-if="!engineEntries.length" class="dimension-empty">无引擎数据</div>
             </div>
           </section>
@@ -78,14 +82,32 @@
             <el-table-column label="作业 / 资源 ID" min-width="210" fixed="left"><template #default="{ row }">
               <el-button link type="primary" class="job-name" @click="openRow(row)">{{ row.name }}</el-button>
               <div class="mono text-3 ellipsis" :title="row.resource_id">{{ row.resource_id }}</div>
+              <div class="text-3">{{ row.sourceLabel }} · {{ row.levelLabel }}</div>
             </template></el-table-column>
-            <el-table-column label="作业状态" min-width="175"><template #default="{ row }">
+            <el-table-column label="执行状态 / 结果" min-width="190"><template #default="{ row }">
               <el-tag :type="statusMeta(row.display_status).type" size="small" class="state-tag">{{ statusMeta(row.display_status).label }}</el-tag>
               <div class="mono text-3 cell-fact">原始：{{ factText(row.status_raw) }}</div>
+              <div v-if="row.resource_type === 'mrs_job'" class="mono text-3 cell-fact">结果：{{ factText(row.execution_result) }}</div>
+              <div v-if="row.executionHint" class="text-3 cell-fact">{{ row.executionHint }}</div>
               <div v-if="row.execution_state !== row.status_raw" class="mono text-3 cell-fact">执行：{{ factText(row.execution_state) }}</div>
             </template></el-table-column>
 
-            <template v-if="panel === 'realtime'">
+            <template v-if="objectLevel === 'EXECUTION'">
+              <el-table-column label="集群 / 队列" min-width="180"><template #default="{ row }">
+                <div>{{ factText(row.status_details.cluster) }}</div><div class="mono text-3">{{ factText(row.status_details.cluster_id) }}</div>
+                <div class="text-3">队列 {{ factText(row.status_details.queue_name ?? row.status_details.queue) }}</div>
+              </template></el-table-column>
+              <el-table-column label="执行 ID / 类型" min-width="180"><template #default="{ row }">
+                <div class="mono">{{ factText(row.status_details.job_id) }}</div><div class="text-3">{{ row.job_type ?? '未采集' }} · {{ row.engineText }}</div>
+              </template></el-table-column>
+              <el-table-column label="提交 / 开始 / 结束" min-width="195"><template #default="{ row }">
+                <div>提 {{ detailText('submitted_time', row.status_details.submitted_time, row.resource_type) }}</div>
+                <div>始 {{ detailText('start_time', row.status_details.start_time, row.resource_type) }}</div>
+                <div class="text-3">终 {{ detailText('end_time', row.status_details.end_time, row.resource_type) }}</div>
+              </template></el-table-column>
+              <el-table-column label="持续时长" min-width="150"><template #default="{ row }">{{ row.duration }}</template></el-table-column>
+            </template>
+            <template v-else-if="panel === 'realtime'">
               <el-table-column label="节点状态" min-width="255"><template #default="{ row }">
                 <div v-for="(node, index) in row.nodePreview" :key="index" class="ellipsis" :title="`${node.name}：${node.status}`">{{ node.name }}：<span class="mono">{{ node.status }}</span></div>
                 <span v-if="!row.nodeItems.length" class="text-3">未采集节点明细</span>
@@ -93,11 +115,14 @@
                 <div class="text-3">节点数 {{ factText(row.metrics.nodes) }} · 异常 {{ factText(row.metrics.bad_nodes) }}</div>
               </template></el-table-column>
               <el-table-column label="工作空间 / 引擎" min-width="190"><template #default="{ row }">
-                <div class="cell-fact">{{ factText(row.status_details.workspace) }}</div><div class="text-3 cell-fact">{{ row.engine ?? '未识别引擎' }} · {{ row.job_type ?? '类型未采集' }}</div>
+                <div class="cell-fact">{{ factText(row.status_details.workspace) }}</div><div class="text-3 cell-fact">{{ row.engineText }} · {{ row.job_type ?? '类型未采集' }}</div>
               </template></el-table-column>
             </template>
 
             <template v-else-if="panel === 'batch'">
+              <el-table-column label="定义调度 / 实例查询" min-width="165"><template #default="{ row }">
+                <div>调度 {{ factText(row.status_details.schedule_status) }}</div><div class="text-3">实例 {{ factText(row.status_details.instance_query_status) }}</div>
+              </template></el-table-column>
               <el-table-column label="实例 ID / 工作空间" min-width="165"><template #default="{ row }">
                 <div class="mono cell-fact">{{ factText(row.status_details.instance_id) }}</div><div class="text-3 cell-fact">{{ factText(row.status_details.workspace) }}</div>
               </template></el-table-column>
@@ -108,12 +133,12 @@
               <el-table-column label="持续时长" min-width="100"><template #default="{ row }">{{ row.duration }}</template></el-table-column>
             </template>
 
-            <template v-else-if="panel === 'mrs'">
+            <template v-else-if="objectLevel === 'NODE'">
               <el-table-column label="所属作业 / 工作空间" min-width="190"><template #default="{ row }">
                 <div class="cell-fact">{{ factText(row.status_details.job_name) }}</div><div class="text-3 cell-fact">工作空间：{{ factText(row.status_details.workspace) }}</div>
               </template></el-table-column>
               <el-table-column label="节点 / 类型" min-width="170"><template #default="{ row }">
-                <div class="cell-fact">{{ factText(row.status_details.node_name) }}</div><div class="text-3 cell-fact">{{ row.job_type ?? '类型未采集' }} · {{ row.engine ?? '未识别引擎' }}</div>
+                <div class="cell-fact">{{ factText(row.status_details.node_name) }}</div><div class="text-3 cell-fact">{{ row.job_type ?? '类型未采集' }} · {{ row.engineText }}</div>
               </template></el-table-column>
               <el-table-column label="实例 / 重试" min-width="150"><template #default="{ row }">
                 <div class="mono cell-fact">{{ factText(row.status_details.instance_id) }}</div><div class="text-3 cell-fact">重试 {{ factText(row.status_details.retry_times) }} 次</div>
@@ -127,7 +152,7 @@
               <el-table-column :label="panel === 'dgc' ? '类型 / 工作空间' : '来源 / 引擎'" min-width="165"><template #default="{ row }">
                 <div>{{ row.sourceLabel }}</div>
                 <div class="text-3 cell-fact">工作空间：{{ factText(row.status_details.workspace) }}</div>
-                <div class="text-3 cell-fact">{{ row.engine ?? '未识别引擎' }} · {{ row.job_type ?? '类型未采集' }}</div>
+                <div class="text-3 cell-fact">{{ row.engineText }} · {{ row.job_type ?? '类型未采集' }}</div>
               </template></el-table-column>
               <el-table-column label="节点 / 最近实例 / 执行" min-width="230"><template #default="{ row }">
                 <template v-if="row.resource_type === 'dgc_realtime_job'">
@@ -159,7 +184,7 @@
             <el-table-column label="租户 / 项目" min-width="145"><template #default="{ row }"><TenantTag :id="row.tenant_id" :name="row.tenant_name" /><div class="text-3 cell-fact">{{ row.project_name ?? row.project_id ?? '项目未采集' }}</div></template></el-table-column>
             <el-table-column label="最后观测时间" width="170"><template #default="{ row }">{{ fmtTime(row.updated_at, 'YYYY-MM-DD HH:mm:ss') }}<div class="text-3">{{ fromNow(row.updated_at) }}</div></template></el-table-column>
             <el-table-column label="详情" width="68" fixed="right"><template #default="{ row }"><el-button link type="primary" @click="openRow(row)">查看</el-button></template></el-table-column>
-            <template #empty><el-empty description="暂无匹配作业" :image-size="64" /></template>
+            <template #empty><el-empty :description="emptyReportText(report)" :image-size="64" /></template>
           </el-table>
           <div class="pager"><el-pagination :current-page="query.page" :page-size="query.page_size" :total="report.total" :page-sizes="[20, 50, 100]" layout="total, sizes, prev, pager, next" background
                                                @update:current-page="setPage" @update:page-size="setPageSize" /></div>
@@ -189,8 +214,8 @@ import type { JobPanel, JobReportRow, JobResourceType } from '@/types/job-report
 import { fmtTime, fromNow } from '@/utils/format'
 import JobReportDrawer from './JobReportDrawer.vue'
 import { useJobReport } from './useJobReport'
-import { PANEL_CONFIG, SOURCE_LABELS, statusMeta } from './report-config'
-import { detailText, durationText, factText, jobNodes } from './report-utils'
+import { COLLECTION_SOURCE_LABELS, OBJECT_LEVEL_LABELS, PANEL_CONFIG, SOURCE_LABELS, jobTypeLabel, objectLevelOptions, statusMeta } from './report-config'
+import { detailText, durationText, emptyReportText, executionHint, factText, jobNodes } from './report-utils'
 
 const props = defineProps<{ panel: JobPanel }>()
 const app = useAppStore()
@@ -199,31 +224,39 @@ const { query, report, rows, loading, error, exporting, exportError,
   refresh, setFilters, reset, setPage, setPageSize, exportExcel, cancelExport } = useJobReport({
   panel: () => props.panel, tenantId: () => app.tenantId, fetcher: fetchJobReport, exporter: exportJobReport,
 })
+const objectLevel = computed(() => query.value.object_level ?? (props.panel === 'mrs' ? 'EXECUTION' : 'DEFINITION'))
+const levelOptions = computed(() => objectLevelOptions(props.panel))
+const totalLabel = computed(() => objectLevel.value === 'DEFINITION' ? config.value.totalLabel : `${OBJECT_LEVEL_LABELS[objectLevel.value]}数`)
 const selected = shallowRef<JobReportRow | null>(null)
 type ReportTableRow = JobReportRow & {
   nodeItems: ReturnType<typeof jobNodes>
   nodePreview: ReturnType<typeof jobNodes>
   duration: string
   sourceLabel: string
+  levelLabel: string
+  engineText: string
+  executionHint: string
 }
 const tableRows = computed<ReportTableRow[]>(() => rows.value.map(row => {
   const nodeItems = jobNodes(row)
-  return { ...row, nodeItems, nodePreview: nodeItems.slice(0, 2), duration: durationText(row), sourceLabel: SOURCE_LABELS[row.resource_type] }
+  return { ...row, nodeItems, nodePreview: nodeItems.slice(0, 2), duration: durationText(row), sourceLabel: jobTypeLabel(row),
+    levelLabel: OBJECT_LEVEL_LABELS[row.object_level ?? objectLevel.value], executionHint: executionHint(row),
+    engineText: row.engines?.length ? row.engines.join(' / ') : row.engine ?? '未识别引擎' }
 }))
 watch([query, () => props.panel, () => app.tenantId], () => { selected.value = null }, { flush: 'sync' })
 watch(report, value => {
   if (selected.value) selected.value = value?.items.find(row => row.id === selected.value?.id) ?? null
 })
 
-const statusOptions = computed(() => [...new Set([...config.value.statuses, ...Object.keys(report.value?.summary.status_counts ?? {}), ...(query.value.status ?? [])])])
-const engineOptions = computed(() => [...new Set([...Object.keys(report.value?.summary.by_engine ?? {}).filter(key => key !== 'UNKNOWN'), ...(query.value.engine ? [query.value.engine] : [])])])
+const statusOptions = computed(() => [...new Set([...config.value.statuses, ...(objectLevel.value === 'NODE' ? ['SKIPPED', 'PAUSED', 'CANCELED'] : []), ...Object.keys(report.value?.summary.status_counts ?? {}), ...(query.value.status ?? [])])])
+const engineOptions = computed(() => [...new Set([...Object.keys(report.value?.summary.by_engine ?? {}).filter(key => !['UNKNOWN', 'MULTIPLE'].includes(key)), ...rows.value.flatMap(row => row.engines ?? []), ...(query.value.engine ? [query.value.engine] : [])])])
 const statusEntries = computed(() => statusOptions.value.map(key => ({ key, count: report.value?.summary.status_counts[key] ?? 0 }))
   .filter(entry => entry.count > 0 || config.value.focus.includes(entry.key) || ['UNKNOWN', 'NO_DATA'].includes(entry.key) || query.value.status?.includes(entry.key)))
-const SERVICE_LABELS: Record<string, string> = { dataarts: 'DataArts Studio', mrs: 'MRS' }
+const SERVICE_LABELS: Record<string, string> = { dataarts: 'DataArts Studio', mrs: 'MRS', ...COLLECTION_SOURCE_LABELS }
 const DGC_TYPES: JobResourceType[] = ['dgc_realtime_job', 'dgc_batch_job']
-const dimensionEntries = computed(() => props.panel === 'dgc'
+const dimensionEntries = computed(() => props.panel === 'dgc' && objectLevel.value === 'DEFINITION'
   ? DGC_TYPES.map(key => ({ key, label: SOURCE_LABELS[key], count: report.value?.summary.by_type[key] ?? 0 }))
-  : Object.entries(report.value?.summary.by_source ?? {}).map(([key, count]) => ({ key, label: SERVICE_LABELS[key] ?? key, count })))
+  : Object.entries(report.value?.summary.by_collection_source ?? report.value?.summary.by_source ?? {}).map(([key, count]) => ({ key, label: SERVICE_LABELS[key] ?? key, count })))
 const engineEntries = computed(() => Object.entries(report.value?.summary.by_engine ?? {}).map(([key, count]) => ({ key, count })))
 const statusChart = computed<EChartsCoreOption>(() => ({
   tooltip: { trigger: 'item', renderMode: 'richText' },

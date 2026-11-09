@@ -67,6 +67,15 @@ def rows(engine, name):
         return [dict(row) for row in connection.execute(select(table).order_by(*table.primary_key)).mappings()]
 
 
+def directory_settings(engine):
+    settings = rows(engine, "sys_setting")
+    for setting in settings:
+        if setting["key"] == "migration:mrs-split-0022":
+            assert setting["updated_by"] == "system:mrs-split-0022"
+            assert setting["value"]["node_refs"] == []  # 该夹具只有 VPC，不能迁移任何业务资源。
+    return [row for row in settings if row["key"] != "migration:mrs-split-0022"]
+
+
 def migration_module():
     spec = importlib.util.spec_from_file_location(
         "directory_migration", BACKEND / "migrations/versions/20261102_0008_unified_user_directory.py")
@@ -182,7 +191,7 @@ def test_owners_match_only_unique_scoped_names_and_preserve_ambiguous_text(legac
         connection.execute(tables["sys_setting"].insert().values(
             key="ledger_dict", value=dictionary, updated_by="admin", updated_at=NOW))
     original_resources = rows(engine, "resource")
-    original_setting = rows(engine, "sys_setting")
+    original_setting = directory_settings(engine)
     command.upgrade(cfg, "head")
     resources = {r["id"]: r for r in rows(engine, "resource")}
     users = {u["id"]: u for u in rows(engine, "sys_user")}
@@ -201,7 +210,7 @@ def test_owners_match_only_unique_scoped_names_and_preserve_ambiguous_text(legac
         assert user["login_enabled"] is False and user["role_id"] is None and user["password_hash"] == "!"
         assert user["email"] is None and user["notify_enabled"] is False
     assert [{k: r[k] for k in original_resources[0]} for r in resources.values()] == original_resources
-    assert rows(engine, "sys_setting") == original_setting
+    assert directory_settings(engine) == original_setting
     with engine.begin() as connection:
         report = migration_module().reconcile(connection)
     assert report["created_user_ids"] == []
@@ -293,6 +302,6 @@ def test_downgrade_preserves_users_snapshots_and_links_on_reupgrade(legacy_direc
     assert [c["user_id"] for c in rows(engine, "contact")] == [c["user_id"] for c in before_contacts]
     assert rows(engine, "contact_group") == before_groups
     assert rows(engine, "resource") == before_resources
-    assert rows(engine, "sys_setting") == []
+    assert directory_settings(engine) == []
     with engine.connect() as connection:
         assert compare_metadata(MigrationContext.configure(connection), Base.metadata) == []

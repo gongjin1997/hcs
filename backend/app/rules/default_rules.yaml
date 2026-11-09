@@ -121,7 +121,7 @@
     3. 解冻后检查作业是否需要补跑。
 - id: R-MRS-JOB-001
   name: MRS 作业执行失败
-  resource_type: mrs_job
+  resource_type: dgc_mrs_node
   check_item: job_status
   kind: state
   expr: {when: "node_status == 'fail'", severity: P2, critical_severity: P1,
@@ -131,6 +131,18 @@
     1. 在 DataArts Studio 实例监控中打开该作业实例，查看失败 MRS 节点的日志（logPath）；
     2. 跳转 MRS Manager / YARN 查看对应 application 的错误与资源队列，资源不足时调整队列配额；
     3. 修复后在 DataArts 重跑失败实例，下一次实例中该节点成功即自动恢复。
+- id: R-MRS-NATIVE-001
+  name: MRS 原生执行失败
+  resource_type: mrs_job
+  check_item: job_status
+  kind: state
+  expr: {when: "job_state == 'FAILED' or job_result == 'FAILED'", severity: P2, critical_severity: P1,
+         value_field: job_result, title: "MRS 原生执行失败（{job_result}）"}
+  recover: {when: "job_state == 'FINISHED' and job_result == 'SUCCEEDED'"}
+  runbook: |
+    按集群 ID 和 job_id 在 MRS Manager / YARN 核对本次执行日志及队列资源。
+    job_state 是执行生命周期，job_result 是结果；不以 FINISHED 单独认定成功。
+    修复后核验对应执行；同名新执行不会覆盖或恢复旧执行的告警。
 - id: R-GS-001
   name: GaussDB 实例故障
   resource_type: gaussdb_instance

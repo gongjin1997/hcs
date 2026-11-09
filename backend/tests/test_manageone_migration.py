@@ -23,9 +23,11 @@ def insert_legacy_tenant(engine, code):
         return connection.execute(table.insert().values(**values)).inserted_primary_key[0]
 
 
-def test_revision_0021_extends_current_0020_head(migration_url):
+def test_revision_0021_extends_0020_and_remains_in_single_head_chain(migration_url):
     scripts = ScriptDirectory.from_config(_cfg(migration_url))
-    assert scripts.get_current_head() == "0021"
+    heads = scripts.get_heads()
+    assert len(heads) == 1
+    assert "0021" in {revision.revision for revision in scripts.walk_revisions(base="0021", head=heads[0])}
     assert scripts.get_revision("0021").down_revision == "0020"
 
 

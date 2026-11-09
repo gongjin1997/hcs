@@ -42,7 +42,14 @@ def test_repeated_bootstrap_preserves_enabled_task_and_collection(mem_db, monkey
 def test_legacy_environment_without_switch_rows_is_not_globally_disabled(mem_db, monkeypatch):
     service.bootstrap(mem_db, "isolated-existing-admin")
     mem_db.get(InspectionTask, "dcs_status").enabled = True
+    # 新测试环境会显式创建 MRS 默认关闭行；本用例需真实构造旧库“无开关行”，而非假定新 bootstrap 等同旧版本。
+    initial = list(mem_db.scalars(select(CollectSwitch)))
+    assert {row.resource_type for row in initial} == {"mrs_cluster", "mrs_job", "dgc_mrs_node"}
+    assert all(not row.enabled for row in initial)
+    for row in initial:
+        mem_db.delete(row)
     mem_db.commit()
+    assert list(mem_db.scalars(select(CollectSwitch))) == []
     production(monkeypatch)
     service.bootstrap(mem_db)
     assert list(mem_db.scalars(select(CollectSwitch))) == []
@@ -69,3 +76,18 @@ def test_disabled_initialization_does_not_overwrite_explicit_choices(mem_db):
     mem_db.commit()
     assert collect_switch.load(mem_db).enabled(None, "ecs_server")
     assert len(list(mem_db.scalars(select(CollectSwitch)))) == len(collect_switch.SWITCH_TYPES)
+
+
+
+def test_legacy_cluster_authorization_is_preserved_when_native_job_task_is_missing(mem_db, monkeypatch):
+    mem_db.add(InspectionTask(code="mrs_cluster_status", name="Existing MRS", service="mrs",
+                              interval_sec=419, enabled=True, params={"preserve": True}))
+    mem_db.commit()
+    production(monkeypatch)
+    service.bootstrap(mem_db)
+    task = mem_db.get(InspectionTask, "mrs_cluster_status")
+    assert task.enabled and task.interval_sec == 419 and task.params == {"preserve": True}
+    assert collect_switch.load(mem_db).enabled(None, "mrs_cluster")
+    assert mem_db.scalar(select(CollectSwitch).where(CollectSwitch.resource_type == "mrs_cluster")) is None
+    assert not mem_db.get(InspectionTask, "mrs_job_status").enabled
+    assert not mem_db.get(InspectionTask, "dgc_mrs_node_status").enabled

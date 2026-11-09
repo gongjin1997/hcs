@@ -33,7 +33,13 @@ class Client:
         self.workspaces, self.page_size, self.calls = workspaces, page_size, []
 
     def get(self, service, path, **kwargs):
-        assert service == "dataarts" and path == "/v1/{project_id}/jobs/instances/detail"
+        assert service == "dataarts"
+        rows = self.workspaces[kwargs["headers"]["workspace"]]
+        names = list(dict.fromkeys(i["jobName"] for i in rows))
+        if path == "/v1/{project_id}/jobs":
+            return {"total": len(names), "jobs": [{"name": name, "jobType": "BATCH"} for name in names]}
+        if path != "/v1/{project_id}/jobs/instances/detail":
+            return {"name": path.rsplit("/", 1)[1], "processType": "BATCH", "nodes": []}
         self.calls.append(deepcopy(kwargs))
         assert kwargs["params"]["minPlanTime"] == NOW - 86400000
         assert kwargs["params"]["maxPlanTime"] == NOW
@@ -174,7 +180,8 @@ def test_losing_baseline_samples_never_recovers_an_existing_timeout(mem_db, monk
 
 def test_duplicate_instance_identity_never_inflates_the_success_sample_count(monkeypatch):
     rows, context, _ = collect(monkeypatch, [success(i, i) for i in range(1, 5)] + [success("1", 99), running()])
-    assert rows == [] and context.errors
+    assert rows and all(row.attrs["instance_status"] is None and "p90_minutes" not in row.facts for row in rows)
+    assert context.errors
 
 
 def test_partial_workspace_does_not_supply_baseline_or_block_other_workspace(monkeypatch):
@@ -183,12 +190,14 @@ def test_partial_workspace_does_not_supply_baseline_or_block_other_workspace(mon
 
     class Partial(Client):
         def get(self, service, path, **kwargs):
-            if kwargs["headers"]["workspace"] == "a" and kwargs["params"]["offset"] == 1:
+            if path.endswith("/instances/detail") and kwargs["headers"]["workspace"] == "a" and kwargs["params"]["offset"] == 1:
                 raise HcsError(503, "SYNTHETIC", "local injected page failure")
             return super().get(service, path, **kwargs)
 
     context = RunContext(client=Partial({"a": values, "b": values}), account="synthetic", project_id="synthetic",
                          workspaces=["a", "b"])
     rows = DataArtsBatchCollector().collect(context)
-    assert [row.resource_id for row in rows] == ["b/job"] and rows[0].facts["p90_minutes"] == 5
-    assert context.errors and rows[0].attrs["batch_baseline"]["sample_count"] == 5
+    assert [row.resource_id for row in rows] == ["a/job", "b/job"]
+    assert rows[0].facts == {} and rows[0].attrs["instance_query_status"] == "FAILED"
+    assert rows[1].facts["p90_minutes"] == 5
+    assert context.errors and rows[1].attrs["batch_baseline"]["sample_count"] == 5

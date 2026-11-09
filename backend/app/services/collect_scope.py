@@ -38,6 +38,7 @@ from app.models import AlarmEvent, AlarmEventLog, EvalState, HcsAccount, Resourc
 from app.models.alarm import ACTIVE_STATUSES
 from app.models.base import utcnow
 
+from . import job_selection
 from .catalog import RESOURCE_TYPES, SCOPE_DIM_LABELS, SCOPE_DIMENSIONS
 
 log = logging.getLogger(__name__)
@@ -48,7 +49,7 @@ PAGE = 500
 SCAN_LIMIT = 20000                 # 候选值与预览最多扫描的资源数
 SAMPLE = 10                        # 预览里每类样例最多条数
 # 只有这些类型的维度取值需要 attrs；其余类型只用资源 ID / 名称，扫描时不读 JSON 列
-_ATTR_TYPES = frozenset(("dgc_realtime_job", "dgc_batch_job", "mrs_job", "cce_workload"))
+_ATTR_TYPES = frozenset(("dgc_realtime_job", "dgc_batch_job", "dgc_mrs_node", "mrs_job", "cce_workload"))
 
 
 def setting_key(tenant_id: int, resource_type: str) -> str:
@@ -67,6 +68,7 @@ class Scopes:
 
     raw: dict[tuple[int, str], dict] = field(default_factory=dict)
     meta: dict[tuple[int, str], tuple[str | None, datetime | None]] = field(default_factory=dict)
+    job_selections: dict[tuple[int, int, str], dict] = field(default_factory=dict)
     _compiled: dict[tuple[int, str], ScopeFilter] = field(default_factory=dict, repr=False)
 
     def explicit(self, tenant_id: int, resource_type: str) -> list[dict] | None:
@@ -88,13 +90,16 @@ class Scopes:
         key = self._key(tenant_id, resource_type)
         return [] if key is None else _rules_of(self.raw[key])
 
-    def get(self, tenant_id: int | None, resource_type: str) -> ScopeFilter:
+    def get(self, tenant_id: int | None, resource_type: str, *, project_ref: int | None = None):
         key = self._key(tenant_id, resource_type)
-        if key is None:
-            return OPEN
-        if key not in self._compiled:
+        if key is not None and key not in self._compiled:
             self._compiled[key] = compile_scope(self.raw[key])
-        return self._compiled[key]
+        base = self._compiled[key] if key is not None else OPEN
+        if resource_type in job_selection.TYPE_CODES and project_ref is not None:
+            selection_key = (tenant_id, project_ref, resource_type)
+            if selection_key in self.job_selections:
+                return job_selection.JobSelectionScope(base, self.job_selections[selection_key])
+        return base
 
 
 def load(db: Session) -> Scopes:
@@ -108,6 +113,7 @@ def load(db: Session) -> Scopes:
             continue
         scopes.raw[(int(parts[1]), parts[2])] = value
         scopes.meta[(int(parts[1]), parts[2])] = (updated_by, updated_at)
+    scopes.job_selections = job_selection.load(db)
     return scopes
 
 
@@ -163,7 +169,8 @@ def _set_flag(db: Session, resource_ids: list[int], excluded: bool) -> None:
 
 
 def filter_groups(db: Session, tenant_id: int | None, groups: dict[tuple[str, str], list[Observation]],
-                  known: dict[tuple[str, str], Resource], scopes: Scopes, *, operator: str = "system"
+                  known: dict[tuple[str, str], Resource], scopes: Scopes, *, operator: str = "system",
+                  project_ref: int | None = None
                   ) -> dict[tuple[str, str], list[Observation]]:
     """流水线的最终判定：返回仍在范围内的分组。
 
@@ -174,7 +181,12 @@ def filter_groups(db: Session, tenant_id: int | None, groups: dict[tuple[str, st
     newly: list[Resource] = []
     for key, group in groups.items():
         row = known.get(key)
-        flt = scopes.get(tenant_id, key[0])
+        target_project = project_ref if project_ref is not None else row.project_ref if row is not None else None
+        flt = scopes.get(tenant_id, key[0], project_ref=target_project)
+        # 未携带项目上下文时不可把某项目的名单借给另一项目的新对象。
+        if target_project is None and any(tid == tenant_id and kind == key[0]
+                for tid, _project, kind in scopes.job_selections):
+            flt = job_selection.JobSelectionScope(flt, {})
         if flt.open or flt.check(_group_subject(key, group, row)) is not False:
             kept[key] = group
             if row is not None and row.scope_excluded:
@@ -200,7 +212,7 @@ def _scan(db: Session, resource_type: str, *, tenant_ids: list[int | None] | Non
           project_ref: int | None = None, limit: int | None = None) -> Iterator:
     """按主键分页读取活动资源的维度来源列；每页一次查询，不在页间持有游标。"""
     columns: list[InstrumentedAttribute] = [
-        Resource.id, Resource.tenant_id, Resource.resource_id, Resource.name, Resource.env_type,
+        Resource.id, Resource.tenant_id, Resource.project_ref, Resource.resource_id, Resource.name, Resource.env_type,
         Resource.business, Resource.owner, Resource.critical, Resource.scope_excluded,
     ]
     if resource_type in _ATTR_TYPES:
@@ -241,7 +253,9 @@ def sync_flags(db: Session, tenant_id: int | None, resource_types: list[str], *,
         if rtype not in RESOURCE_TYPES:
             continue
         flt = scopes.get(tenant_id, rtype)
-        if flt.open:
+        has_selection = any(tid == tenant_id and kind == rtype and (project_ref is None or project == project_ref)
+                            for tid, project, kind in scopes.job_selections)
+        if flt.open and not has_selection:
             result = db.execute(update(Resource).where(*_resource_conditions(tenant_id, rtype, project_ref),
                                                        Resource.scope_excluded.is_(True))
                                 .values(scope_excluded=False))
@@ -250,7 +264,8 @@ def sync_flags(db: Session, tenant_id: int | None, resource_types: list[str], *,
         exclude: list[int] = []
         restore: list[int] = []
         for row in _scan(db, rtype, tenant_ids=[tenant_id], project_ref=project_ref):
-            excluded = flt.check(_row_subject(rtype, row)) is False
+            row_filter = scopes.get(tenant_id, rtype, project_ref=row.project_ref)
+            excluded = row_filter.check(_row_subject(rtype, row)) is False
             if excluded and not row.scope_excluded:
                 exclude.append(row.id)
             elif not excluded and row.scope_excluded:
@@ -270,7 +285,7 @@ def refresh_resource(db: Session, resource: Resource, *, operator: str = "system
     批量修改（Excel 导入）时由调用方传入同一份 scopes，避免逐行读库。"""
     if resource.resource_type not in RESOURCE_TYPES or resource.lifecycle != "ACTIVE":
         return False
-    flt = (scopes or load(db)).get(resource.tenant_id, resource.resource_type)
+    flt = (scopes or load(db)).get(resource.tenant_id, resource.resource_type, project_ref=resource.project_ref)
     excluded = not flt.open and flt.check(resource_subject(
         resource.resource_type, resource.resource_id, resource.name, resource.attrs, resource.env_type,
         resource.business, resource.owner, resource.critical)) is False
@@ -386,6 +401,7 @@ def preview(db: Session, tenant_id: int, resource_type: str, rules: Sequence[Map
     else:
         effective = normalize_rules(resource_type, rules)
     flt = compile_scope({"rules": effective})
+    selections = job_selection.load(db) if resource_type in job_selection.TYPE_CODES else {}
     tenants = affected_tenants(db, tenant_id, resource_type)
     if visible_tenants is not None:                       # 只估算用户数据范围内的租户
         tenants = [t for t in tenants if t is not None and t in visible_tenants]
@@ -396,7 +412,12 @@ def preview(db: Session, tenant_id: int, resource_type: str, rules: Sequence[Map
     for tid in tenants:
         for row in _scan(db, resource_type, tenant_ids=[tid], limit=SCAN_LIMIT):
             total += 1
-            is_excluded = not flt.open and flt.check(_row_subject(resource_type, row)) is False
+            selected: dict | None = None
+            project_ref = row.project_ref
+            if tid is not None and project_ref is not None:
+                selected = selections.get((tid, project_ref, resource_type))
+            row_filter = job_selection.JobSelectionScope(flt, selected) if selected is not None else flt
+            is_excluded = not row_filter.open and row_filter.check(_row_subject(resource_type, row)) is False
             if is_excluded:
                 excluded += 1
                 if not row.scope_excluded:

@@ -2,7 +2,7 @@
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import httpx
 import pytest
@@ -38,6 +38,8 @@ class JobClient:
             self.peak = max(self.peak, self.active)
         try:
             time.sleep(self.delay)
+            if not path.endswith('/status'):
+                return {'name': unquote(path.split('/jobs/', 1)[1]), 'processType': 'REAL_TIME', 'nodes': []}
             return {'status': 'NORMAL', 'nodes': []}
         finally:
             with self.lock:
@@ -50,7 +52,8 @@ def test_job_names_are_encoded_as_one_path_segment():
     ctx = RunContext(client=client, account='test', project_id='p')
     observations = DataArtsRealtimeCollector().collect(ctx)
     assert len(observations) == 2
-    assert set(client.paths) == {f'/v1/{{project_id}}/jobs/{quote(n, safe="")}/status' for n in names}
+    assert set(client.paths) == {f'/v1/{{project_id}}/jobs/{quote(n, safe="")}{suffix}'
+                                 for n in names for suffix in ('', '/status')}
 
 
 def test_three_hundred_jobs_use_bounded_parallel_requests():

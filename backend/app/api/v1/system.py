@@ -32,12 +32,14 @@ from app.models.alarm import ACTIVE_STATUSES
 from app.models.base import utcnow
 from app.schemas.alarm import AlarmOut
 from app.schemas.collect_scope import ScopeIn
+from app.schemas.job_selection import JobResourceType, JobSelectionIn
 from app.schemas.system import TaskRunOut, TaskScopeOut
 from app.services import (
     catalog,
     collect_scope,
     collect_switch,
     inspection_evidence,
+    job_selection,
     pipeline,
     platform_watch,
     settings_service,
@@ -418,6 +420,55 @@ def save_scope(tenant_id: int, resource_type: str, body: ScopeIn, db: Session = 
     else:
         db.commit()
     return ok(res)
+
+
+# ---------------- DataArts 精确监控作业（复用采集范围权限与物化） ----------------
+def _check_job_selection_target(scope: Scope, tenant_id: int) -> None:
+    if tenant_id < 1 or not scope.allows(tenant_id):
+        raise BizError(ErrorCode.FORBIDDEN, "无权访问该租户的作业监控范围", 403)
+
+
+@router.get("/job-selections/targets", summary="作业监控范围：获授权的租户、项目与已配置工作空间")
+def job_selection_targets(db: Session = Depends(get_db), scope: Scope = Depends(get_scope),
+                          _: object = Depends(require_perm("task:view", "collect:manage", any_of=True))):
+    return ok(job_selection.targets(db, scope))
+
+
+@router.get("/job-selections/{tenant_id}/{resource_type}", summary="读取项目/工作空间的精确监控名单")
+def get_job_selection(tenant_id: int, resource_type: JobResourceType, project_ref: int = Query(..., ge=1),
+                      workspace: str = Query(..., max_length=128), db: Session = Depends(get_db),
+                      scope: Scope = Depends(get_scope),
+                      _: object = Depends(require_perm("task:view", "collect:manage", any_of=True))):
+    _check_job_selection_target(scope, tenant_id)
+    return ok(job_selection.read(db, tenant_id, resource_type, project_ref, workspace))
+
+
+@router.get("/job-selections/{tenant_id}/{resource_type}/jobs", summary="分页发现 DataArts 作业定义（仅 GET，不查状态）")
+def discover_selection_jobs(tenant_id: int, resource_type: JobResourceType, project_ref: int = Query(..., ge=1),
+                            workspace: str = Query(..., max_length=128), page: int = Query(1, ge=1),
+                            page_size: int = Query(100, ge=1, le=200), keyword: str = Query("", max_length=128),
+                            db: Session = Depends(get_db), scope: Scope = Depends(get_scope),
+                            _: CurrentUser = Depends(require_perm("collect:manage"))):
+    _check_job_selection_target(scope, tenant_id)
+    return ok(job_selection.discover(db, tenant_id, resource_type, project_ref, workspace,
+                                    page=page, page_size=page_size, keyword=keyword))
+
+
+@router.put("/job-selections/{tenant_id}/{resource_type}", summary="保存已批准的作业范围（不改变采集开关）")
+def save_job_selection(tenant_id: int, resource_type: JobResourceType, body: JobSelectionIn,
+                       db: Session = Depends(get_db), scope: Scope = Depends(get_scope),
+                       audit: Auditor = Depends(get_auditor), cu: CurrentUser = Depends(require_perm("collect:manage"))):
+    _check_job_selection_target(scope, tenant_id)
+    result = job_selection.save(db, tenant_id, resource_type, body, cu.display_name or cu.username)
+    if result["changed"]:
+        audit.log("collect.job_selection", target_type="job_selection",
+                  target_id=f"{tenant_id}:{body.project_ref}:{resource_type}", tenant_id=tenant_id,
+                  detail={"project_ref": body.project_ref, "workspace": body.workspace,
+                          "before": result["before"], "after": result["after"],
+                          "closed_alarms": result["closed_alarms"]})
+    else:
+        db.commit()
+    return ok(result)
 
 
 # ---------------- 系统设置 ----------------

@@ -3,13 +3,15 @@
 与演示数据（seed.py）的区别：这里只写平台运行必需的基础数据，不写任何演示资源、告警和账号口令。
 用法：迁移完成后执行 python -m app.workers.bootstrap；首次部署时通过 INSPECTOR_INIT_ADMIN_PASSWORD 创建 admin。
 """
+from copy import deepcopy
+
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.permissions import BUILTIN_ROLES
 from app.core.security import hash_password
-from app.models import HcsAccount, InspectionTask, Resource, Role, User
+from app.models import CollectSwitch, HcsAccount, InspectionTask, Resource, Role, SysSetting, User
 from app.rules.loader import sync_default_rules
 from app.services import collect_switch
 from app.services.catalog import TASK_SPECS
@@ -19,9 +21,88 @@ BUILTIN_TASKS: list[tuple] = [(t.code, t.name, t.service, t.interval_sec, *((t.c
                               for t in TASK_SPECS]
 
 
+def _mrs_scope_dims(value) -> set[str] | None:
+    rules = value.get("rules") if isinstance(value, dict) else None
+    if not isinstance(rules, list):
+        return None
+    dims = set()
+    for rule in rules:
+        if (not isinstance(rule, dict) or rule.get("effect") not in ("include", "exclude")
+                or not isinstance(rule.get("match"), dict) or not rule["match"]):
+            return None
+        for key, patterns in rule["match"].items():
+            if (not isinstance(key, str) or not isinstance(patterns, list) or not patterns
+                    or any(not isinstance(pattern, str) or not pattern for pattern in patterns)):
+                return None
+            dims.add(key)
+    return dims
+
+
+def _mrs_split_config(db: Session, old: InspectionTask | None, *, fresh_install: bool) -> None:
+    """create_all/旧部署的幂等配置补齐；正式数据和告警迁移仍由 0022 负责。"""
+    original = {row.tenant_id: row.enabled for row in db.scalars(select(CollectSwitch).where(
+        CollectSwitch.resource_type == "mrs_job"))}
+    for tid, enabled in {0: old is not None, **original}.items():
+        if db.scalar(select(CollectSwitch).where(CollectSwitch.tenant_id == tid,
+                                                CollectSwitch.resource_type == "dgc_mrs_node")) is None:
+            db.add(CollectSwitch(tenant_id=tid, resource_type="dgc_mrs_node", enabled=enabled,
+                                 updated_by="system:mrs-split-0022"))
+    if old is None:
+        # 原任务缺失不等于空库；旧环境的集群授权（含无记录=开启）不能被重置。
+        for kind in ("mrs_job", "mrs_cluster") if fresh_install else ():
+            if db.scalar(select(CollectSwitch).where(CollectSwitch.tenant_id == 0,
+                                                    CollectSwitch.resource_type == kind)) is None:
+                db.add(CollectSwitch(tenant_id=0, resource_type=kind, enabled=False, updated_by="system"))
+        return
+    legacy = {}
+    for setting in list(db.scalars(select(SysSetting).where(SysSetting.key.like("collect_scope:%:mrs_job")))):
+        parts = setting.key.split(":")
+        if len(parts) != 3 or not parts[1].isdigit():
+            continue
+        value = setting.value
+        dims = _mrs_scope_dims(value)
+        tid = int(parts[1])
+        legacy[tid] = {
+            "native_block": dims is None or bool(dims) and (
+                dims <= {"job"} or bool(dims - {"cluster", "job", "id"})),
+            "node_block": dims is None or bool(dims - {"workspace", "job", "node"}),
+        }
+        key = f"collect_scope:{tid}:dgc_mrs_node"
+        if db.get(SysSetting, key) is None:
+            db.add(SysSetting(key=key, value=deepcopy(value), updated_by=setting.updated_by))
+    # Materialize inherited switches/scopes before validating each type's independent authorization.
+    db.flush()
+    node_scopes = {}
+    for setting in db.scalars(select(SysSetting).where(SysSetting.key.like("collect_scope:%:dgc_mrs_node"))):
+        parts = setting.key.split(":")
+        if len(parts) == 3 and parts[1].isdigit():
+            dims = _mrs_scope_dims(setting.value)
+            node_scopes[int(parts[1])] = dims is None or bool(dims - {"workspace", "job", "node"})
+    for tid in {0, *db.scalars(select(HcsAccount.id)), *original, *legacy, *node_scopes}:
+        native_block = legacy.get(tid, legacy.get(0, {})).get("native_block", False)
+        node_block = node_scopes.get(tid, node_scopes.get(0, False))
+        for kind, blocked in (("mrs_job", native_block), ("dgc_mrs_node", node_block)):
+            if not blocked:
+                continue
+            row = db.scalar(select(CollectSwitch).where(CollectSwitch.tenant_id == tid,
+                                                       CollectSwitch.resource_type == kind))
+            if row is None:
+                db.add(CollectSwitch(tenant_id=tid, resource_type=kind, enabled=False,
+                                     updated_by="system:mrs-split-0022"))
+            elif row.enabled:
+                row.enabled, row.updated_by = False, "system:mrs-split-0022"
+
+
 def ensure_tasks(db: Session) -> int:
     """补齐内置任务；已存在的任务不覆盖（保留页面上调整过的周期、启停状态）。"""
     added = 0
+    old_mrs = db.get(InspectionTask, "mrs_job_status")
+    if old_mrs is None or db.get(InspectionTask, "dgc_mrs_node_status") is None:
+        fresh_install = not any(db.scalar(select(model).limit(1)) is not None
+                                for model in (User, HcsAccount, Resource, InspectionTask))
+        _mrs_split_config(db, old_mrs, fresh_install=fresh_install)
+    mrs_schedule = ({k: deepcopy(getattr(old_mrs, k)) for k in ("interval_sec", "cron", "enabled", "params")}
+                    if old_mrs is not None else None)
     # 拆分已有任务时保持管理员原先批准的范围、周期与停用状态；新库仍按生产默认关闭。
     old_gauss = db.get(InspectionTask, "gaussdb_status")
     split_schedule = ({"interval_sec": old_gauss.interval_sec, "cron": old_gauss.cron,
@@ -34,7 +115,11 @@ def ensure_tasks(db: Session) -> int:
                         "enabled": get_settings().env != "prod" and spec.default_enabled}
             if split_schedule is not None and spec.code in ("gaussdb_storage", "gaussdb_components"):
                 schedule.update(split_schedule)
-            db.add(InspectionTask(code=spec.code, name=spec.name, service=spec.service, params={}, **schedule))
+            params = {}
+            if spec.code == "dgc_mrs_node_status" and mrs_schedule is not None:
+                schedule.update({k: v for k, v in mrs_schedule.items() if k != "params"})
+                params = mrs_schedule["params"]
+            db.add(InspectionTask(code=spec.code, name=spec.name, service=spec.service, params=params, **schedule))
             added += 1
     db.flush()
     return added

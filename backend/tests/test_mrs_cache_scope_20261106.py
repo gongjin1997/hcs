@@ -4,7 +4,7 @@ from copy import deepcopy
 import pytest
 from sqlalchemy import select
 
-from app.collectors.mrs import MrsJobCollector
+from app.collectors.mrs import DataArtsMrsNodeCollector
 from app.models import Resource
 from app.services.collect_scope import Scopes
 
@@ -20,17 +20,17 @@ def collect(db, *, rules=None, tenant=11, project=111):
     client = DataArtsClient([inst("etl", 7)], {("etl", 7): [node("a"), node("b", status="fail")]})
     ctx = job_ctx(client)
     ctx.db, ctx.tenant_id, ctx.project_ref = db, tenant, project
-    ctx.scopes = Scopes(raw={(tenant, "mrs_job"): {"rules": rules or []}})
-    return MrsJobCollector().collect(ctx), client, ctx
+    ctx.scopes = Scopes(raw={(tenant, "dgc_mrs_node"): {"rules": rules or []}})
+    return DataArtsMrsNodeCollector().collect(ctx), client, ctx
 
 
 def persist(db, observations, *, tenant=11, project=111):
     for observation in observations:
         row = db.scalar(select(Resource).where(
             Resource.tenant_id == tenant, Resource.project_ref == project,
-            Resource.resource_type == "mrs_job", Resource.resource_id == observation.resource_id))
+            Resource.resource_type == "dgc_mrs_node", Resource.resource_id == observation.resource_id))
         if row is None:
-            row = Resource(service="mrs", resource_type="mrs_job", resource_id=observation.resource_id,
+            row = Resource(service="dataarts", resource_type="dgc_mrs_node", resource_id=observation.resource_id,
                            name=observation.name, tenant_id=tenant, project_ref=project)
             db.add(row)
         row.attrs, row.metrics = deepcopy(observation.attrs), deepcopy(observation.metrics)
@@ -50,11 +50,11 @@ def test_expanding_scope_fetches_the_missing_node_then_reuses_the_complete_insta
 
     cached, client, ctx = collect(mem_db)
     assert {o.attrs["node_name"] for o in cached} == {"a", "b"}
-    assert client.details() == [] and ctx.stats["mrs_jobs"]["details_reused"] == 1
+    assert client.details() == [] and ctx.stats["dgc_mrs_nodes"]["details_reused"] == 1
 
 
 def test_legacy_resource_without_completeness_evidence_is_refetched(mem_db):
-    mem_db.add(Resource(service="mrs", resource_type="mrs_job", resource_id="ws-1/etl/a", name="etl / a",
+    mem_db.add(Resource(service="dataarts", resource_type="dgc_mrs_node", resource_id="ws-1/etl/a", name="etl / a",
                         tenant_id=11, project_ref=111, attrs={
                             "workspace": "ws-1", "job_name": "etl", "node_name": "a", "node_type": "MRSSpark",
                             "source": "dataarts_instance_detail", "instance_id": 7,

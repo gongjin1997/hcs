@@ -6,7 +6,7 @@ from urllib.parse import unquote
 import pytest
 
 from app.collectors.base import RunContext
-from app.collectors.mrs import MrsClusterCollector, MrsJobCollector
+from app.collectors.mrs import DataArtsMrsNodeCollector, MrsClusterCollector
 from app.hcs import HcsError
 from app.models import Resource
 
@@ -139,11 +139,11 @@ def test_only_mrs_node_types_become_observations_with_node_level_identity():
              node("flink", "MRSFlinkJob", "running", end=None), node("hetu", "MRSHetuEngine", "waiting", end=None),
              node("done", "Dummy")]
     client = DataArtsClient([inst(status="fail")], {("job-a", 1): nodes})
-    result = MrsJobCollector().collect(job_ctx(client))
-    assert [o.resource_id for o in result] == ["ws-1/job-a/spark", "ws-1/job-a/mr", "ws-1/job-a/flink",
+    result = DataArtsMrsNodeCollector().collect(job_ctx(client))
+    assert [o.resource_id for o in result] == ["ws-1/job-a/hive", "ws-1/job-a/spark", "ws-1/job-a/mr", "ws-1/job-a/flink",
                                                "ws-1/job-a/hetu"]
-    assert all(o.resource_type == "mrs_job" and o.check_item == "job_status" for o in result)
-    failed = result[1]
+    assert all(o.resource_type == "dgc_mrs_node" and o.check_item == "job_status" for o in result)
+    failed = result[2]
     assert failed.facts["node_status"] == "fail" and failed.facts["job_status"] == "fail"
     assert failed.attrs["node_type"] == "MapReduce" and failed.attrs["instance_id"] == 1
     assert failed.attrs["source"] == "dataarts_instance_detail" and failed.status_raw == "fail"
@@ -154,20 +154,20 @@ def test_run_minutes_use_millisecond_timestamps_and_running_nodes_end_now():
     nodes = [node("done", start=NOW - 2 * HOUR, end=NOW - 2 * HOUR + 150_000),
              node("live", "MapReduce", "running", start=NOW - 90_000, end=None)]
     client = DataArtsClient([inst(status="running", endTime=None)], {("job-a", 1): nodes})
-    done, live = MrsJobCollector().collect(job_ctx(client))
+    done, live = DataArtsMrsNodeCollector().collect(job_ctx(client))
     assert done.facts["run_minutes"] == 2.5 == done.metrics["run_minutes"]
     assert live.facts["run_minutes"] == 1.5
 
 
 def test_missing_times_are_unknown_not_zero():
     nodes = [node(start=None, end=None)]
-    result = MrsJobCollector().collect(job_ctx(DataArtsClient([inst()], {("job-a", 1): nodes})))
+    result = DataArtsMrsNodeCollector().collect(job_ctx(DataArtsClient([inst()], {("job-a", 1): nodes})))
     assert "run_minutes" not in result[0].facts and result[0].metrics["run_minutes"] is None
 
 
 def test_query_window_is_forwarded_to_the_instance_list_and_details_use_the_workspace_header():
     client = DataArtsClient([inst()], {("job-a", 1): [node()]})
-    MrsJobCollector().collect(job_ctx(client, window_hours=48))
+    DataArtsMrsNodeCollector().collect(job_ctx(client, window_hours=48))
     first = client.requests[0]
     assert first[1] == LIST_PATH and first[2]["headers"] == {"workspace": "ws-1"}
     assert first[2]["params"]["minPlanTime"] == NOW - 48 * HOUR and first[2]["params"]["maxPlanTime"] == NOW
@@ -177,21 +177,21 @@ def test_query_window_is_forwarded_to_the_instance_list_and_details_use_the_work
 def test_only_the_latest_instance_of_each_job_is_queried_for_details():
     old, new = inst(iid=1, plan=NOW - 5 * HOUR, status="fail"), inst(iid=2, plan=NOW - HOUR, status="success")
     client = DataArtsClient([old, new], {("job-a", 1): [node(status="fail")], ("job-a", 2): [node()]})
-    result = MrsJobCollector().collect(job_ctx(client))
+    result = DataArtsMrsNodeCollector().collect(job_ctx(client))
     assert len(result) == 1 and result[0].attrs["instance_id"] == 2 and result[0].facts["node_status"] == "success"
     assert client.details() == ["/v1/{project_id}/jobs/job-a/instances/2"]
 
 
 def test_job_name_is_url_encoded_in_the_detail_path():
     client = DataArtsClient([inst(name="日报 a/b", iid=5)], {("日报 a/b", 5): [node()]})
-    MrsJobCollector().collect(job_ctx(client))
+    DataArtsMrsNodeCollector().collect(job_ctx(client))
     assert client.details() == ["/v1/{project_id}/jobs/%E6%97%A5%E6%8A%A5%20a%2Fb/instances/5"]
 
 
 def test_unrecognized_node_status_is_reported_and_never_treated_as_known():
     client = DataArtsClient([inst()], {("job-a", 1): [node(status="NEW_VARIANT")]})
     context = job_ctx(client)
-    result = MrsJobCollector().collect(context)
+    result = DataArtsMrsNodeCollector().collect(context)
     assert "node_status" not in result[0].facts and result[0].status_raw == "NEW_VARIANT"
     assert context.errors and "节点状态" in context.errors[0]
 
@@ -209,14 +209,14 @@ def test_malformed_detail_nodes_fail_that_job_only(bad_nodes):
         return body
     client.get = get
     context = job_ctx(client)
-    result = MrsJobCollector().collect(context)
+    result = DataArtsMrsNodeCollector().collect(context)
     assert [o.attrs["job_name"] for o in result] == ["good"] and len(context.errors) == 1
 
 
 def test_detail_failure_is_partial_and_other_jobs_survive():
     client = DataArtsClient([inst("a", 1), inst("b", 2)], {("a", 1): [node()], ("b", 2): [node()]}, fail={("a", 1)})
     context = job_ctx(client)
-    result = MrsJobCollector().collect(context)
+    result = DataArtsMrsNodeCollector().collect(context)
     assert [o.attrs["job_name"] for o in result] == ["b"]
     assert len(context.errors) == 1 and context.errors[0].startswith("job=a")
 
@@ -226,7 +226,7 @@ def test_instance_list_failure_is_a_workspace_error_not_an_empty_success():
         def get(self, *args, **kwargs):
             raise HcsError(404, "SYNTHETIC.ERROR", "synthetic")
     context = job_ctx(Failing())
-    assert MrsJobCollector().collect(context) == [] and len(context.errors) == 1
+    assert DataArtsMrsNodeCollector().collect(context) == [] and len(context.errors) == 1
 
 
 @pytest.mark.parametrize("bad", [{}, {"instances": []}, {"instances": [], "total": 1}, {"instances": "x", "total": 0},
@@ -238,7 +238,7 @@ def test_bad_instance_list_reports_error_instead_of_healthy_empty(bad):
         def get(self, *args, **kwargs):
             return bad
     context = job_ctx(Bad())
-    assert MrsJobCollector().collect(context) == []
+    assert DataArtsMrsNodeCollector().collect(context) == []
     assert context.errors
 
 
@@ -246,7 +246,7 @@ def test_detail_cap_queries_newest_instances_first_and_reports_the_truncation():
     jobs = [inst(f"j{i}", i, plan=NOW - (10 - i) * HOUR) for i in range(1, 4)]
     client = DataArtsClient(jobs, {(f"j{i}", i): [node()] for i in range(1, 4)})
     context = job_ctx(client, max_details=2)
-    result = MrsJobCollector().collect(context)
+    result = DataArtsMrsNodeCollector().collect(context)
     assert {o.attrs["job_name"] for o in result} == {"j3", "j2"}
     assert len(context.errors) == 1 and "上限" in context.errors[0]
 
@@ -257,28 +257,28 @@ def test_terminal_instances_without_mrs_nodes_are_not_queried_again(mem_db):
     first = DataArtsClient(jobs, nodes)
     context = job_ctx(first)
     context.db = mem_db
-    assert MrsJobCollector().collect(context) == [] and sorted(first.details()) == [
+    assert DataArtsMrsNodeCollector().collect(context) == [] and sorted(first.details()) == [
         "/v1/{project_id}/jobs/etl/instances/1", "/v1/{project_id}/jobs/live/instances/2"]
     mem_db.commit()
     second = DataArtsClient(jobs, nodes)
     context = job_ctx(second)
     context.db = mem_db
-    MrsJobCollector().collect(context)
+    DataArtsMrsNodeCollector().collect(context)
     # 已结束的实例详情不会再变；运行中的实例每轮重新查询
     assert second.details() == ["/v1/{project_id}/jobs/live/instances/2"]
-    assert context.stats["mrs_jobs"]["details_skipped"] == 1
+    assert context.stats["dgc_mrs_nodes"]["details_skipped"] == 1
 
 
 def test_a_new_instance_of_a_scanned_job_is_queried_again(mem_db):
     nodes = {("etl", 1): [node("shell", "Shell")], ("etl", 2): [node("spark")]}
     context = job_ctx(DataArtsClient([inst("etl", 1)], nodes))
     context.db = mem_db
-    MrsJobCollector().collect(context)
+    DataArtsMrsNodeCollector().collect(context)
     mem_db.commit()
     second = DataArtsClient([inst("etl", 1), inst("etl", 2, plan=NOW - HOUR)], nodes)
     context = job_ctx(second)
     context.db = mem_db
-    result = MrsJobCollector().collect(context)
+    result = DataArtsMrsNodeCollector().collect(context)
     assert second.details() == ["/v1/{project_id}/jobs/etl/instances/2"] and len(result) == 1
 
 
@@ -287,18 +287,18 @@ def test_terminal_instances_with_mrs_nodes_reuse_the_stored_resource(mem_db):
     nodes = {("etl", 7): [node("spark", status="fail", end=NOW - HOUR + 60_000)]}
     context = job_ctx(DataArtsClient(jobs, nodes))
     context.db = mem_db
-    first = MrsJobCollector().collect(context)
-    mem_db.add(Resource(service="mrs", resource_type="mrs_job", resource_id=first[0].resource_id, name=first[0].name,
+    first = DataArtsMrsNodeCollector().collect(context)
+    mem_db.add(Resource(service="dataarts", resource_type="dgc_mrs_node", resource_id=first[0].resource_id, name=first[0].name,
                         tenant_id=11, project_ref=111, status_raw="fail", attrs=first[0].attrs,
                         metrics=first[0].metrics))
     mem_db.commit()
     second = DataArtsClient(jobs, nodes)
     context = job_ctx(second)
     context.db = mem_db
-    again = MrsJobCollector().collect(context)
+    again = DataArtsMrsNodeCollector().collect(context)
     assert second.details() == [] and len(again) == 1
     assert again[0].resource_id == first[0].resource_id and again[0].facts["node_status"] == "fail"
-    assert context.stats["mrs_jobs"]["details_reused"] == 1
+    assert context.stats["dgc_mrs_nodes"]["details_reused"] == 1
 
 
 @pytest.mark.parametrize("params", [{"window_hours": 0}, {"window_hours": "NaN"}, {"window_hours": True},
@@ -306,11 +306,11 @@ def test_terminal_instances_with_mrs_nodes_reuse_the_stored_resource(mem_db):
 def test_invalid_configuration_fails_before_cloud_request(params):
     client = Mock()
     with pytest.raises(HcsError):
-        MrsJobCollector().collect(job_ctx(client, **params))
+        DataArtsMrsNodeCollector().collect(job_ctx(client, **params))
     client.get.assert_not_called()
 
 
 def test_mrs_job_collector_never_calls_the_mrs_service():
     client = DataArtsClient([inst()], {("job-a", 1): [node()]})
-    MrsJobCollector().collect(job_ctx(client))
+    DataArtsMrsNodeCollector().collect(job_ctx(client))
     assert {r[0] for r in client.requests} == {"dataarts"}

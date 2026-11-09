@@ -148,6 +148,15 @@ _METRICS: dict[str, list[GuideField]] = {
         ),
     ],
     "mrs_job": [
+        _number("elapsed_min", "运行时长旧指标", "分钟", "与 run_minutes 相同，仅为既有人工规则/指标兼容。",
+                "collectors/mrs_native.py", "job_status"),
+        _number("run_minutes", "执行运行时长", "分钟",
+                "有效 start/end 毫秒时间戳差；RUNNING 无 end 时取本轮 now−start，保存 duration_basis。",
+                "MRS V2 job-executions", "job_status", limitations=(
+                    "elapsed_time 仅在显式确认 milliseconds/seconds 后换算；Mock 也不推断单位。",
+                    "本局点已有历史调用证据；上传的 HCS 8.5.1 PDF 未列出此 V2 接口。")),
+    ],
+    "dgc_mrs_node": [
         _number(
             "run_minutes",
             "节点运行时长",
@@ -384,6 +393,14 @@ _FACTS: dict[str, list[GuideField]] = {
         ),
     ],
     "mrs_job": [
+        _state("job_state", "执行状态", "原生生命周期状态；FINISHED 不单独代表成功。",
+               "MRS V2 job-executions.job_state（局点兼容）", "job_status"),
+        _state("job_result", "执行结果", "原值 SUCCEEDED/FAILED/KILLED/UNDEFINED；与 job_state 分开。",
+               "MRS V2 job-executions.job_result（局点兼容）", "job_status"),
+        _number("elapsed_min", "运行时长旧字段", "分钟", "与 run_minutes 同值，仅供已有人工规则兼容。",
+                "collectors/mrs_native.py", "job_status"),
+    ],
+    "dgc_mrs_node": [
         _state(
             "node_status",
             "节点状态",
@@ -771,7 +788,7 @@ _ATTRS: dict[str, list[GuideField]] = {
             ("path", "作业路径", "path 原值。"),
             ("job_type", "作业类型", "jobType 原值。"),
             ("job_status", "作业状态", "状态响应 status 原值。"),
-            ("engine", "执行引擎", "engine 或 jobEngine 原值；缺失时不推测。"),
+            ("engine", "执行引擎", "定义提供唯一引擎时展示；混合引擎见engines，缺失不推测。"),
             ("start_time", "开始时间原值", "startTime 原样保存；局点格式与单位待核验。"),
             ("end_time", "结束时间原值", "endTime 原样保存；局点格式与单位待核验。"),
         )
@@ -808,7 +825,7 @@ _ATTRS: dict[str, list[GuideField]] = {
             ("workspace", "工作空间", "采集工作空间；不是项目 ID。", None),
             ("instance_id", "最新实例 ID", "instanceId 原值；每次新执行可能改变。", None),
             ("job_type", "作业类型", "jobType 原值。", None),
-            ("engine", "执行引擎", "engine 或 jobEngine 原值。", None),
+            ("engine", "执行引擎", "定义提供唯一引擎时展示；混合引擎见engines。", None),
             ("instance_status", "实例状态", "最近计划实例 status。", None),
             ("plan_time", "计划时间", "planTime 原值，也是选取最新实例的排序键；当前适配按毫秒时间窗查询。", "毫秒"),
             ("start_time", "开始时间", "startTime 原值，耗时计算按毫秒。", "毫秒"),
@@ -828,12 +845,35 @@ _ATTRS: dict[str, list[GuideField]] = {
         ),
     ],
     "mrs_job": [
+        _attribute(key, label, meaning, "collectors/mrs_native.py: MRS V2 job-executions")
+        for key, label, meaning in (
+            ("job_name", "作业名称", "原始作业名；同名并发执行按 cluster_id/job_id 区分。"),
+            ("job_id", "执行 ID", "每次执行的原生标识，不取同名作业 latest。"),
+            ("cluster_id", "集群 ID", "原生 clusterId；支持 cluster 采集范围。"),
+            ("cluster", "集群名称", "原生 clusterName。"),
+            ("queue", "执行队列", "原生queue字符串；缺失或非字符串时为空。"),
+            ("job_type", "作业类型", "原始类型；Flink 同时支持流/批，不由类型推断运行模式。"),
+            ("engine", "执行引擎", "仅保存上游明确返回值；不从类型猜测。"),
+            ("job_state", "执行状态", "生命周期原值，与结果字段独立。"),
+            ("job_result", "执行结果", "结果原值；不把 FINISHED 转为 SUCCEEDED。"),
+            ("submitted_time", "提交时间", "原生 submitted_time 原值。"),
+            ("start_time", "开始时间", "started_time/start_time 原值；只有有效毫秒 epoch 可用于时长计算。"),
+            ("end_time", "结束时间", "finished_time/end_time 原值；缺失不补采集时刻。"),
+            ("source", "采集来源", "固定 mrs_job_execution；与 DataArts 节点来源独立。"),
+            ("elapsed_time", "上游运行时长原值", "保留原值，不默认秒或毫秒。"),
+            ("elapsed_time_unit", "已确认时长单位", "默认未知；仅使用显式配置 milliseconds/seconds。"),
+            ("duration_basis", "时长计算依据",
+             "start_end_milliseconds / start_now_milliseconds / elapsed_time_明确单位；未知为空。"),
+            ("duration_observed_at", "运行时长采样时间", "使用 start_now_milliseconds 时保存本轮 now 毫秒 epoch。"),
+        )
+    ],
+    "dgc_mrs_node": [
         _attribute(key, label, meaning, "collectors/mrs.py: DataArts 作业实例列表 + 实例详情")
         for key, label, meaning in (
             ("workspace", "工作空间", "DataArts 工作空间 ID，同名作业按工作空间区分。"),
             ("job_name", "所属作业", "节点所在的 DataArts 作业名称。"),
             ("node_name", "节点名称", "nodeName 原值；与作业名共同组成资源 ID。"),
-            ("node_type", "节点类型", "MRSSpark、MapReduce、MRSFlinkJob 或 MRSHetuEngine。"),
+            ("node_type", "节点类型", "MRSSpark、MapReduce、MRSFlinkJob、MRSHetuEngine、HiveSQL 或 SparkSQL。"),
             ("instance_id", "实例 ID", "作业实例 ID；变化即新一轮执行，状态持续时间重新计时。"),
             ("instance_type", "实例类型", "DataArts 作业实例列表 instanceType 原值。"),
             ("source", "采集来源", "固定为 dataarts_instance_detail，表示来自 DataArts 作业实例详情。"),
@@ -870,6 +910,40 @@ _ATTRS: dict[str, list[GuideField]] = {
         )
     ],
 }
+
+
+# 作业定义与运行实例分开；这些字段不是执行成功的替代证据。
+for _kind in ("dgc_realtime_job", "dgc_batch_job"):
+    _ATTRS[_kind].extend([
+        _attribute(key, label, meaning, "collectors/dataarts.py: 作业列表、定义与实例", data_type=kind)
+        for key, label, meaning, kind in (
+            ("definition_present", "定义已确认", "本轮作业清单中确认的父定义；False表示未匹配定义的实例。", "boolean"),
+            ("data_object", "对象层级", "DEFINITION为父定义，INSTANCE为未匹配父定义的实例，统计时不得混算。", "string"),
+            ("source", "采集来源", "dataarts_definition或dataarts_instance。", "string"),
+            ("engines", "涉及引擎", "由singleNodeJobType或nodes[].type识别；混合编排保留多个引擎。", "array"),
+            ("engine_source", "引擎依据", "DATAARTS_DEFINITION；不根据名称或REAL_TIME猜测引擎。", "string"),
+            ("single_node_type", "单任务类型", "定义中的singleNodeJobType，如FlinkSQL/FlinkJar；可为空。", "string"),
+            ("node_types", "定义节点类型", "定义节点type去重；不是运行状态列表。", "array"),
+            ("definition_metadata", "定义查询元数据", "查询状态、源修订和引擎识别依据；不包含节点连接属性或凭据。", "object"),
+        )
+    ])
+_ATTRS["dgc_realtime_job"].append(_attribute("status_query_status", "状态查询结果",
+    "AVAILABLE或FAILED；失败时保留父定义，但状态与指标为空。", "collectors/dataarts.py"))
+_ATTRS["dgc_batch_job"].extend([
+    _attribute(key, label, meaning, "collectors/dataarts.py: 批定义和窗口实例", data_type=kind)
+    for key, label, meaning, kind in (
+        ("owner", "作业负责人", "作业列表owner，不等于平台通知联系人。", "string"),
+        ("path", "定义路径", "作业列表path。", "string"),
+        ("priority", "优先级", "0最高、1中、2低；缺失为未知，不默认0。", "integer"),
+        ("schedule_status", "调度状态", "SCHEDULING/STOPPED/PAUSED；不是实例执行结果。", "string"),
+        ("listed_last_instance_status", "列表最近实例状态",
+         "定义列表lastInstanceStatus；不作为本窗口实例或规则恢复证据。", "string"),
+        ("listed_last_instance_end_time", "列表最近结束时间", "lastInstanceEndTime原始毫秒时间戳。", "integer"),
+        ("instance_query_status", "实例查询结果", "AVAILABLE/EMPTY/FAILED；EMPTY不表示父定义不存在。", "string"),
+        ("window_start_ms", "查询窗口开始", "minPlanTime，Unix毫秒。", "integer"),
+        ("window_end_ms", "查询窗口结束", "maxPlanTime，Unix毫秒。", "integer"),
+    )
+])
 
 
 # 只登记 fetcher 实际赋值的容量列，不按规格名称臆造资源容量。
@@ -1080,7 +1154,16 @@ _CONTENT: dict[str, tuple[str, list[str], list[str], list[str]]] = {
         ["仅取窗口内最新计划实例，不是完整执行历史或成功率；当前未计算/保存历史 P90。", _STALE],
     ),
     "mrs_job": (
-        "DataArts 作业实例中的 MRS 类节点（MRSSpark / MapReduce / MRSFlinkJob / MRSHetuEngine）："
+        "MRS 原生作业执行；cluster_infos + V2 job-executions，不依赖 DataArts 工作空间。",
+        ["按集群及 job_id 核对状态与结果；同名执行分别展示和告警。",
+         "FINISHED 仅表示执行结束，应继续核对 job_result；未知结果不认定成功。"],
+        ["elapsed_time 单位须经局点确认；不由 Flink 类型推断流批模式。",
+         "默认无提交时间过滤，避免漏掉长期 Flink；submitted_window_hours 是显式过滤选项。"],
+        ["本局点历史调用成功，不代表上传的 HCS 8.5.1 PDF 完全确认 V2 契约。",
+         "旧 workspace/job/node 范围只继承到节点任务；native 采集开关关闭，待重新授权。", _STALE],
+    ),
+    "dgc_mrs_node": (
+        "DataArts 作业实例中的 MRS 类节点（MRSSpark / MapReduce / MRSFlinkJob / MRSHetuEngine / HiveSQL / SparkSQL）："
         "每个作业最近一次实例里各节点的状态与运行时长。",
         [
             "按工作空间、作业名、节点名和实例 ID 定位；fail 先看节点 logPath 指向的日志，"

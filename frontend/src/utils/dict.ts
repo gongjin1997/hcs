@@ -32,7 +32,7 @@ export const RESOURCE_TYPES: Record<string, string> = {
   ecs_server: '云服务器 ECS', cce_cluster: 'CCE 集群', evs_volume: '云硬盘 EVS', vpc: '虚拟私有云 VPC', vpc_subnet: '子网',
   eip: '弹性公网 IP', elb: '负载均衡 ELB', gaussdb_instance: 'GaussDB 实例', dcs_instance: 'DCS 缓存实例',
   mrs_cluster: 'MRS 集群', dws_cluster: 'DWS 数据仓库',
-  dgc_realtime_job: '实时作业', dgc_batch_job: '批作业', mrs_job: 'MRS 作业', cce_workload: '容器工作负载',
+  dgc_realtime_job: 'DGC 实时定义', dgc_batch_job: 'DGC 批定义', mrs_job: 'MRS 原生执行', dgc_mrs_node: 'DataArts MRS 节点', cce_workload: '容器工作负载',
   // 平台自身告警（服务 = platform）
   platform_task: '巡检任务', platform_tenant: '租户接入', platform_notify: '通知投递', platform_worker: '后台进程',
 }
@@ -128,7 +128,7 @@ const STATUS_TEXT: Record<string, Record<string, string>> = {
   gaussdb_instance: { 'STORAGE FULL': '存储满' },
 }
 /** 作业类资源（只巡检，不进台账）；与后端 catalog 的 category=job 一致 */
-export const JOB_TYPES = ['dgc_realtime_job', 'dgc_batch_job', 'mrs_job']
+export const JOB_TYPES = ['dgc_realtime_job', 'dgc_batch_job', 'mrs_job', 'dgc_mrs_node']
 /** 只巡检、不进台账的资源类型（作业 + 容器工作负载） */
 export const INSPECT_ONLY_TYPES = [...JOB_TYPES, 'cce_workload']
 export function statusText(type: string, raw?: string | null): string {

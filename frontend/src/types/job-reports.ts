@@ -1,6 +1,9 @@
 /** 与 backend/app/schemas/job_report.py 对齐；状态、指标均由后端已保存事实提供。 */
 export type JobPanel = 'dgc' | 'flink' | 'realtime' | 'batch' | 'mrs'
-export type JobResourceType = 'dgc_realtime_job' | 'dgc_batch_job' | 'mrs_job'
+export type JobResourceType = 'dgc_realtime_job' | 'dgc_batch_job' | 'mrs_job' | 'dgc_mrs_node'
+
+export type JobObjectLevel = 'DEFINITION' | 'EXECUTION' | 'NODE' | 'INSTANCE'
+export type JobSource = 'dataarts_definition' | 'mrs_job_execution' | 'dataarts_instance_detail' | 'dataarts_instance'
 
 export interface JobReportRow {
   id: number
@@ -8,6 +11,10 @@ export interface JobReportRow {
   name: string
   service: string
   resource_type: JobResourceType
+  source?: string | null
+  object_level?: JobObjectLevel | null
+  execution_result?: string | null
+  engines?: string[]
   job_type: string | null
   engine: string | null
   status_raw: string | null
@@ -38,9 +45,19 @@ export interface JobReportSummary {
   active_alarms: number
   latest_update_at: string | null
   data_status: 'AVAILABLE' | 'NO_DATA'
+  by_collection_source?: Record<string, number>
+  by_object_level?: Partial<Record<JobObjectLevel, number>>
   by_source: Record<string, number>
   by_type: Record<string, number>
   by_engine: Record<string, number>
+}
+
+export interface JobCollectionStatus {
+  state: 'AVAILABLE' | 'NO_MATCH' | 'NOT_COLLECTED' | 'CLOUD_EMPTY' | 'FAILED' | 'COLLECTING' | 'UNKNOWN'
+  message: string
+  last_attempt_at?: string | null
+  last_run_status?: string | null
+  reasons?: Record<string, number>
 }
 
 export interface JobReport {
@@ -51,6 +68,7 @@ export interface JobReport {
   page: number
   page_size: number
   data_notes: string[]
+  collection_status?: JobCollectionStatus | null
 }
 
 export interface JobReportQuery {
@@ -59,6 +77,8 @@ export interface JobReportQuery {
   status_raw?: string[]
   engine?: string
   resource_type?: JobResourceType
+  source?: JobSource
+  object_level?: JobObjectLevel
   job_type?: string
   project_ref?: number
   lifecycle?: 'ACTIVE' | 'DELETED' | 'ALL'

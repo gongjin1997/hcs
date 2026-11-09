@@ -28,7 +28,9 @@ def test_default_rules_mark_the_data_less_rules_disabled_and_keep_the_live_cpu_r
     rules = {r["id"]: r for r in load_yaml_rules()}
     assert all(rules[code].get("enabled") is False for code in DEAD)
     assert rules["R-DCS-006"].get("enabled", True) is True                       # DCS CPU 由累计秒折算后恢复可用
-    assert len(rules) == len({r["id"] for r in load_yaml_rules()}) == 40      # 含 DCS 节点、GaussDB 组件 3 条
+    assert len(rules) == len({r["id"] for r in load_yaml_rules()}) == 41      # 新增独立 MRS native 规则，原节点规则保留其 ID。
+    assert rules["R-MRS-NATIVE-001"]["resource_type"] == "mrs_job"
+    assert rules["R-MRS-JOB-001"]["resource_type"] == "dgc_mrs_node"
 
 
 def test_gaussdb_transitional_state_rule_fires_only_after_an_hour_in_a_transitional_state():

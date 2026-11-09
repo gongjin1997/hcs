@@ -8,7 +8,9 @@ from pydantic import BaseModel, Field
 from app.core.response import Page
 
 JobPanel = Literal["dgc", "flink", "realtime", "batch", "mrs"]
-JobResourceType = Literal["dgc_realtime_job", "dgc_batch_job", "mrs_job"]
+JobResourceType = Literal["dgc_realtime_job", "dgc_batch_job", "mrs_job", "dgc_mrs_node"]
+JobObjectLevel = Literal["DEFINITION", "EXECUTION", "NODE", "INSTANCE"]
+JobSource = Literal["dataarts_definition", "mrs_job_execution", "dataarts_instance_detail", "dataarts_instance"]
 
 
 class JobReportRow(BaseModel):
@@ -17,6 +19,10 @@ class JobReportRow(BaseModel):
     name: str
     service: str
     resource_type: JobResourceType
+    source: str | None = None
+    object_level: JobObjectLevel | None = None
+    execution_result: str | None = None
+    engines: list[str] = Field(default_factory=list)
     job_type: str | None
     engine: str | None
     status_raw: str | None
@@ -42,7 +48,9 @@ class JobReportRow(BaseModel):
 class JobReportSummary(BaseModel):
     total: int
     status_counts: dict[str, int] = Field(description="所有匹配行（分页前）的 display_status 分布")
-    by_source: dict[str, int] = Field(description="分页前按资源 service 分布，例如 dataarts/mrs")
+    by_source: dict[str, int] = Field(description="兼容字段：分页前按资源 service 分布，例如 dataarts/mrs")
+    by_collection_source: dict[str, int] = Field(default_factory=dict)
+    by_object_level: dict[str, int] = Field(default_factory=dict)
     by_type: dict[str, int] = Field(description="分页前按作业资源类型分布，区分 DGC 实时、DGC 批作业和 MRS 作业")
     by_engine: dict[str, int] = Field(description="分页前按展示引擎分布；没有引擎依据的键为 UNKNOWN")
     unknown_total: int = Field(description="未定义或尚未识别的非空状态数量，不包含缺失状态")
@@ -52,7 +60,19 @@ class JobReportSummary(BaseModel):
     data_status: Literal["AVAILABLE", "NO_DATA"]
 
 
+JobCollectionState = Literal["AVAILABLE", "NO_MATCH", "NOT_COLLECTED", "CLOUD_EMPTY", "FAILED", "COLLECTING", "UNKNOWN"]
+
+
+class JobCollectionStatus(BaseModel):
+    state: JobCollectionState
+    message: str
+    last_attempt_at: datetime | None = None
+    last_run_status: str | None = None
+    reasons: dict[str, int] = Field(default_factory=dict)
+
+
 class JobReportOut(Page[JobReportRow]):
     panel: JobPanel
     summary: JobReportSummary
     data_notes: list[str]
+    collection_status: JobCollectionStatus | None = None

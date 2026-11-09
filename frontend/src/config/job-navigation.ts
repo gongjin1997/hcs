@@ -7,8 +7,8 @@ export const JOB_MENU_PATH = '/job-reports/dgc'
 export const JOB_NAVIGATION = ([
   { panel: 'dgc', label: 'DGC 作业' },
   { panel: 'flink', label: 'Flink 作业' },
-  { panel: 'realtime', label: '实时作业' },
-  { panel: 'batch', label: '批作业' },
+  { panel: 'realtime', label: 'DGC 实时作业' },
+  { panel: 'batch', label: 'DGC 批作业' },
   { panel: 'mrs', label: 'MRS 作业' },
 ] satisfies { panel: JobPanel; label: string }[]).map(item => ({
   ...item,

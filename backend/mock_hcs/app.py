@@ -490,8 +490,10 @@ async def aom_samples(project_id: str, caller: CALLER, request: Request):
 
 @app.get("/v1/{project_id}/jobs")
 def dataarts_jobs(ds: DS, jobType: str = "BATCH", offset: int = 0, limit: int = 100):  # noqa: N803
-    jobs = [{"name": n, "jobType": jobType, "owner": "bigdata", "priority": 0, "path": f"/实时/{n}"}
-            for n in getattr(ds, "RT_JOBS", {})] if jobType == "REAL_TIME" else []
+    names = (list(getattr(ds, "RT_JOBS", {})) if jobType == "REAL_TIME" else
+             list(dict.fromkeys(row[0] for row in getattr(ds, "BATCH_JOBS", []))))
+    jobs = [{"name": n, "jobType": jobType, "owner": "bigdata", "priority": 0, "path": f"/作业/{n}",
+             "status": getattr(ds, "RT_JOBS", {}).get(n, "SCHEDULING")} for n in names]
     return {"total": len(jobs), "jobs": _offset(jobs, offset * limit, limit)}
 
 
@@ -556,6 +558,17 @@ def dataarts_status(ds: DS, name: str):
     nodes = [{"name": f"{name}_src", "status": st},
              {"name": f"{name}_agg", "status": "EXCEPTION" if name == "rt_user_behavior" else st}]
     return {"name": name, "status": st, "nodes": nodes, "startTime": _now_ms() - 3600_000}
+
+
+@app.get("/v1/{project_id}/jobs/{name:path}")
+def dataarts_definition(ds: DS, name: str):
+    """Synthetic definition metadata, separate from execution state and instance details."""
+    if name in getattr(ds, "RT_JOBS", {}):
+        return {"name": name, "processType": "REAL_TIME", "nodes": [], "singleNodeJobType": "FlinkSQL"}
+    if name in {row[0] for row in getattr(ds, "BATCH_JOBS", [])}:
+        return {"name": name, "processType": "BATCH", "nodes": [
+            {"name": node, "type": kind} for node, kind in getattr(ds, "JOB_NODES", {}).get(name, [])]}
+    raise err(404, "job definition not found", "DLF.0100")
 
 
 @app.get("/gaussdb/v3.3/{project_id}/instances")
@@ -807,6 +820,25 @@ def gaussdb_inspection_detail(project_id: str, record_id: str, caller: CALLER):
 def mrs_clusters(ds: DS, pageSize: int = 10, currentPage: int = 1):  # noqa: N803
     rows = oa.mrs_clusters(ds)
     return {"clusterTotal": len(rows), "clusters": _page(rows, currentPage, pageSize)}
+
+
+@app.get("/v2/{project_id}/clusters/{cluster_id}/job-executions")
+def mrs_native_job_executions(ds: DS, cluster_id: str, offset: int = Query(1, ge=1),
+                              limit: int = Query(100, ge=1, le=1000),
+                              submitted_time_begin: int | None = None):
+    """仅开发合成契约，offset 为 1 起始页码，不作为 HCS 8.5.1 产品文档证据。"""
+    if not any(c["clusterId"] == cluster_id for c in oa.mrs_clusters(ds)):
+        raise err(404, "cluster not found")
+    base = _now_ms() - 300_000
+    rows = [{"job_id": f"mock-native-{i}", "job_name": "synthetic-native-job", "job_type": "Flink",
+             "job_state": "FINISHED" if i == 1 else "RUNNING",
+             "job_result": "SUCCEEDED" if i == 1 else "UNDEFINED",
+             "submitted_time": base - 1000 * i, "started_time": base,
+             "finished_time": base + 60_000 if i == 1 else None,
+             "elapsed_time": 60_000 if i == 1 else 300_000} for i in (1, 2)]
+    if submitted_time_begin is not None:
+        rows = [r for r in rows if r["submitted_time"] >= submitted_time_begin]
+    return {"total_record": len(rows), "job_list": _page(rows, offset, limit)}
 
 
 # ======================= 台账相关服务（按路径前缀区分） =======================

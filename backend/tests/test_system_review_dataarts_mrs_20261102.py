@@ -1,7 +1,8 @@
 """上传 PDF 的源字段边界与本地作业报表回归；所有响应均为合成数据，不证明正式 API 可用。"""
 from copy import deepcopy
-from datetime import datetime
+from datetime import UTC, datetime
 from io import BytesIO
+from zoneinfo import ZoneInfo
 
 import pytest
 from openpyxl import load_workbook
@@ -9,6 +10,7 @@ from openpyxl import load_workbook
 from app.collectors.base import RunContext
 from app.collectors.dataarts import DataArtsBatchCollector, DataArtsRealtimeCollector
 from app.collectors.mrs import MrsClusterCollector
+from app.core.config import get_settings
 from app.services.job_report_service import _status_details
 from tests.test_job_reports import report, resource
 from tests.test_job_reports import report_api as report_fixture
@@ -75,13 +77,22 @@ def test_explicit_missing_job_state_does_not_reuse_legacy_snapshot_timestamp(mem
 
 def test_mrs_node_millisecond_timestamps_are_dates_in_the_workbook(mem_db, report_api):
     client, _, _ = report_api
-    resource(mem_db, "mrs_job", "running", attrs={"node_status": "running", "node_type": "MRSSpark",
-                                                 "start_time": 1792886400000, "end_time": 1792886460000})
-    response = client.get("/api/v1/job-reports/mrs/export")
+    resource(mem_db, "dgc_mrs_node", "running", attrs={"source": "dataarts_instance_detail",
+             "node_status": "running", "node_type": "MRSSpark",
+             "start_time": 1792886400000, "end_time": 1792886460000})
+    assert report(client, "mrs")["total"] == 0  # 节点不能混入默认原生执行次数。
+    filters = {"source": "dataarts_instance_detail", "object_level": "NODE"}
+    assert report(client, "mrs", **filters)["items"][0]["resource_type"] == "dgc_mrs_node"
+    response = client.get("/api/v1/job-reports/mrs/export", params=filters)
+    assert response.status_code == 200
     ws = load_workbook(BytesIO(response.content))["作业明细"]
     values = dict(zip((cell.value for cell in ws[1]), next(ws.iter_rows(min_row=2, values_only=True)), strict=True))
     assert isinstance(values["开始时间"], datetime) and isinstance(values["结束时间"], datetime)
+    timezone = ZoneInfo(get_settings().timezone)
+    assert values["开始时间"] == datetime.fromtimestamp(1792886400000 / 1000, UTC).astimezone(timezone).replace(tzinfo=None)
+    assert (values["结束时间"] - values["开始时间"]).total_seconds() == 60
     assert values["节点类型"] == "MRSSpark"
+    assert values["对象层级"] == "NODE" and values["采集来源"] == "dataarts_instance_detail"
 
 
 def test_mrs_data_source_is_stated_in_report_and_workbook(mem_db, report_api):
@@ -140,17 +151,36 @@ def test_batch_submit_time_reaches_report_and_excel_with_pdf_millisecond_unit(me
     source = {"jobName": "batch", "instanceId": 1, "status": "success", "planTime": 1792886400000,
               "submitTime": 1792886401000, "instanceType": 5, "startTime": 1792886402000,
               "endTime": 1792886403000}
-    ctx = context(LocalClient(lambda *_: {"total": 1, "instances": [source]}))
+    def respond(service, path, kwargs):
+        if path.endswith("/jobs"):
+            assert kwargs["params"]["jobType"] == "BATCH"
+            return {"total": 1, "jobs": [{"name": "batch", "jobType": "BATCH", "status": "NORMAL"}]}
+        if path.endswith("/jobs/batch"):
+            return {"name": "batch", "processType": "BATCH", "nodes": []}
+        assert path.endswith("/jobs/instances/detail")
+        return {"total": 1, "instances": [source]}
+
+    ctx = context(LocalClient(respond))
     observation = DataArtsBatchCollector().collect(ctx)[0]
+    assert not ctx.errors
+    assert observation.attrs["definition_present"] is True
+    assert observation.attrs["source"] == "dataarts_definition"
     resource(mem_db, observation.resource_type, observation.status_raw,
              attrs=observation.attrs, metrics=observation.metrics)
     row = report(client, "batch")["items"][0]
+    assert row["object_level"] == "DEFINITION"
     assert row["status_details"]["submitted_time"] == source["submitTime"]
     assert row["status_details"]["instance_type"] == 5
     response = client.get("/api/v1/job-reports/batch/export")
+    assert response.status_code == 200
     ws = load_workbook(BytesIO(response.content))["作业明细"]
     values = dict(zip((cell.value for cell in ws[1]), next(ws.iter_rows(min_row=2, values_only=True)), strict=True))
     assert isinstance(values["提交时间"], datetime)
+    expected = datetime.fromtimestamp(source["submitTime"] / 1000, UTC).astimezone(
+        ZoneInfo(get_settings().timezone)).replace(tzinfo=None)
+    assert values["提交时间"] == expected
+    assert (values["开始时间"] - values["提交时间"]).total_seconds() == 1
+    assert values["对象层级"] == "DEFINITION" and values["采集来源"] == "dataarts_definition"
 
 
 def test_legacy_submit_time_is_preserved_without_overriding_explicit_missing_current_value():

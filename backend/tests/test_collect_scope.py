@@ -18,7 +18,7 @@ from app.collectors import dataarts
 from app.collectors.base import Observation, RunContext
 from app.collectors.dcs import DcsCollector
 from app.collectors.gaussdb import GaussDBCollector, GaussDBComponentsCollector, GaussDBStorageCollector
-from app.collectors.mrs import MrsJobCollector
+from app.collectors.mrs import DataArtsMrsNodeCollector
 from app.core.db import get_db
 from app.core.deps import CurrentUser, get_current_user
 from app.core.response import BizError
@@ -381,8 +381,8 @@ def test_mrs_job_collector_skips_excluded_jobs_before_detail_queries_and_filters
     client = DataArtsClient([inst("job-a", 1), inst("job-tmp", 2)],
                             {("job-a", 1): [node("spark"), node("scratch")], ("job-tmp", 2): [node("spark")]})
     ctx = job_ctx(client)
-    ctx.scopes = scopes(t11__mrs_job=[exclude(job="job-tmp*"), exclude(node="scratch")])
-    rows = MrsJobCollector().collect(ctx)
+    ctx.scopes = scopes(t11__dgc_mrs_node=[exclude(job="job-tmp*"), exclude(node="scratch")])
+    rows = DataArtsMrsNodeCollector().collect(ctx)
     assert [r.resource_id for r in rows] == ["ws-1/job-a/spark"]
     assert client.details() == ["/v1/{project_id}/jobs/job-a/instances/1"]            # job-tmp 的详情没有请求
 
@@ -553,9 +553,11 @@ def test_api_overview_preview_save_candidates_and_audit(mem_db, scope_api):
 
     data = api.get(base).json()["data"]
     types = {t["code"]: t for t in data["types"]}
-    assert len(types) == 15 and data["global_editable"] is True
+    assert len(types) == len(RESOURCE_TYPES) == 16 and data["global_editable"] is True
     assert [d["key"] for d in types["cce_workload"]["dimensions"]] == ["cluster", "namespace", "workload"]
     assert [d["key"] for d in types["dgc_batch_job"]["dimensions"]] == ["workspace", "job"]
+    assert [d["key"] for d in types["mrs_job"]["dimensions"]] == ["cluster", "job", "id"]
+    assert [d["key"] for d in types["dgc_mrs_node"]["dimensions"]] == ["workspace", "job", "node"]
     assert [d["key"] for d in types["dcs_instance"]["dimensions"]] == ["name", "id", "env", "business", "owner",
                                                                         "critical"]
     assert types["dcs_instance"]["tenants"]["11"] == {
@@ -662,7 +664,7 @@ def test_scope_settings_are_plain_sys_setting_rows_with_bounded_keys(mem_db):
     tenant(mem_db)
     longest = max(len(collect_scope.setting_key(999999, code)) for code in RESOURCE_TYPES)
     assert longest <= 64                                                                  # sys_setting.key 为 VARCHAR(64)
-    collect_scope.save(mem_db, 11, "mrs_job", [include(workspace="ws-1")], "admin")
+    collect_scope.save(mem_db, 11, "dgc_mrs_node", [include(workspace="ws-1")], "admin")
     mem_db.commit()
-    row = mem_db.get(SysSetting, "collect_scope:11:mrs_job")
+    row = mem_db.get(SysSetting, "collect_scope:11:dgc_mrs_node")
     assert row.value == {"rules": [include(workspace="ws-1")]} and row.updated_by == "admin"

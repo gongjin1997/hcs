@@ -1,7 +1,8 @@
-import type { JobPanel, JobResourceType } from '../../types/job-reports'
+import type { JobObjectLevel, JobPanel, JobReportRow, JobResourceType } from '../../types/job-reports'
 
 export const SOURCE_LABELS: Record<JobResourceType, string> = {
-  dgc_realtime_job: 'DGC 实时作业', dgc_batch_job: 'DGC 批作业', mrs_job: 'MRS 作业',
+  dgc_realtime_job: 'DGC 实时定义', dgc_batch_job: 'DGC 批定义', mrs_job: 'MRS 原生执行',
+  dgc_mrs_node: 'DataArts MRS 节点',
 }
 
 type StatusMeta = { label: string; color: string; type: 'primary' | 'success' | 'warning' | 'danger' | 'info' }
@@ -11,6 +12,8 @@ export const JOB_STATUSES: Record<string, StatusMeta> = {
   WAITING: { label: '等待中', color: '#a07726', type: 'warning' },
   PENDING: { label: '待处理', color: '#a07726', type: 'warning' },
   SUBMITTED: { label: '已提交', color: '#2488a6', type: 'primary' },
+  ACCEPTED: { label: '已接受', color: '#2488a6', type: 'primary' },
+  NEW_SAVING: { label: '新建保存中', color: '#697586', type: 'info' },
   NEW: { label: '新建', color: '#697586', type: 'info' },
   STARTING: { label: '启动中', color: '#2488a6', type: 'primary' },
   STOPPING: { label: '停止中', color: '#a96f29', type: 'warning' },
@@ -45,38 +48,45 @@ const DGC_STATUSES = [
   'SUCCEEDED', 'FAILED', 'EXCEPTION', 'CANCELED', 'FINISHED', 'UNKNOWN', 'NO_DATA',
 ]
 // DataArts 节点状态（数据治理中心 API 表 5-182）：waiting / running / success / fail / skip / pause / manual-stop
-const MRS_STATUSES = ['WAITING', 'RUNNING', 'SUCCEEDED', 'FAILED', 'SKIPPED', 'PAUSED', 'CANCELED', 'UNKNOWN', 'NO_DATA']
+const NODE_STATUSES = ['WAITING', 'RUNNING', 'SUCCEEDED', 'FAILED', 'SKIPPED', 'PAUSED', 'CANCELED', 'UNKNOWN', 'NO_DATA']
+const MRS_STATUSES = ['NEW', 'NEW_SAVING', 'SUBMITTED', 'ACCEPTED', 'RUNNING', 'FINISHED', 'SUCCEEDED', 'FAILED', 'KILLED', 'UNKNOWN', 'NO_DATA']
 
 export const PANEL_CONFIG: Record<JobPanel, PanelConfig> = {
   dgc: {
-    title: 'DGC 作业报表', desc: 'DGC 实时与批作业', totalLabel: 'DGC 作业总数',
+    title: 'DGC 作业报表', desc: 'DataArts 父作业定义 · 实时与批，不含节点', totalLabel: 'DGC 定义数',
     focus: ['RUNNING', 'SUCCEEDED', 'EXCEPTION'], statuses: DGC_STATUSES,
   },
   flink: {
-    title: 'Flink 作业报表', desc: 'Flink 作业状态与运行详情', totalLabel: '已识别 Flink 作业',
-    focus: ['RUNNING', 'FAILED', 'EXCEPTION'], statuses: [...new Set([...DGC_STATUSES, ...MRS_STATUSES])],
+    title: 'Flink 作业报表', desc: '按引擎证据识别 · 默认 DGC 定义，可切换来源层级', totalLabel: 'Flink 定义数',
+    focus: ['RUNNING', 'FAILED', 'EXCEPTION'], statuses: [...new Set([...DGC_STATUSES, ...MRS_STATUSES, ...NODE_STATUSES])],
   },
   realtime: {
-    title: '实时作业报表', desc: 'DGC 实时作业 · 运行、启动、停止与节点状态', totalLabel: '实时作业总数',
+    title: 'DGC 实时作业报表', desc: 'DataArts 实时父作业定义', totalLabel: 'DGC 实时定义数',
     focus: ['RUNNING', 'STOPPED', 'EXCEPTION'], statuses: DGC_STATUSES,
   },
   batch: {
-    title: '批作业报表', desc: 'DGC 批作业实例与执行结果', totalLabel: '批作业总数',
+    title: 'DGC 批作业报表', desc: 'DataArts 批父作业定义 · 无近期实例仍保留', totalLabel: 'DGC 批定义数',
     focus: ['SUCCEEDED', 'FAILED', 'RUNNING'], statuses: DGC_STATUSES,
   },
   mrs: {
-    title: 'MRS 作业报表', desc: 'DataArts 作业中的 MRS 节点 · 状态与运行时长', totalLabel: 'MRS 作业节点总数',
-    focus: ['RUNNING', 'WAITING', 'FAILED'], statuses: MRS_STATUSES,
+    title: 'MRS 作业报表', desc: '默认 MRS 原生执行 · DataArts 节点需单独选择', totalLabel: 'MRS 原生执行数',
+    focus: ['RUNNING', 'ACCEPTED', 'FAILED'], statuses: MRS_STATUSES,
   },
 }
 
 export const SOURCE_FACTS: Record<JobResourceType, { title: string; fields: string[] }> = {
   dgc_realtime_job: { title: '运行时间', fields: ['start_time', 'end_time'] },
-  dgc_batch_job: { title: '最新批作业实例', fields: ['instance_id', 'instance_type', 'plan_time', 'submitted_time', 'start_time', 'end_time', 'batch_baseline'] },
-  mrs_job: { title: '最新 MRS 节点执行', fields: ['workspace', 'job_name', 'node_name', 'node_type', 'instance_id', 'job_status', 'node_status', 'plan_time', 'start_time', 'end_time', 'retry_times', 'log_path'] },
+  mrs_job: { title: 'MRS 原生执行', fields: ['cluster', 'cluster_id', 'queue', 'queue_name', 'job_name', 'job_id', 'submitted_time', 'start_time', 'end_time', 'elapsed_time', 'elapsed_time_unit', 'duration_basis', 'duration_observed_at'] },
+  dgc_batch_job: { title: '定义与最近实例', fields: ['schedule_status', 'instance_query_status', 'window_start_ms', 'window_end_ms', 'listed_last_instance_status', 'listed_last_instance_end_time', 'instance_id', 'instance_type', 'plan_time', 'submitted_time', 'start_time', 'end_time', 'batch_baseline'] },
+  dgc_mrs_node: { title: 'DataArts 节点执行', fields: ['workspace', 'job_name', 'node_name', 'node_type', 'instance_id', 'job_status', 'node_status', 'plan_time', 'start_time', 'end_time', 'retry_times', 'log_path'] },
 }
 
 export const DETAIL_LABELS: Record<string, string> = {
+  cluster: '集群', cluster_id: '集群 ID', queue: '队列', queue_name: '队列名称', job_id: '执行 ID',
+  duration_basis: '时长依据', duration_observed_at: '时长观测时间', job_state: '执行状态', job_result: '执行结果', elapsed_time: '原始耗时', elapsed_time_unit: '耗时单位',
+  schedule_status: '调度状态', instance_query_status: '近24h实例查询', window_start_ms: '查询窗口开始', window_end_ms: '查询窗口结束',
+  listed_last_instance_status: '列表末次实例提示（非当前证据）', listed_last_instance_end_time: '列表末次实例结束提示',
+  definition: '定义引擎证据', definition_present: '定义已采集', data_object: '对象层级', engine_source: '引擎依据', engines: '引擎', single_node_type: '单节点类型', node_types: '定义节点类型',
   batch_baseline: '近24小时基线元信息', workspace: '工作空间', nodes: '节点状态', instance_id: '实例 ID', instance_type: '调度方式（原始值）',
   job_type: '作业类型', job_name: '所属作业', node_name: '节点名称', node_type: '节点类型', node_status: '节点状态',
   retry_times: '失败重试次数', log_path: '日志路径', job_status: '作业状态',
@@ -86,4 +96,22 @@ export const DETAIL_LABELS: Record<string, string> = {
 
 export const METRIC_LABELS: Record<string, string> = {
   p90_minutes: '近24小时成功实例 P90（分钟）', run_minutes: '运行时长（分钟）', retry_times: '失败重试次数', nodes: '节点数', bad_nodes: '异常节点数',
+}
+
+
+export const OBJECT_LEVEL_LABELS: Record<JobObjectLevel, string> = {
+  DEFINITION: 'DGC 定义', EXECUTION: 'MRS 原生执行', NODE: 'DataArts MRS 节点', INSTANCE: 'DataArts 独立实例',
+}
+export const COLLECTION_SOURCE_LABELS: Record<string, string> = {
+  dataarts_definition: 'DataArts 定义', mrs_job_execution: 'MRS 原生',
+  dataarts_instance_detail: 'DataArts 实例节点', dataarts_instance: 'DataArts 独立实例',
+}
+export function objectLevelOptions(panel: JobPanel): JobObjectLevel[] {
+  if (panel === 'mrs') return ['EXECUTION', 'NODE']
+  if (panel === 'flink') return ['DEFINITION', 'EXECUTION', 'NODE', 'INSTANCE']
+  return panel === 'realtime' ? ['DEFINITION'] : ['DEFINITION', 'INSTANCE']
+}
+
+export function jobTypeLabel(row: Pick<JobReportRow, 'object_level' | 'resource_type'>): string {
+  return row.object_level === 'INSTANCE' ? OBJECT_LEVEL_LABELS.INSTANCE : SOURCE_LABELS[row.resource_type]
 }

@@ -28,17 +28,17 @@ def alarms(db):
 
 
 def test_mrs_new_instance_does_not_inherit_previous_instances_waiting_duration(mem_db):
-    rule(mem_db, "REVIEW-MRS-DURATION", "mrs_job", "job_status",
+    rule(mem_db, "REVIEW-MRS-DURATION", "dgc_mrs_node", "job_status",
          "node_status == 'waiting' and status_duration_min > 15")
     first = utcnow()
     ctx = context()
 
     def job(execution):
-        return Observation("mrs_job", "ws/same-name/node", "same-name", "job_status",
+        return Observation("dgc_mrs_node", "ws/same-name/node", "same-name", "job_status",
                            {"node_status": "waiting"}, status_raw="waiting", attrs={"instance_id": execution})
 
-    process_observations(mem_db, "mrs", [job("old-instance")], ctx, first)
-    process_observations(mem_db, "mrs", [job("new-instance")], ctx, first + timedelta(minutes=20))
+    process_observations(mem_db, "dataarts", [job("old-instance")], ctx, first)
+    process_observations(mem_db, "dataarts", [job("new-instance")], ctx, first + timedelta(minutes=20))
     assert alarms(mem_db) == []
 
 

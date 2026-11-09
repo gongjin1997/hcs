@@ -1,9 +1,4 @@
-"""MRS 巡检：集群状态（MRS API §6.1.3）与 MRS 作业执行（经 DataArts 作业实例详情的 MRS 类节点）。
-
-HCS 8.5.1 的 MRS API 参考只提供集群类查询，作业通过 DataArts Studio 编排：数据治理中心 API
-§5.3.16「查询作业实例列表」+ §5.3.17「查询作业实例详情」返回各节点的 type / status / 起止时间，
-type 为 MRSSpark、MapReduce、MRSFlinkJob、MRSHetuEngine 的节点即 MRS 作业。
-"""
+"""DataArts 实例详情中的 MRS 节点，与 MRS 原生执行独立采集。"""
 import json
 import logging
 import time
@@ -16,64 +11,20 @@ from urllib.parse import quote
 from sqlalchemy import select
 
 from app.hcs import HcsError
-from app.hcs.pager import page_all
 
 from .base import Observation, RunContext, log_collection_failure
 from .dataarts import BATCH_STATES, dataarts_error, millis, paged_list, text_or_none
+from .mrs_native import CLUSTER_STATES, MrsClusterCollector, MrsJobCollector  # noqa: F401 兼容原导入路径
 from .scope import subject_of
 
 log = logging.getLogger(__name__)
-CLUSTER_STATES = frozenset(("starting", "running", "terminated", "failed", "abnormal", "terminating",
-                            "frozen", "scaling-out", "scaling-in"))
-# 数据治理中心 API 表 5-182 Node.type 中执行 MRS 服务作业的节点类型
-MRS_NODE_TYPES = frozenset(("MRSSpark", "MapReduce", "MRSFlinkJob", "MRSHetuEngine"))
-# 表 5-182 Node.status
+# 数据治理中心 API 表 5-182；HiveSQL/SparkSQL 是 MRS Hive/Spark SQL，不造额外枚举。
+MRS_NODE_TYPES = frozenset(("MRSSpark", "MapReduce", "MRSFlinkJob", "MRSHetuEngine", "HiveSQL", "SparkSQL"))
 NODE_STATES = frozenset(("waiting", "running", "success", "fail", "skip", "pause", "manual-stop"))
-# 实例进入终态后详情不再变化：本地已有记录时直接复用，不重复查询
 TERMINAL_INSTANCE_STATES = frozenset(("success", "fail", "manual-stop"))
-MAX_WINDOW_HOURS = 72          # §5.3.16：minPlanTime 与 maxPlanTime 的查询范围不超过 3 天
-DEFAULT_MAX_DETAILS = 500       # 每个工作空间每轮最多查询的实例详情数（超出记为局部失败，不静默截断）
-
-
-def _clusters(ctx: RunContext) -> list[dict]:
-    def fetch(params: dict) -> dict:
-        data = ctx.client.get("mrs", "/v1.1/{project_id}/cluster_infos", params=params)
-        if "clusterTotal" not in data or data["clusterTotal"] is None:
-            raise HcsError(0, "LOCAL.INVALID_RESPONSE", "MRS 集群总数缺失，未使用不完整清单")
-        return data
-
-    clusters = list(page_all(fetch, "clusters",
-                             mode="page", start=1, total_key="clusterTotal", offset_param="currentPage",
-                             limit_param="pageSize", limit=50))
-    ids: set[str] = set()
-    for cluster in clusters:
-        cid, name = cluster.get("clusterId"), cluster.get("clusterName")
-        if not isinstance(cid, str) or not cid or not isinstance(name, str) or not name or cid in ids:
-            raise HcsError(0, "LOCAL.INVALID_RESPONSE", "MRS 集群标识缺失或重复，未使用不完整清单")
-        if cluster.get("clusterState") is not None and not isinstance(cluster["clusterState"], str):
-            raise HcsError(0, "LOCAL.INVALID_RESPONSE", "MRS 集群状态字段格式不正确")
-        ids.add(cid)
-    return clusters
-
-
-class MrsClusterCollector:
-    code, service, name = "mrs_cluster_status", "mrs", "MRS 集群状态"
-
-    def collect(self, ctx: RunContext) -> list[Observation]:
-        observations = []
-        scope = ctx.scope("mrs_cluster")
-        for cluster in _clusters(ctx):
-            if not scope.keep({"id": cluster["clusterId"], "name": cluster["clusterName"]}):
-                continue                        # 采集范围：范围外的集群不评估
-            state = cluster.get("clusterState")
-            known = state in CLUSTER_STATES
-            if not known:
-                ctx.errors.append(f"cluster={cluster['clusterId']}: MRS 集群状态缺失或未被上传 PDF 确认，未按正常状态判定")
-            observations.append(Observation(
-                "mrs_cluster", cluster["clusterId"], cluster["clusterName"], "cluster_status",
-                {"cluster_state": state} if known else {}, status_raw=state or "UNKNOWN",
-                attrs={"version": cluster.get("clusterVersion"), "nodes": cluster.get("totalNodeNum")}))
-        return observations
+MAX_WINDOW_HOURS = 72
+DEFAULT_MAX_DETAILS = 500
+NODE_CACHE_VERSION = 2  # 扩大合法节点类型后，旧负缓存与完整性摘要一并失效。
 
 
 def _node_minutes(node: dict, now_ms: int) -> float | None:
@@ -107,11 +58,11 @@ def _detail_nodes(body: dict, job_name: str, instance_id: int) -> list[dict]:
 def _node_manifest(names: list[str]) -> dict:
     """过滤前完整 MRS 节点清单的摘要；每个资源只保存固定大小的完整性证据。"""
     payload = json.dumps(sorted(names), ensure_ascii=False).encode("utf-8")
-    return {"version": 1, "count": len(names), "digest": sha256(payload).hexdigest()}
+    return {"version": NODE_CACHE_VERSION, "count": len(names), "digest": sha256(payload).hexdigest()}
 
 
-class MrsJobCollector:
-    """MRS 作业执行：DataArts 实例列表（§5.3.16）→ 每个作业最新实例的详情（§5.3.17）→ MRS 类节点。
+class DataArtsMrsNodeCollector:
+    """DataArts MRS 节点：DataArts 实例列表（§5.3.16）→ 每个作业最新实例的详情（§5.3.17）→ MRS 类节点。
 
     资源 ID 为 [工作空间/]作业名/节点名；执行标识为实例 ID（实例变化时状态持续时间重新计时）。
     参数：window_hours（默认 24，≤72）、max_details（每个工作空间每轮详情上限，默认 500）、hcs_concurrency。
@@ -120,9 +71,12 @@ class MrsJobCollector:
     不含 MRS 节点的终态实例把 (工作空间/作业名 → 实例 ID) 记入 sys_setting，下一轮不再查询其详情。
     """
 
-    code, service, name = "mrs_job_status", "mrs", "MRS 作业执行"
+    code, service, name = "dgc_mrs_node_status", "dataarts", "DataArts MRS 节点状态"
 
     def collect(self, ctx: RunContext) -> list[Observation]:
+        scope = ctx.scope("dgc_mrs_node")
+        if scope.dims - {"workspace", "job", "node"}:
+            raise HcsError(0, "LOCAL.INVALID_CONFIG", "旧 native 范围不能映射为 DataArts 节点授权，请重新确认范围")
         hours = ctx.params.get("window_hours", 24)
         if isinstance(hours, bool) or not isinstance(hours, (int, float)) or not 0 < hours <= MAX_WINDOW_HOURS:
             raise HcsError(0, "LOCAL.INVALID_CONFIG", f"MRS 作业查询窗口须大于零且不超过 {MAX_WINDOW_HOURS} 小时")
@@ -138,7 +92,6 @@ class MrsJobCollector:
         stats: dict[str, Any] = {
             "source": "dataarts_instance_detail", "instances": 0, "details_queried": 0, "details_reused": 0,
             "details_skipped": 0, "jobs_without_mrs_nodes": 0, "mrs_nodes": 0}
-        scope = ctx.scope("mrs_job")
         for ws in dict.fromkeys(ctx.workspaces or [""]):
             if not scope.keep({"workspace": ws}):      # 采集范围：整个工作空间在范围外，不请求实例列表
                 continue
@@ -222,7 +175,7 @@ class MrsJobCollector:
         if not scope.open:     # 节点级规则：详情与复用的快照里都可能含范围外的节点（"无 MRS 节点"的判断不受影响）
             obs = [o for o in obs if scope.keep(subject_of(o.resource_type, o.resource_id, o.name, o.attrs))]
         stats["mrs_nodes"] = len(obs)
-        ctx.stats.update(mrs_jobs=stats)
+        ctx.stats.update(dgc_mrs_nodes=stats)
         if not ctx.errors:  # 有局部失败时本轮清单不完整，保留旧记录，避免丢掉未扫描作业的结论
             self._save_scan_state(ctx, seen_keys)
         return obs
@@ -242,7 +195,7 @@ class MrsJobCollector:
         retries = retries if type(retries) is int and retries >= 0 else None
         rid = f"{ws}/{job}/{node_name}" if ws else f"{job}/{node_name}"
         return Observation(
-            "mrs_job", rid, f"{job} / {node_name}", "job_status", facts, status_raw=status or "UNKNOWN",
+            "dgc_mrs_node", rid, f"{job} / {node_name}", "job_status", facts, status_raw=status or "UNKNOWN",
             attrs={"workspace": ws, "job_name": job, "node_name": node_name, "node_type": node.get("type"),
                    "instance_id": millis(inst["instanceId"]), "job_status": inst["status"],
                    "node_status": status, "instance_type": inst.get("instanceType"),
@@ -262,7 +215,8 @@ class MrsJobCollector:
         from app.models import SysSetting
 
         row = ctx.db.get(SysSetting, cls._scan_key(ctx))
-        value = row.value.get("instances") if row is not None and isinstance(row.value, dict) else None
+        value = row.value.get("instances") if (row is not None and isinstance(row.value, dict)
+                                               and row.value.get("version") == NODE_CACHE_VERSION) else None
         return {k: v for k, v in value.items() if isinstance(k, str) and type(v) is int} if isinstance(value, dict) else {}
 
     @classmethod
@@ -275,9 +229,10 @@ class MrsJobCollector:
         key = cls._scan_key(ctx)
         row = ctx.db.get(SysSetting, key)
         if row is None:
-            ctx.db.add(SysSetting(key=key, value={"instances": state}, updated_by="system:mrs-job-scan"))
-        elif (row.value or {}).get("instances") != state:
-            row.value = {"instances": state}
+            ctx.db.add(SysSetting(key=key, value={"version": NODE_CACHE_VERSION, "instances": state},
+                                  updated_by="system:mrs-job-scan"))
+        elif (row.value or {}).get("version") != NODE_CACHE_VERSION or (row.value or {}).get("instances") != state:
+            row.value = {"version": NODE_CACHE_VERSION, "instances": state}
 
     @staticmethod
     def _terminal_snapshots(ctx: RunContext) -> dict[tuple[str, str, int | None], list[Observation]]:
@@ -289,9 +244,10 @@ class MrsJobCollector:
         out: dict[tuple[str, str, int | None], list[Observation]] = {}
         for res in ctx.db.scalars(select(Resource).where(
                 Resource.tenant_id == ctx.tenant_id, Resource.project_ref == ctx.project_ref,
-                Resource.resource_type == "mrs_job", Resource.lifecycle == "ACTIVE")):
+                Resource.resource_type == "dgc_mrs_node", Resource.lifecycle == "ACTIVE")):
             a = res.attrs or {}
             if (a.get("source") != "dataarts_instance_detail" or a.get("job_status") not in TERMINAL_INSTANCE_STATES
+                    or a.get("node_status") not in NODE_STATES
                     or not isinstance(a.get("job_name"), str) or not isinstance(a.get("node_name"), str)):
                 continue
             facts: dict = {"job_status": a["job_status"]}
@@ -304,7 +260,7 @@ class MrsJobCollector:
                                           "node_status", "instance_type", "plan_time", "start_time", "end_time",
                                           "retry_times", "log_path", "source", "mrs_node_manifest")}
             out.setdefault((a.get("workspace") or "", a["job_name"], millis(a.get("instance_id"))), []).append(
-                Observation("mrs_job", res.resource_id, res.name, "job_status", facts,
+                Observation("dgc_mrs_node", res.resource_id, res.name, "job_status", facts,
                             status_raw=a.get("node_status") or "UNKNOWN", attrs=keep,
                             metrics={"run_minutes": facts.get("run_minutes"), "retry_times": a.get("retry_times")}))
         complete: dict[tuple[str, str, int | None], list[Observation]] = {}

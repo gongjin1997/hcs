@@ -318,6 +318,8 @@ def test_platform_notify_failed_and_heartbeat(world, mem_db):
 
 
 def test_platform_status_api(client, admin, tenant_ids):
+    # 此场景验证已启用任务的失败聚合；新库的 MRS 原生任务默认关闭。
+    assert client.put("/api/v1/system/tasks/mrs_job_status", headers=admin, json={"enabled": True}).status_code == 200
     d = client.get("/api/v1/system/platform", headers=admin).json()["data"]
     assert d["version"] == "0.4.0" and {w["name"] for w in d["workers"]} == {"scheduler", "notifier"}
     assert {"sent_24h", "failed_24h", "pending", "retrying", "last_sent_at"} <= set(d["outbox"])

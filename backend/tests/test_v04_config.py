@@ -61,7 +61,7 @@ def test_collect_switch_api(client, admin, tenant_ids):
     b = tenant_ids["tenant-b"]
     data = client.get("/api/v1/system/collect-switches", headers=admin).json()["data"]
     types = {t["code"]: t for t in data["types"]}
-    assert len(types) == len(collect_switch.SWITCH_TYPES) == 15 and data["global_editable"] is True
+    assert len(types) == len(collect_switch.SWITCH_TYPES) == 16 and data["global_editable"] is True
     dgc = types["dgc_realtime_job"]["tenants"][str(b)]
     assert (dgc["setting"], dgc["effective"]) == (False, False) and types["dgc_realtime_job"]["global"] is True
     assert types["dcs_instance"]["tenants"][str(b)] == {"setting": None, "effective": True, "resources": 2,

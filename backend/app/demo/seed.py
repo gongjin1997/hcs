@@ -28,6 +28,7 @@ from app.metrics.ecs_readings import EcsReading, EcsReadingsResult, ecs_source
 from app.models import (
     AlarmEvent,
     AlarmEventLog,
+    CollectSwitch,
     ContactGroup,
     HcsAccount,
     HcsProject,
@@ -134,6 +135,16 @@ def _tenants(db: Session) -> dict[str, HcsAccount]:
             db.add(HcsProject(account_id=acc.id, region_id=mt.REGION, project_id=t["project_id"],
                               project_name=t["project_name"], external_domain=mt.EXTERNAL_DOMAIN, env="PROD",
                               workspaces=list(t["workspaces"]), enabled=True))
+            # 显式本地演示授权：全局新装默认仍关闭；只为新建 Mock 租户开启其声明具备的 MRS 来源。
+            # 旧演示租户或人工采集选择不覆盖，生产 bootstrap 不走这里。
+            if get_settings().env != "prod":
+                approved = {"mrs_cluster": "mrs" in t["services"], "mrs_job": "mrs" in t["services"],
+                            "dgc_mrs_node": "dataarts" in t["services"] and bool(t["workspaces"])}
+                for kind, enabled in approved.items():
+                    if db.scalar(select(CollectSwitch).where(CollectSwitch.tenant_id == acc.id,
+                                                            CollectSwitch.resource_type == kind)) is None:
+                        db.add(CollectSwitch(tenant_id=acc.id, resource_type=kind, enabled=enabled,
+                                             updated_by="demo:mrs-mock-opt-in"))
         out[t["code"]] = acc
     db.flush()
     return out
@@ -416,7 +427,7 @@ def seed_demo(db: Session) -> bool:
 
     _ecs_rounds(db, http, targets, now)
     for code, times in (("dgc_realtime_status", 2), ("dgc_batch_instance", 1), ("mrs_cluster_status", 2),
-                        ("mrs_job_status", 1), ("gaussdb_status", 3), ("dcs_status", 3)):
+                        ("mrs_job_status", 1), ("dgc_mrs_node_status", 1), ("gaussdb_status", 3), ("dcs_status", 3)):
         _run(db, http, targets, code, times)
     _run(db, http, targets, "cce_pod_events")
     _backdate_probe(db, probe, 18, utcnow())

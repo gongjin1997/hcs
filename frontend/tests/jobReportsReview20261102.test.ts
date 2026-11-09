@@ -23,11 +23,13 @@ describe('PDF 作业报表边界复核 20261102', () => {
     expect(detailText('retry_times', 1792886400000, 'mrs_job')).toBe('1792886400000')
   })
 
-  it('offers the DataArts node states as MRS panel filters and labels', () => {
-    expect(PANEL_CONFIG.mrs.statuses).toEqual(expect.arrayContaining(['WAITING', 'RUNNING', 'SUCCEEDED', 'FAILED', 'SKIPPED']))
-    expect(PANEL_CONFIG.mrs.statuses).not.toContain('QUEUED')
+  it('separates MRS native execution from DataArts node states and fields', () => {
+    expect(PANEL_CONFIG.mrs.statuses).toEqual(expect.arrayContaining(['NEW', 'SUBMITTED', 'RUNNING', 'SUCCEEDED', 'FAILED', 'FINISHED']))
+    expect(PANEL_CONFIG.mrs.statuses).toContain('NEW_SAVING')
+    expect(PANEL_CONFIG.mrs.statuses).not.toContain('SKIPPED')
     expect(JOB_STATUSES.SKIPPED?.label).toBe('已跳过')
-    expect(SOURCE_FACTS.mrs_job.fields).toEqual(expect.arrayContaining(['job_name', 'node_name', 'node_type', 'instance_id']))
+    expect(SOURCE_FACTS.mrs_job.fields).toEqual(expect.arrayContaining(['cluster', 'cluster_id', 'queue', 'job_id']))
+    expect(SOURCE_FACTS.dgc_mrs_node.fields).toEqual(expect.arrayContaining(['job_name', 'node_name', 'node_type', 'instance_id']))
   })
 
   it('shows the local 24h P90 and its sample provenance', () => {
@@ -41,7 +43,7 @@ describe('PDF 作业报表边界复核 20261102', () => {
 
   it('sends every supported report filter identically to list and export', async () => {
     const query = { keyword: ' same ', status: ['FAILED'], status_raw: ['fail'], engine: ' Flink ',
-      resource_type: 'dgc_batch_job', job_type: 'BATCH', project_ref: 11, lifecycle: 'ALL',
+      resource_type: 'dgc_batch_job', source: 'dataarts_instance', object_level: 'INSTANCE', job_type: 'BATCH', project_ref: 11, lifecycle: 'ALL',
       has_alarms: true, page: 3, page_size: 20 } as JobReportQuery
     const request = { signal: new AbortController().signal, tenantId: 1 }
     await fetchJobReport('batch', query, request)
@@ -50,6 +52,6 @@ describe('PDF 作业报表边界复核 20261102', () => {
     const exported = vi.mocked(download).mock.calls.at(-1)?.[1]
     const { page: _page, page_size: _size, ...filters } = list
     expect(exported).toEqual(filters)
-    expect(exported).toMatchObject({ project_ref: 11, lifecycle: 'ALL', has_alarms: true })
+    expect(exported).toMatchObject({ project_ref: 11, lifecycle: 'ALL', has_alarms: true, source: 'dataarts_instance', object_level: 'INSTANCE' })
   })
 })

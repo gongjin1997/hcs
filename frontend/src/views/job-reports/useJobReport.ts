@@ -1,7 +1,7 @@
 import { computed, onScopeDispose, shallowRef, watch } from 'vue'
 import type { JobPanel, JobReport, JobReportExporter, JobReportFetcher, JobReportQuery } from '../../types/job-reports'
 
-type Filters = Pick<JobReportQuery, 'keyword' | 'status' | 'engine'>
+type Filters = Pick<JobReportQuery, 'keyword' | 'status' | 'engine' | 'source' | 'object_level' | 'resource_type'>
 const emptyQuery = (): JobReportQuery => ({ keyword: '', status: [], engine: '', page: 1, page_size: 20 })
 const cloneQuery = (query: JobReportQuery): JobReportQuery => ({ ...query, status: [...(query.status ?? [])] })
 

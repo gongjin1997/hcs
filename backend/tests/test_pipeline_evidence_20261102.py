@@ -115,10 +115,10 @@ def test_node_duration_survives_unrelated_parent_status_change(mem_db):
 
 
 def test_execution_identity_change_resets_hits_even_if_state_is_unchanged(mem_db):
-    add_rule(mem_db, kind="mrs_job", check="job_status", when="node_status == 'waiting'")
-    context = ctx(task="mrs_job_status")
+    add_rule(mem_db, kind="dgc_mrs_node", check="job_status", when="node_status == 'waiting'")
+    context = ctx(task="dgc_mrs_node_status")
     for offset, execution in ((0, "one"), (1, "two")):
-        observation = Observation("mrs_job", "ws/job/node", "job", "job_status", {"node_status": "waiting"},
+        observation = Observation("dgc_mrs_node", "ws/job/node", "job", "job_status", {"node_status": "waiting"},
                                   status_raw="waiting", attrs={"instance_id": execution})
         pipeline.process_observations(mem_db, "mrs", [observation], context, NOW + timedelta(minutes=offset))
     assert mem_db.scalars(select(AlarmEvent)).all() == []
@@ -233,12 +233,12 @@ def test_global_cleanup_has_no_project(mem_db, monkeypatch):
 
 
 def test_unknown_source_cannot_recover_even_a_preserved_custom_rule(mem_db):
-    saved = add_rule(mem_db, kind="mrs_job", when="node_status == 'waiting' and status_duration_min > 15", count=1)
+    saved = add_rule(mem_db, kind="dgc_mrs_node", when="node_status == 'waiting' and status_duration_min > 15", count=1)
     saved.recover = {"when": "node_status != 'waiting'"}
     saved.updated_by = "operator"
     mem_db.commit()
-    context = ctx(task="mrs_job_status")
-    observation = Observation("mrs_job", "ws/job/node", "job", "job_status",
+    context = ctx(task="dgc_mrs_node_status")
+    observation = Observation("dgc_mrs_node", "ws/job/node", "job", "job_status",
                               {"node_status": "waiting", "status_duration_min": 20},
                               status_raw="waiting", attrs={"instance_id": "one"})
     pipeline.process_observations(mem_db, "mrs", [observation], context, NOW)

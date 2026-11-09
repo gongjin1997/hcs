@@ -8,6 +8,8 @@ const reportFilters = (query: JobReportQuery, tenantId: number | null) => ({
   status_raw: query.status_raw?.length ? [...query.status_raw] : undefined,
   engine: query.engine?.trim() || undefined,
   resource_type: query.resource_type,
+  source: query.source,
+  object_level: query.object_level,
   job_type: query.job_type,
   project_ref: query.project_ref,
   lifecycle: query.lifecycle,

@@ -123,7 +123,7 @@ def test_subjects_for_each_resource_family():
     assert subject_of("dcs_instance", "i-1", "redis", {}) == {"id": "i-1", "name": "redis"}
     assert subject_of("dgc_batch_job", "ws/j1", "j1", {"workspace": "ws"}) == {"workspace": "ws", "job": "j1"}
     assert subject_of("dgc_realtime_job", "j1", "j1", {"workspace": ""}) == {"workspace": "", "job": "j1"}
-    assert subject_of("mrs_job", "ws/j/n", "j / n", {"workspace": "ws", "job_name": "j", "node_name": "n"}) == {
+    assert subject_of("dgc_mrs_node", "ws/j/n", "j / n", {"workspace": "ws", "job_name": "j", "node_name": "n"}) == {
         "workspace": "ws", "job": "j", "node": "n"}
     assert subject_of("cce_cluster", "uid", "cce-a", {}) == {"cluster": ("uid", "cce-a")}
     workload = subject_of("cce_workload", "cid/ns1/ReplicaSet/web-5d", "ns1/web-5d",

@@ -17,6 +17,7 @@ from app.collectors.base import Observation, RunContext
 from app.collectors.dataarts import BATCH_STATES, REALTIME_STATES
 from app.collectors.gaussdb import NATIVE_STATES
 from app.collectors.mrs import CLUSTER_STATES, NODE_STATES
+from app.collectors.mrs_native import native_state_known
 from app.core.config import get_settings
 from app.metrics.dcs_samples import parse_observed_at
 from app.models import AlarmEvent, EvalState, InspectionTask, Resource
@@ -226,7 +227,9 @@ UNKNOWN_COUNTS = {("dcs_instance", "nodes"): "unknown_nodes", ("gaussdb_instance
 
 
 def state_known(observation: Observation) -> bool:
-    # 状态枚举均来自上传 PDF：DataArts 表 5-178 / 5-182、MRS 集群状态表；
+    if observation.resource_type == "mrs_job" and observation.attrs.get("source") != "dataarts_instance_detail":
+        return native_state_known(observation.facts)
+    # DataArts/集群状态枚举来自上传 PDF：DataArts 表 5-178 / 5-182、MRS 集群状态表；
     # DCS 节点状态见 DCS API 表 4-109，GaussDB 组件状态见 GaussDB API 表 4-80（由采集器统计未识别数）。
     unknown = UNKNOWN_COUNTS.get((observation.resource_type, observation.check_item))
     if unknown is not None:
@@ -236,7 +239,8 @@ def state_known(observation: Observation) -> bool:
         ("dgc_realtime_job", "node_status"): ("node_status", REALTIME_STATES),
         ("dgc_batch_job", "instance_status"): ("last_status", BATCH_STATES),
         ("mrs_cluster", "cluster_status"): ("cluster_state", CLUSTER_STATES),
-        ("mrs_job", "job_status"): ("node_status", NODE_STATES),
+        ("mrs_job", "job_status"): ("node_status", NODE_STATES),  # 仅旧来源快照兼容
+        ("dgc_mrs_node", "job_status"): ("node_status", NODE_STATES),
     }
     contract = checks.get((observation.resource_type, observation.check_item))
     if contract is None:
@@ -247,18 +251,20 @@ def state_known(observation: Observation) -> bool:
 
 
 # 一次执行的标识：标识变化即新一轮执行，状态持续时间与连续命中重新计算（流水线 upsert 共用）
-EXECUTION_ID_FIELDS = {"mrs_job": "instance_id", "dgc_batch_job": "instance_id"}
+EXECUTION_ID_FIELDS = {"mrs_job": "job_id", "dgc_mrs_node": "instance_id", "dgc_batch_job": "instance_id"}
 
 
 def execution_id(observation: Observation) -> str | None:
     field = EXECUTION_ID_FIELDS.get(observation.resource_type)
+    if observation.resource_type == "mrs_job" and observation.attrs.get("source") == "dataarts_instance_detail":
+        field = "instance_id"
     value = observation.attrs.get(field) if field else None
     return str(value) if type(value) is int or isinstance(value, str) and value.strip() else None
 
 
 def _state(observation: Observation) -> Any:
     keys = (("node_status",) if observation.sub_object else
-            ("last_status", "status", "cluster_state", "node_status"))
+            ("last_status", "status", "cluster_state", "node_status", "job_state", "job_result"))
     return next((observation.facts[key] for key in keys if observation.facts.get(key) is not None), None)
 
 

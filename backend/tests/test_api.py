@@ -26,7 +26,7 @@ def test_dashboard(client, admin, tenant_ids):
     active = client.get("/api/v1/alarms", params={"status_group": "active", "page_size": 200}, headers=admin).json()["data"]
     assert data["kpis"]["active_alarms"] == active["total"]
     assert data["kpis"]["p1"] == sum(row["severity"] == "P1" for row in active["items"])
-    assert data["kpis"]["resources"] == 97
+    assert data["kpis"]["resources"] == 104
     assert data["ledger"]["total"] == 183 and len(data["ledger"]["by_category"]) == 5
     tenants = {t["code"]: t for t in data["tenants"]}
     assert set(tenants) == {"tenant-a", "tenant-b"}

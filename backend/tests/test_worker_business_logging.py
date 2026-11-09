@@ -353,12 +353,15 @@ def test_dataarts_detail_failures_are_bounded_and_thread_context_reaches_http(lo
     def get(service, path, **kwargs):
         if path.endswith("/jobs"):
             return {"jobs": [{"name": f"job-{i}"} for i in range(9)], "total": 9}
+        if not path.endswith("/status"):
+            return {"name": path.rsplit("/", 1)[1], "processType": "REAL_TIME", "nodes": []}
         logging.getLogger("app.collectors.dataarts").debug("test_downstream_http")
         raise HcsError(503, "TEST.FAILURE", raw)
 
     context = RunContext(client=SimpleNamespace(get=get), account="logs", project_id="test-project", tenant_id=101)
     with log_context(run_id=18, request_id="thread-parent"):
-        assert dataarts.DataArtsRealtimeCollector().collect(context) == []
+        rows = dataarts.DataArtsRealtimeCollector().collect(context)
+        assert len(rows) == 9 and all(row.attrs["job_status"] is None for row in rows)
     assert len(context.errors) == 9
     traces = [row for row in logged if row.get("event") == "collection_partial_failure"]
     assert len(traces) == 5 and all("Traceback" in row["exc"] and row["run_id"] == 18 for row in traces)
@@ -371,8 +374,8 @@ def test_dataarts_detail_failures_are_bounded_and_thread_context_reaches_http(lo
 
 @pytest.mark.parametrize("collector,phase", [
     (dataarts.DataArtsRealtimeCollector, "job_list"),
-    (dataarts.DataArtsBatchCollector, "batch_instances"),
-    (mrs.MrsJobCollector, "mrs_job_instances"),
+    (dataarts.DataArtsBatchCollector, "batch_definitions"),
+    (mrs.DataArtsMrsNodeCollector, "mrs_job_instances"),
 ])
 def test_partial_list_failures_keep_scope_and_trace(collector, phase, logged):
     raw = "unstructured-private-response"
@@ -403,7 +406,7 @@ def test_mrs_job_detail_failures_keep_scope_and_trace(logged):
     context = RunContext(client=SimpleNamespace(get=get), account="logs", project_id="test-project",
                          tenant_id=101, project_ref=201)
     with log_context(run_id=19):
-        assert mrs.MrsJobCollector().collect(context) == []
+        assert mrs.DataArtsMrsNodeCollector().collect(context) == []
     failure = next(row for row in logged if row.get("event") == "collection_partial_failure")
     assert failure["phase"] == "mrs_job_detail" and failure["run_id"] == 19 and failure["project_ref"] == 201
     assert failure["upstream_status"] == 503 and raw not in json.dumps(logged)

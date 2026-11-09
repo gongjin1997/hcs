@@ -11,7 +11,7 @@ from app.core.response import ApiResponse, ok
 from app.core.xlsx import filename_stamp, xlsx_response
 from app.models.base import utcnow
 from app.reports.job_excel import PANEL_TITLES, job_workbook
-from app.schemas.job_report import JobPanel, JobReportOut, JobResourceType
+from app.schemas.job_report import JobObjectLevel, JobPanel, JobReportOut, JobResourceType, JobSource
 from app.services.job_report_service import JobReportFilters, get_job_report
 
 router = APIRouter(prefix="/job-reports", tags=["作业专项报表"])
@@ -22,6 +22,8 @@ def job_report_filters(
     status: list[str] | None = Query(None, description="展示状态，多选"),
     status_raw: list[str] | None = Query(None, description="原始状态，多选"),
     resource_type: JobResourceType | None = None,
+    source: JobSource | None = None,
+    object_level: JobObjectLevel | None = None,
     engine: str | None = Query(None, max_length=128),
     job_type: str | None = Query(None, max_length=128),
     tenant_id: int | None = Query(None, ge=1),
@@ -30,6 +32,7 @@ def job_report_filters(
     has_alarms: bool | None = None,
 ) -> JobReportFilters:
     return JobReportFilters(keyword=keyword, status=status, status_raw=status_raw, resource_type=resource_type,
+                            source=source, object_level=object_level,
                             engine=engine, job_type=job_type, tenant_id=tenant_id, project_ref=project_ref,
                             lifecycle=lifecycle, has_alarms=has_alarms)
 

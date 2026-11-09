@@ -94,6 +94,7 @@ function load(file: 'TenantDialog' | 'TenantPanel' | 'TaskPanel'): Vue.Component
     if (name === '@/components/RecipientSelect.vue') return { default: stub('RecipientSelect') }
     if (name === '@/views/ecs/EcsPolicyDialog.vue') return { default: stub('EcsPolicyDialog') }
     if (name === './SmsTenantDialog.vue') return { default: stub('SmsTenantDialog') }
+    if (name === './JobSelectionDialog.vue') return { default: stub('JobSelectionDialog') }
     if (!(name in dependencies)) throw new Error(`Unexpected dependency ${name}`)
     return dependencies[name]
   }, exports)

@@ -47,6 +47,8 @@ def test_unknown_dataarts_node_state_reports_contract_drift_without_losing_known
         assert kwargs["headers"] == {"workspace": "synthetic-workspace"}
         if path == "/v1/{project_id}/jobs":
             return {"total": 1, "jobs": [{"name": "stream", "jobType": "REAL_TIME"}]}
+        if path == "/v1/{project_id}/jobs/stream":
+            return {"name": "stream", "processType": "REAL_TIME", "nodes": []}
         assert path == "/v1/{project_id}/jobs/stream/status"
         return {"name": "stream", "status": "NORMAL", "nodes": [
             {"name": "known", "status": "EXCEPTION"}, {"name": "unknown", "status": unknown}]}
@@ -90,6 +92,8 @@ def test_http_success_with_invalid_status_does_not_become_a_successful_inspectio
         assert request.headers["workspace"] == "synthetic-workspace"
         if request.url.path == "/v1/synthetic-project/jobs":
             return httpx.Response(200, json={"total": 1, "jobs": [{"name": "stream", "jobType": "REAL_TIME"}]})
+        if request.url.path == "/v1/synthetic-project/jobs/stream":
+            return httpx.Response(200, json={"name": "stream", "processType": "REAL_TIME", "nodes": []})
         assert request.url.path == "/v1/synthetic-project/jobs/stream/status"
         return httpx.Response(200, json={"name": "stream", "status": "NORMAL", "nodes": [
             {"name": "unknown", "status": "RUNNING"}]})

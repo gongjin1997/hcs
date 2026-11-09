@@ -738,7 +738,9 @@ def _run_history(ctx: Ctx) -> None:
                 abnormal = sum(1 for s, e in spans.get((tid, svc), []) if s <= t < e)
             stats = dict(tpl.stats or {})
             if task == "ledger_sync":
-                stats = {k: {**v, "created": 0, "updated": 0, "deleted": 0} for k, v in stats.items()}
+                stats = {k: ({**v, "created": 0, "updated": 0, "deleted": 0}
+                                 if isinstance(v, dict) and any(key in v for key in ("created", "updated", "deleted"))
+                                 else v) for k, v in stats.items()}
                 for at, rtype, kind in changes.get(tid, []):
                     if prev_t < at <= t and rtype in stats:
                         key = {"CREATED": "created", "DELETED": "deleted"}.get(kind, "updated")

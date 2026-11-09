@@ -52,6 +52,7 @@ class ContractClient:
         self.instances = [instance()] if instances is None else instances
         self.statuses, self.page_size, self.list_body = statuses or {}, page_size, list_body
         self.calls = []
+        self.definition_types = {}
 
     def get(self, service, path, **kwargs):
         assert service == "dataarts"
@@ -62,8 +63,12 @@ class ContractClient:
             params = kwargs["params"]
             assert params["limit"] == 100 and isinstance(params["offset"], int) and params["offset"] >= 0
             if path.endswith("/jobs"):
-                assert set(params) == {"jobType", "limit", "offset"} and params["jobType"] == "REAL_TIME"
-                key, rows = "jobs", self.jobs
+                assert set(params) == {"jobType", "limit", "offset"} and params["jobType"] in ("REAL_TIME", "BATCH")
+                rows = self.jobs if params["jobType"] == "REAL_TIME" else [
+                    {"name": name, "jobType": "BATCH"} for name in dict.fromkeys(
+                        i["jobName"] for i in self.instances if isinstance(i.get("jobName"), str) and i["jobName"])]
+                key = "jobs"
+                self.definition_types.update({row["name"]: params["jobType"] for row in rows})
             else:
                 assert set(params) == {"minPlanTime", "maxPlanTime", "limit", "offset"}
                 assert params["maxPlanTime"] == NOW and params["minPlanTime"] == NOW - 24 * 3600 * 1000
@@ -73,6 +78,10 @@ class ContractClient:
                 return deepcopy(self.list_body)
             start = params["offset"] * self.page_size
             return {"total": len(rows), key: deepcopy(rows[start:start + self.page_size])}
+        for row in [*self.jobs, *[{"name": i["jobName"], "jobType": "BATCH"} for i in self.instances
+                                  if isinstance(i.get("jobName"), str) and i["jobName"]]]:
+            if path == f"/v1/{{project_id}}/jobs/{quote(row['name'], safe='')}":
+                return {"name": row["name"], "processType": self.definition_types.get(row["name"], row["jobType"]), "nodes": []}
         for row in self.jobs:
             if path == f"/v1/{{project_id}}/jobs/{quote(row['name'], safe='')}/status":
                 assert set(kwargs) == {"headers"}
@@ -120,8 +129,8 @@ def test_workspace_is_on_every_request_and_duplicate_config_does_not_repeat_coll
     ctx = context(client, ["ws-a", "ws-a", "ws-b"])
     rows = dataarts.DataArtsRealtimeCollector().collect(ctx)
     assert {r.resource_id for r in rows} == {"ws-a/folder/中文 ?x=1", "ws-b/folder/中文 ?x=1"}
-    assert len(client.calls) == 4
-    assert [kw["headers"]["workspace"] for _p, kw in client.calls] == ["ws-a", "ws-a", "ws-b", "ws-b"]
+    assert len(client.calls) == 6
+    assert [kw["headers"]["workspace"] for _p, kw in client.calls] == ["ws-a", "ws-a", "ws-a", "ws-b", "ws-b", "ws-b"]
 
 
 def test_default_workspace_header_is_omitted_as_documented():
@@ -144,7 +153,8 @@ def test_bad_or_incomplete_job_pages_cannot_become_successful_empty_snapshot(bod
                                  {"nodes": [{"name": "same"}, {"name": "same"}]}, {"error_code": "DLF.0100"}])
 def test_invalid_job_status_is_partial_without_fabricated_health(body):
     ctx = context(ContractClient(statuses={"job_sms": body}))
-    assert dataarts.DataArtsRealtimeCollector().collect(ctx) == [] and len(ctx.errors) == 1
+    rows = dataarts.DataArtsRealtimeCollector().collect(ctx)
+    assert len(rows) == 1 and rows[0].attrs["job_status"] is None and len(ctx.errors) == 1
 
 
 def test_status_failure_keeps_other_jobs_and_does_not_publish_failure_as_stopped():
@@ -152,7 +162,8 @@ def test_status_failure_keeps_other_jobs_and_does_not_publish_failure_as_stopped
         "healthy": status("healthy", nodes=[]), "unreadable": HcsError(403, "DLF.DENIED", "synthetic denied")})
     ctx = context(client)
     rows = dataarts.DataArtsRealtimeCollector().collect(ctx)
-    assert [r.name for r in rows] == ["healthy"] and rows[0].metrics["bad_nodes"] == 0
+    assert [r.name for r in rows] == ["healthy", "unreadable"] and rows[0].metrics["bad_nodes"] == 0
+    assert rows[1].attrs["job_status"] is None and rows[1].facts == {}
     assert len(ctx.errors) == 1
 
 
@@ -186,7 +197,7 @@ def test_documented_batch_example_uses_timestamps_not_ambiguous_execute_time_or_
     assert not ctx.errors and len(rows) == 1
     assert rows[0].facts == {"last_status": "success", "run_minutes": 0.3}
     assert rows[0].attrs["instance_type"] == 2 and rows[0].attrs["instance_id"] == 34765
-    assert rows[0].attrs["job_type"] is None and rows[0].attrs["engine"] is None
+    assert rows[0].attrs["job_type"] == "BATCH" and rows[0].attrs["engine"] is None
 
 
 @pytest.mark.parametrize("state,start,end,expected", [
@@ -220,14 +231,16 @@ def test_latest_planned_instance_tie_uses_actual_submission_and_keeps_workspace_
                                        ("instanceId", True), ("status", {})])
 def test_incomplete_batch_identity_cannot_choose_an_old_healthy_instance(field, value):
     ctx = context(ContractClient(instances=[instance(), instance(**{"instanceId": 2, field: value})]))
-    assert dataarts.DataArtsBatchCollector().collect(ctx) == [] and ctx.errors
+    rows = dataarts.DataArtsBatchCollector().collect(ctx)
+    assert rows and all(r.attrs["instance_status"] is None for r in rows) and ctx.errors
 
 
 def test_duplicate_job_or_instance_pages_are_rejected_not_double_counted():
     rt = context(ContractClient(jobs=[job(), job()]))
     batch = context(ContractClient(instances=[instance(), instance()]))
     assert dataarts.DataArtsRealtimeCollector().collect(rt) == [] and rt.errors
-    assert dataarts.DataArtsBatchCollector().collect(batch) == [] and batch.errors
+    rows = dataarts.DataArtsBatchCollector().collect(batch)
+    assert rows and all(r.attrs["instance_status"] is None for r in rows) and batch.errors
 
 
 @pytest.mark.parametrize("priority,expected", [(None, None), (0, 0), (1, 1), (2, 2),
@@ -264,6 +277,9 @@ def test_actual_http_request_carries_workspace_correct_query_and_percent_encoded
         if request.url.path == "/v1/synthetic-project/jobs":
             assert dict(request.url.params) == {"offset": "0", "limit": "100", "jobType": "REAL_TIME"}
             return httpx.Response(200, json={"total": 1, "jobs": [job(name)]})
+        if request.url.raw_path.decode() == f"/v1/synthetic-project/jobs/{quote(name, safe='')}":
+            assert not request.url.query
+            return httpx.Response(200, json={"name": name, "processType": "REAL_TIME", "nodes": []})
         assert request.url.raw_path.decode() == f"/v1/synthetic-project/jobs/{quote(name, safe='')}/status"
         assert not request.url.query
         return httpx.Response(200, json=status(name, nodes=[]))
@@ -273,7 +289,7 @@ def test_actual_http_request_carries_workspace_correct_query_and_percent_encoded
                             "synthetic-project", qps={"dataarts": 1000})
         ctx = context(current)
         assert dataarts.DataArtsRealtimeCollector().collect(ctx)[0].facts["status"] == "NORMAL"
-    assert len(requests) == 2 and not ctx.errors
+    assert len(requests) == 3 and not ctx.errors
 
 
 def test_actual_batch_http_request_uses_collection_detail_path_and_millisecond_window(monkeypatch):
@@ -284,8 +300,13 @@ def test_actual_batch_http_request_uses_collection_detail_path_and_millisecond_w
 
     def respond(request):
         requests.append(request)
-        assert request.method == "GET" and request.url.path == "/v1/synthetic-project/jobs/instances/detail"
-        assert request.headers["workspace"] == "workspace-one"
+        assert request.method == "GET" and request.headers["workspace"] == "workspace-one"
+        if request.url.path == "/v1/synthetic-project/jobs":
+            assert dict(request.url.params) == {"jobType": "BATCH", "limit": "100", "offset": "0"}
+            return httpx.Response(200, json={"total": 1, "jobs": [{"name": "job_batch", "jobType": "BATCH"}]})
+        if request.url.path == "/v1/synthetic-project/jobs/job_batch":
+            return httpx.Response(200, json={"name": "job_batch", "processType": "BATCH", "nodes": []})
+        assert request.url.path == "/v1/synthetic-project/jobs/instances/detail"
         assert dict(request.url.params) == {"offset": "0", "limit": "100",
                                             "minPlanTime": str(NOW - 24 * 3600 * 1000), "maxPlanTime": str(NOW)}
         return httpx.Response(200, json={"total": 1, "instances": [instance()]})
@@ -296,7 +317,7 @@ def test_actual_batch_http_request_uses_collection_detail_path_and_millisecond_w
                             "synthetic-project", qps={"dataarts": 1000})
         ctx = context(current)
         assert dataarts.DataArtsBatchCollector().collect(ctx)[0].metrics["run_minutes"] == 0.3
-    assert len(requests) == 1 and not ctx.errors
+    assert len(requests) == 3 and not ctx.errors
 
 
 @pytest.mark.parametrize("failed_path,error_code", [("/jobs", "DLF.3051"), ("/jobs/job_sms/status", "DLF.0100")])
@@ -313,6 +334,8 @@ def test_official_http_400_error_is_not_an_empty_success_and_raw_message_is_not_
         assert request.method == "GET" and request.headers["workspace"] == "workspace-one"
         if request.url.path == "/v1/synthetic-project" + failed_path:
             return httpx.Response(400, json={"error_code": error_code, "error_msg": raw_message})
+        if request.url.path == "/v1/synthetic-project/jobs/job_sms":
+            return httpx.Response(200, json={"name": "job_sms", "processType": "REAL_TIME", "nodes": []})
         assert request.url.path == "/v1/synthetic-project/jobs"
         return httpx.Response(200, json={"total": 1, "jobs": [job()]})
 
@@ -321,14 +344,15 @@ def test_official_http_400_error_is_not_an_empty_success_and_raw_message_is_not_
                             EndpointResolver({"dataarts": "https://dataarts.invalid"}, "test", "invalid"),
                             "synthetic-project", qps={"dataarts": 1000})
         ctx = context(current)
-        assert dataarts.DataArtsRealtimeCollector().collect(ctx) == []
+        rows = dataarts.DataArtsRealtimeCollector().collect(ctx)
+        assert rows == [] if failed_path == "/jobs" else len(rows) == 1 and rows[0].facts == {}
     assert len(ctx.errors) == 1 and error_code in ctx.errors[0]
     assert raw_message not in str(ctx.errors) and raw_message not in caplog.text
-    assert len(requests) == (1 if failed_path == "/jobs" else 2)
+    assert len(requests) == (1 if failed_path == "/jobs" else 3)
 
 
 @pytest.mark.parametrize("kind,task_code,metric,per_run_calls", [
-    ("realtime", "dgc_realtime_status", "bad_nodes", 2), ("batch", "dgc_batch_instance", "run_minutes", 1)])
+    ("realtime", "dgc_realtime_status", "bad_nodes", 3), ("batch", "dgc_batch_instance", "run_minutes", 3)])
 def test_real_pipeline_writes_unknown_current_measurement_over_prior_value_and_counts_actual_requests(
         mem_db, monkeypatch, kind, task_code, metric, per_run_calls):
     monkeypatch.setattr(ratelimit, "_shared", {})
@@ -343,8 +367,11 @@ def test_real_pipeline_writes_unknown_current_measurement_over_prior_value_and_c
         requests.append(request)
         assert request.method == "GET" and request.headers["workspace"] == "workspace-one"
         if request.url.path == "/v1/synthetic-project/jobs":
-            assert kind == "realtime"
-            return httpx.Response(200, json={"total": 1, "jobs": [job()]})
+            rows = [job()] if kind == "realtime" else [{"name": "job_batch", "jobType": "BATCH"}]
+            return httpx.Response(200, json={"total": 1, "jobs": rows})
+        if request.url.path in ("/v1/synthetic-project/jobs/job_sms", "/v1/synthetic-project/jobs/job_batch"):
+            return httpx.Response(200, json={"name": request.url.path.rsplit("/", 1)[1],
+                                           "processType": "REAL_TIME" if kind == "realtime" else "BATCH", "nodes": []})
         if request.url.path == "/v1/synthetic-project/jobs/job_sms/status":
             assert kind == "realtime"
             return httpx.Response(200, json=status(nodes=[]) if phase[0] == 0 else status())
