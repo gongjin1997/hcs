@@ -29,7 +29,7 @@
 - 资源查询的只读入口为 `GET /rest/tenant-resource/v1/tenant/resources/CLOUD_VM`，分页使用 URL query 参数 `limit`、`offset`；响应以 `nativeId` 对应输入 ECS ID，并要求 `projectId` 完全等于当前项目，性能请求的 `obj_ids` 使用唯一 `resId`。资源查询权限为“查询实例详情”。
 - 性能查询为 `POST /rest/performance/v1/data-svc/history-data/action/query`，请求 `obj_ids` 使用资源 `resId`，不是 ECS `nativeId`；每次对象数乘指标数不超过 100。文档接受 `IAM_OP` 或 `SSO` token。普通租户 IAM token 不能按文档推定为 `IAM_OP`。
 - 推荐的三方运维用户认证为 `PUT /rest/plat/smapp/v1/sessions`，请求 `grantType=password`、`userName`、`value`，可选 `organizationName`；响应 `accessSession` 用于后续 `x-auth-token`，非 GET 请求携带 `roarand`。不转发现有 HCS IAM 凭据。
-- 资源模型将 `ownerId` 描述为“来源系统ID”、`ownerType` 描述为“系统类型”，但没有给出其取值到性能模型 `Source System Type=FusionSphere OpenStack` 的映射。实现仅把两字段非空作为来源元数据存在性检查，不猜测二者取值。现网来源仍需独立确认。
+- 资源模型将 `ownerId` 描述为“来源系统ID”、`ownerType` 描述为“系统类型”，但没有给出其取值到性能模型 `Source System Type=FusionSphere OpenStack` 的映射。当前实现要求 `ownerId` 为非空字符串或整数；`ownerType` 可以缺省，出现时须为字符串。它不据此确认来源就是 FusionSphere OpenStack，现网来源仍需独立确认。
 - `memoryUsage`、`diskUsage` 的正式名称与单位支持展示其使用率；文档没有定义分母、来宾/挂载点聚合口径或已用字节。磁盘 I/O、I/O 利用率不是磁盘空间使用量。`boot_time` 没有本来源指标映射。
 
 以上是文档核验及实现约束，不代表已连接或验证生产环境。实际启用前仍需确认 endpoint、独立凭据、权限、项目映射、来源系统及真实采样。
