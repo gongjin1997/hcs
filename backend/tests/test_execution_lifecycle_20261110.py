@@ -84,16 +84,22 @@ def test_deadline_and_queue_expiry_have_distinct_reasons(mem_db, queued):
     assert row.status == "TIMEOUT" and row.error_code == "LOCAL.DEADLINE"
 
 
-def test_legacy_recovery_does_not_touch_managed_or_completed_records(mem_db, queued):
+def test_legacy_recovery_dispatches_one_watch_for_each_stale_run(mem_db, queued, monkeypatch):
+    from app.services import platform_watch
+
     now = utcnow()
     old = InspectionRun(task_code="mrs_job_status", status="RUNNING", started_at=now - timedelta(days=1))
     done = InspectionRun(task_code="mrs_job_status", status="SUCCESS", started_at=now - timedelta(days=1), finished_at=now)
     mem_db.add_all([old, done])
     mem_db.commit()
+    observed = []
+    monkeypatch.setattr(platform_watch, "_on_run", lambda db, run: observed.append((db, run.id, run.status)))
     queue.claim_next(mem_db, "live-worker")
     assert queue.reap(mem_db) == 0
     assert queue.reap(mem_db, legacy_before=now) == 1
     assert old.status == "INTERRUPTED" and done.status == "SUCCESS" and queued.status == "RUNNING"
+    assert observed == [(mem_db, old.id, "INTERRUPTED")]
+    mem_db.commit()
 
 
 @pytest.mark.parametrize("stop", ["cancel", "lease", "owner", "deadline", "terminal"])

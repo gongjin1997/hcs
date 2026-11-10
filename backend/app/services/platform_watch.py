@@ -333,8 +333,19 @@ def _tenant_label(db: Session, tenant_id: int | None) -> str:
     return (t.short_name or t.name) if t else f"租户#{tenant_id}"
 
 
-def on_run(db: Session, run: InspectionRun) -> None:
+def on_run(db: Session, run: InspectionRun, *, durable: bool = False) -> None:
     """每次任务运行结束后调用（巡检 / 台账同步 / 数据清理）。任何异常只记日志，不影响任务本身。"""
+    if durable:
+        # Durable execution owns the terminal transition and its transaction.
+        # Isolate alert failures in a savepoint without discarding that result.
+        try:
+            db.flush()
+            with db.begin_nested():
+                _on_run(db, run)
+                db.flush()
+        except Exception:  # noqa: BLE001
+            log.exception("platform watch failed for durable run %s", run.id)
+        return
     # Durable lifecycle registered the terminal outcome before commit. The old
     # pipeline/ledger callback must not emit the same platform outcome again.
     try:

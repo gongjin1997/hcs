@@ -136,21 +136,49 @@ def test_savepoint_rollback_discards_only_its_own_deferred_watches(mem_db, monke
     assert observed == [parent.id]
 
 
-def test_watch_failure_cannot_rollback_the_committed_execution(mem_db, monkeypatch):
+def test_watch_failure_cannot_rollback_the_durable_terminal_transaction(mem_db, monkeypatch):
+    from app.services import task_execution
+
     row = watch_run(mem_db, durable=True)
+    row.status, row.finished_at = "RUNNING", None
+    execution = mem_db.scalar(select(TaskExecution).where(TaskExecution.run_id == row.id))
+    execution.status, execution.finished_at = "RUNNING", None
     row_id = row.id
 
     def fail_watch(*_):
         raise RuntimeError("synthetic platform alert failure")
 
     monkeypatch.setattr(platform_watch, "_on_run", fail_watch)
-    platform_watch.defer_on_run(mem_db, row.id)
+    task_execution.finish(mem_db, execution, "FAILED", "synthetic execution failure")
+    assert row.status == execution.status == "FAILED"
     mem_db.commit()
     mem_db.expire_all()
     assert mem_db.get(InspectionRun, row_id).status == "FAILED"
     assert mem_db.scalar(select(TaskExecution).where(TaskExecution.run_id == row_id)).status == "FAILED"
-    # The callback is drained on the committed transaction, so a later commit does not retry it.
     monkeypatch.setattr(platform_watch, "_on_run", lambda *_: pytest.fail("duplicate watch dispatch"))
+    task_execution.finish(mem_db, mem_db.scalar(select(TaskExecution).where(TaskExecution.run_id == row_id)),
+                          "INTERRUPTED", "late duplicate result")
+    mem_db.commit()
+
+
+def test_durable_finish_dispatches_watch_once_in_the_terminal_transaction(mem_db, monkeypatch):
+    from app.services import task_execution
+
+    run = watch_run(mem_db, status="RUNNING", durable=True)
+    run.finished_at = None
+    execution = mem_db.scalar(select(TaskExecution).where(TaskExecution.run_id == run.id))
+    execution.finished_at = None
+    mem_db.commit()
+    observed = []
+    monkeypatch.setattr(platform_watch, "_on_run", lambda db, current: observed.append((db, current.id, current.status)))
+
+    task_execution.finish(mem_db, execution, "INTERRUPTED", "synthetic worker interrupted")
+
+    assert observed == [(mem_db, run.id, "INTERRUPTED")]
+    assert mem_db.scalar(select(InspectionRun.status).where(InspectionRun.id == run.id)) == "INTERRUPTED"
+    platform_watch.on_run(mem_db, run)  # Legacy pipeline/ledger completion hook is suppressed.
+    task_execution.finish(mem_db, execution, "FAILED", "late duplicate result")
+    assert len(observed) == 1
     mem_db.commit()
 
 
@@ -184,12 +212,10 @@ def test_real_durable_failure_alert_is_emitted_after_terminal_commit_only_once(m
     row.finished_at = None
     mem_db.commit()
     task_execution.finish(mem_db, row, "INTERRUPTED", "synthetic worker interrupted")
-    platform_watch.defer_on_run(mem_db, run.id)
-    assert mem_db.scalar(select(AlarmEvent).where(AlarmEvent.rule_id == "R-PLAT-001")) is None
-    mem_db.commit()
     alarm = mem_db.scalar(select(AlarmEvent).where(AlarmEvent.rule_id == "R-PLAT-001"))
     assert alarm is not None and alarm.status == "FIRING" and alarm.detail["last_failure_run_id"] == run.id
     original_count = alarm.count
+    mem_db.commit()
     # The old successful return path still invokes on_run after durable finish; it must be a no-op.
     platform_watch.on_run(mem_db, run)
     task_execution.finish(mem_db, row, "FAILED", "late duplicate result")
