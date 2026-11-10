@@ -177,6 +177,7 @@ def test_detail_whitelists_progress_history_and_snapshot_fields(mem_db, executio
     row.status, row.owner_token, row.worker_id = "RUNNING", "never-return-owner", "private-worker"
     row.started_at = utcnow() - timedelta(seconds=17)
     row.heartbeat_at, row.deadline_at = utcnow(), utcnow() + timedelta(seconds=43)
+    row.lease_expires_at = utcnow() + timedelta(seconds=20)
     row.progress = {"phase": "collect", "phase_label": "采集资源", "current": 2, "total": 8, "unit": "集群",
                     "cluster_id": "cluster-a", "query": "active_RUNNING",
                     "message": "page processed", "owner_token": "never-return-owner", "params": {"secret": "hidden"}}
@@ -192,6 +193,7 @@ def test_detail_whitelists_progress_history_and_snapshot_fields(mem_db, executio
     assert data["phase_label"] == "采集资源" and data["current"] == 2 and data["total"] == 8
     assert data["elapsed_sec"] >= 17 and data["api_calls"] == 4 and data["resource_total"] == 9
     assert data["abnormal_total"] == 1 and data["cancel_requested"] is True
+    assert data["lease_expired"] is False
     assert data["progress"]["cluster_id"] == "cluster-a" and data["progress"]["query"] == "active_RUNNING"
     for value in ("never-return-owner", "private-worker", "hidden-value", "X-Auth-Token"):
         assert value not in response.text
@@ -199,6 +201,23 @@ def test_detail_whitelists_progress_history_and_snapshot_fields(mem_db, executio
     assert set(data["history"][0]) == {"phase", "phase_label", "message"}
     assert data["history"][1]["cluster_id"] == "cluster-a" and data["history"][1]["query"] == "active_RUNNING"
     assert data["options"] == {"timeout_sec": 60, "p90_min_samples": None, "mrs": None}
+
+
+def test_running_detail_reports_expired_lease_without_inventing_terminal_status(mem_db, execution_api):
+    client, _ = execution_api
+    enqueue(mem_db)
+    row = task_execution.claim_next(mem_db, "worker-test")
+    assert row is not None and row.status == "RUNNING"
+    row.heartbeat_at = utcnow() - timedelta(seconds=31)
+    row.lease_expires_at = utcnow() - timedelta(seconds=1)
+    mem_db.commit()
+
+    response = client.get(f"/api/v1/system/executions/{row.id}")
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["status"] == "RUNNING" and data["lease_expired"] is True
+    assert "lease_expires_at" not in data and "owner_token" not in data
 
 
 def test_mrs_execution_detail_exposes_only_the_enqueue_time_option_whitelist(mem_db, execution_api):

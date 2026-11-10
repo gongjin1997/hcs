@@ -61,6 +61,7 @@ export interface TaskExecution {
   started_at: string | null
   finished_at: string | null
   heartbeat_at: string | null
+  lease_expired?: boolean
   deadline_at: string | null
   elapsed_sec: number
   timeout_sec: number

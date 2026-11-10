@@ -75,6 +75,7 @@ class ExecutionOut(BaseModel):
     started_at: datetime | None = None
     finished_at: datetime | None = None
     heartbeat_at: datetime | None = None
+    lease_expired: bool = False
     deadline_at: datetime | None = None
     elapsed_sec: float
     timeout_sec: int

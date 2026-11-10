@@ -35,6 +35,7 @@ const progressText = computed(() => {
     <el-progress v-if="percentage !== null" :percentage="percentage" :stroke-width="6" :show-text="false" :aria-label="`后端阶段进度 ${progressText}`" />
     <p v-if="execution.message" class="execution-message text-3">{{ execution.message }}</p>
     <p v-if="progressContext" class="execution-context text-3">{{ progressContext }}</p>
+    <p v-if="execution.status === 'RUNNING' && execution.lease_expired === true" class="execution-lease-warning" role="status">执行器租约已到期；后端状态尚未确认，当前仍显示运行中。</p>
     <dl class="execution-metrics"><div><dt>目标对象</dt><dd>{{ executionCount(execution.resource_total) }}</dd></div><div><dt>API 次数</dt><dd>{{ executionCount(execution.api_calls) }}</dd></div><div><dt>巡检耗时</dt><dd>{{ executionSeconds(execution.elapsed_sec) }}</dd></div></dl>
     <p class="execution-heartbeat text-3">心跳 {{ execution.heartbeat_at ? fmtTime(execution.heartbeat_at) : '尚未上报' }}<span v-if="execution.status === 'QUEUED'"> · 入队 {{ fmtTime(execution.queued_at) }}</span></p>
     <p v-if="execution.error_summary" class="execution-error" role="status">{{ execution.error_summary }}</p>
@@ -53,7 +54,8 @@ const progressText = computed(() => {
 .execution-target { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; font-size: 12px; }
 .execution-phase { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin: 16px 0 8px; font-size: 12px; }
 .execution-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 16px 0 10px; dt { color: var(--hi-text-3); font-size: 12px; } dd { margin: 4px 0 0; font-size: 14px; font-weight: 600; overflow-wrap: anywhere; } }
-.execution-message, .execution-context, .execution-heartbeat, .execution-error, .execution-cancel { margin: 8px 0 0; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.execution-message, .execution-context, .execution-heartbeat, .execution-error, .execution-cancel, .execution-lease-warning { margin: 8px 0 0; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
 .execution-error { color: var(--el-color-danger); }
+.execution-lease-warning { color: var(--el-color-warning-dark, var(--el-color-warning)); }
 .execution-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; .el-button { margin-left: 0; } }
 </style>

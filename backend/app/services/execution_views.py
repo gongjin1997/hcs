@@ -166,7 +166,10 @@ def snapshots(db: Session, executions: Sequence[TaskExecution], *, now: datetime
                 "total": progress.get("total"), "unit": progress.get("unit"), "message": progress.get("message"),
                 "created_at": execution.created_at, "queued_at": execution.created_at,
                 "started_at": execution.started_at, "finished_at": execution.finished_at,
-                "heartbeat_at": execution.heartbeat_at, "deadline_at": execution.deadline_at,
+                "heartbeat_at": execution.heartbeat_at,
+                "lease_expired": execution.status == "RUNNING" and
+                                 (execution.lease_expires_at is None or execution.lease_expires_at <= now),
+                "deadline_at": execution.deadline_at,
                 "elapsed_sec": round(elapsed, 3), "timeout_sec": options["timeout_sec"], "options": options,
                 "cancel_requested": execution.id in cancelled, "api_calls": run.api_calls if run else 0,
                 "resource_total": run.resource_total if run else 0, "abnormal_total": run.abnormal_total if run else 0,

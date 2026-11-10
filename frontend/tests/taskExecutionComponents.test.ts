@@ -41,6 +41,14 @@ describe('执行实例的真实展示与操作', () => {
     expect(textOf(view.root)).not.toContain('仅停止本地巡检')
   })
 
+  it('后端标记lease已过期时解释RUNNING状态，但不伪造终态或开放重试', () => {
+    const view = card(execution({ lease_expired: true }))
+    expect(textOf(view.root)).toContain('RUNNING')
+    expect(textOf(view.root)).toContain('执行器租约已到期；后端状态尚未确认')
+    expect(textOf(view.root)).not.toContain('TIMEOUT')
+    expect(textOf(view.root)).not.toContain('新建重试')
+  })
+
   it('停止与重试事件独立，只有后台活跃状态允许停止', async () => {
     const onCancel = vi.fn(), onRetry = vi.fn()
     const view = card(execution(), { onCancel, onRetry })
