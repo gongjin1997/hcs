@@ -45,7 +45,7 @@ def allowed(name: str) -> bool:
     if path.name.endswith((".db", ".pem", ".key", ".crt", ".pyc")):
         return False
     return name in {"manifest.json", "requirements.txt", "constraints.txt", "backend", "backend/app", "backend/migrations",
-                    "backend/alembic.ini", "web", "wheels"} or name.startswith(
+                    "backend/alembic.ini", "docker-compose.code.yml", "web", "wheels"} or name.startswith(
                         ("backend/app/", "backend/migrations/", "web/", "wheels/"))
 
 

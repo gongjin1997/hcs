@@ -2,8 +2,9 @@
 """Build an offline source update for the existing ARM64 runtime (Python 3.12).
 
 Run on the build machine only. No image is built, saved, or exported. The target
-machine extracts the bundle and uses its existing Docker runtime image.
-The archive puts frontend/dist contents directly under web/ (web/index.html).
+machine extracts the bundle and uses its existing Docker runtime image. The
+archive puts frontend/dist contents directly under web/ (web/index.html) and
+includes the versioned Compose overlay for runtime settings shipped with code.
 """
 
 from __future__ import annotations
@@ -306,6 +307,7 @@ def build_bundle(
         _copy_tree(root / "backend/app", stage / "backend/app")
         _copy_tree(root / "backend/migrations", stage / "backend/migrations")
         (stage / "backend/alembic.ini").write_bytes(_read(root / "backend/alembic.ini"))
+        (stage / "docker-compose.code.yml").write_bytes(_read(root / "deploy/docker-compose.code.yml"))
         frontend = root / "frontend"
         _check_path(frontend)
         dist = frontend / "dist"

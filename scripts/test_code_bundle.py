@@ -40,6 +40,7 @@ class CodeBundleTests(unittest.TestCase):
             "backend/migrations/env.py": "# migration runner\n",
             "backend/migrations/versions/001_first.py": "# fixture migration\n",
             "backend/alembic.ini": "[alembic]\nscript_location = migrations\n",
+            "deploy/docker-compose.code.yml": "services:\n  scheduler:\n    stop_grace_period: 45s\n",
             "frontend/dist/index.html": "<html>fixture</html>\n",
             "frontend/dist/assets/index.js": "console.log('fixture');\n",
             "frontend/package.json": '{"scripts":{"build":"fixture-only"}}\n',
@@ -89,6 +90,7 @@ class CodeBundleTests(unittest.TestCase):
                 "backend/migrations/env.py",
                 "backend/migrations/versions/001_first.py",
                 "backend/alembic.ini",
+                "docker-compose.code.yml",
                 "web/index.html",
                 "web/assets/index.js",
                 "requirements.txt",
@@ -204,7 +206,7 @@ class CodeBundleTests(unittest.TestCase):
             self.build()
 
     def test_output_directory_symlink_rejected(self):
-        (self.root / "deploy").mkdir()
+        (self.root / "deploy").mkdir(exist_ok=True)
         outside = Path(self.temp.name) / "outside"
         outside.mkdir()
         (self.root / "deploy/dist").symlink_to(outside, target_is_directory=True)

@@ -78,6 +78,7 @@ class ComposeCompatTests(unittest.TestCase):
                 },
                 "scheduler": {
                     "image": "fixture/backend:local",
+                    "stop_grace_period": "45s",
                     "depends_on": {"api": {"condition": "service_healthy"}},
                 },
                 "web": {"image": "fixture/web:local", "depends_on": ["api", "redis"], "ports": ["18080:80"]},
@@ -135,6 +136,7 @@ class ComposeCompatTests(unittest.TestCase):
     def test_short_form_and_started_dependencies_preserved(self):
         self.document["services"]["scheduler"]["depends_on"]["redis"] = {"condition": "service_started"}
         result = self.convert()["services"]
+        self.assertEqual(result["scheduler"]["stop_grace_period"], "45s")
         for name in ("scheduler", "web"):
             self.assertEqual(result[name]["depends_on"], self.document["services"][name]["depends_on"])
 

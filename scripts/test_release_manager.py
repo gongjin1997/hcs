@@ -170,6 +170,14 @@ class ReleaseManagerTests(unittest.TestCase):
         self.assertEqual(self.invoke("check", release), (0, "", ""))
         self.run.assert_not_called()
 
+    def test_code_compose_overlay_is_allowed_and_installed(self):
+        overlay = b"services:\n  scheduler:\n    stop_grace_period: 45s\n"
+        package = self.package(files={**self.files, "docker-compose.code.yml": overlay})
+
+        self.assertEqual(manager.prepare(package, self.releases), "fixture-1")
+        self.assertEqual((self.releases / "fixture-1/docker-compose.code.yml").read_bytes(), overlay)
+        self.run.assert_not_called()
+
     def test_prepare_cli_prints_only_release_identifier(self):
         result, stdout, stderr = self.invoke("prepare", self.package(), self.releases)
         self.assertEqual((result, stdout, stderr), (0, "fixture-1\n", ""))

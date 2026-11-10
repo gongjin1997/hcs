@@ -11,7 +11,9 @@ x-code: &code
 services:
   migrate: *code
   api: *code
-  scheduler: *code
+  scheduler:
+    <<: *code
+    stop_grace_period: 45s
   notifier: *code
   web:
     volumes:

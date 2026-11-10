@@ -25,7 +25,7 @@ if [ -n "$(dc ps -q postgres 2>/dev/null)" ] && [ -z "$(env_get INSPECTOR_DATABA
 fi
 
 c_info "执行新代码迁移，保留原租户与开关"
-dc stop scheduler notifier
+HCS_CODE_DIR="$candidate" dc stop scheduler notifier
 if ! HCS_CODE_DIR="$candidate" dc run --rm -T --no-deps migrate; then
   dc up -d --no-deps scheduler notifier || true
   die "迁移失败，未切换活动代码；原 API 保留，请根据日志及更新前备份处理数据库"

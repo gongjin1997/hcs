@@ -10,6 +10,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[1]
 IMAGES = [
     "hcs-inspector-arm64-backend:0.4.0",
@@ -84,7 +86,8 @@ class OfflineDeployTests(unittest.TestCase):
         self.deploy = self.root / "deploy"
         self.deploy.mkdir()
         shutil.copytree(ROOT / "deploy/scripts", self.deploy / "scripts")
-        for name in ("deploy.sh", "install.sh", ".env.example", "docker-compose.yml", "docker-compose.offline.yml", "docker-compose.https.yml"):
+        for name in ("deploy.sh", "install.sh", ".env.example", "docker-compose.yml", "docker-compose.offline.yml",
+                     "docker-compose.code.yml", "docker-compose.https.yml"):
             shutil.copy2(ROOT / "deploy" / name, self.deploy / name)
         self.bin = self.root / "bin"
         self.bin.mkdir()
@@ -164,6 +167,38 @@ class OfflineDeployTests(unittest.TestCase):
         result = self.run_bash("source scripts/common.sh; env_get CUSTOM")
         self.assertEqual(result.stdout, "$(touch compromised)")
         self.assertFalse((self.deploy / "compromised").exists())
+
+    def test_active_code_release_supplies_its_compose_overlay_with_legacy_fallback(self):
+        release = self.deploy / "releases/code-release"
+        release.mkdir(parents=True)
+        overlay = release / "docker-compose.code.yml"
+        overlay.write_text("services:\n  scheduler:\n    stop_grace_period: 37s\n")
+        (self.deploy / ".code.env").write_text(f"HCS_CODE_DIR={release}\n")
+        (self.deploy / ".env").write_text("IMAGE_PREFIX=hcs-inspector-arm64\nHCS_INSPECTOR_VERSION=0.4.0\n")
+
+        result = self.run_bash("source scripts/common.sh; dc config",
+                               env={**self.env, "FAKE_COMPOSE_VERSION": "1.29.2"})
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        compose_calls = [call for call in self.calls() if call[:1] == ["compose"] and call[-1:] == ["config"]]
+        latest_call = compose_calls[-1]
+        files = [latest_call[index + 1] for index, arg in enumerate(latest_call[:-1]) if arg == "-f"]
+        self.assertTrue(files[-1].startswith(".compose-legacy/"))
+        converted = [yaml.safe_load(path.read_text()) for path in (self.deploy / ".compose-legacy").glob("*.yml")]
+        self.assertTrue(any(document["services"]["scheduler"].get("stop_grace_period") == "37s"
+                            for document in converted))
+
+        overlay.unlink()
+        result = self.run_bash("source scripts/common.sh; dc config",
+                               env={**self.env, "FAKE_COMPOSE_VERSION": "1.29.2"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        compose_calls = [call for call in self.calls() if call[:1] == ["compose"] and call[-1:] == ["config"]]
+        latest_call = compose_calls[-1]
+        files = [latest_call[index + 1] for index, arg in enumerate(latest_call[:-1]) if arg == "-f"]
+        self.assertTrue(files[-1].startswith(".compose-legacy/"))
+        converted = [yaml.safe_load(path.read_text()) for path in (self.deploy / ".compose-legacy").glob("*.yml")]
+        self.assertTrue(any(document["services"].get("scheduler", {}).get("stop_grace_period") == "45s"
+                            for document in converted))
 
     def test_default_configuration_only_fills_missing_files(self):
         defaults = self.deploy / "defaults/nginx/snippets"

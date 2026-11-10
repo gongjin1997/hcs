@@ -167,6 +167,7 @@ _dc() (
   fi
   if [ -n "${HCS_CODE_DIR:-}" ]; then
     file=docker-compose.code.yml
+    [ ! -f "$HCS_CODE_DIR/$file" ] || file="$HCS_CODE_DIR/$file"
     if [ "$COMPOSE_MAJOR" = 1 ]; then file=$(legacy_compose_file "$file"); fi
     args+=(-f "$file")
   fi
