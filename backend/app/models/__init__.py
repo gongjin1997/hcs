@@ -12,6 +12,7 @@ from .resource import Resource, ResourceChange
 from .setting import CollectSwitch, SysSetting, WorkerHeartbeat
 from .silence import Silence
 from .sms import SmsNotification
+from .task_execution import TaskExecution, TaskExecutionCancel
 from .user import AuditLog, RevokedToken, Role, User
 
 __all__ = [
@@ -19,6 +20,6 @@ __all__ = [
     "InspectionRun", "InspectionTask", "Contact", "ContactGroup", "Notification", "NotifyRoute",
     "PodEvent", "PodProbe", "PodState", "Report", "Resource", "ResourceChange", "AuditLog", "Role", "User",
     "CollectSwitch", "SysSetting", "WorkerHeartbeat", "Silence", "RevokedToken", "DcsMemorySample", "DcsMetricSample",
-    "SmsNotification",
+    "SmsNotification", "TaskExecution", "TaskExecutionCancel",
     "EcsMetricSample", "GaussDBStorageSample", "CceClusterSnapshot",
 ]

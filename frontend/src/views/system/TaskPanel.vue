@@ -22,6 +22,9 @@
       <div v-if="schedule.note" class="sched-row text-3">{{ schedule.note }}</div>
     </div>
 
+    <div class="workspace-toolbar"><el-radio-group v-model="workspaceView" aria-label="任务工作区"><el-radio-button value="definitions">任务与配置</el-radio-button><el-radio-button value="executions">执行工作区</el-radio-button></el-radio-group><span class="text-3">定义 {{ tasks.length }} 项 · 活跃 {{ activeExecutionCount }} 条</span></div>
+    <el-alert v-if="definitionError" :title="definitionError" type="warning" :closable="false" class="mb-12"><el-button link @click="load">重新读取任务</el-button></el-alert>
+    <template v-if="workspaceView === 'definitions'">
     <div class="task-filters" role="search" aria-label="筛选巡检任务">
       <el-select v-model="filters.service" aria-label="按服务筛选" placeholder="全部服务" class="service-filter">
         <el-option label="全部服务" value="" />
@@ -36,105 +39,55 @@
       <span class="text-3 filter-count" role="status" aria-live="polite">显示 {{ filteredTasks.length }} / {{ tasks.length }} 项</span>
     </div>
     <div v-if="filters.abnormal" class="text-3 filter-hint">异常按各租户 / 项目最近一次执行判断：失败、超时、部分成功、检查异常或详情失败；运行中和跳过不计入。</div>
-    <div class="text-3 scroll-hint">左右滑动表格，查看启停与操作等更多列。</div>
-    <div class="task-table-scroll" role="region" aria-label="巡检任务列表，可横向滚动" tabindex="0">
-    <el-table class="task-table" :data="filteredTasks" row-key="code" :expand-row-keys="expanded" :scrollbar-always-on="true" :empty-text="tasks.length ? '无匹配任务，请调整筛选条件' : '暂无巡检任务'" @expand-change="onExpand">
-      <el-table-column type="expand">
-        <template #default="{ row }">
-          <div class="runs">
-            <div class="sub-title">已展示 {{ row.runs.length }} 次运行（每个租户 / 项目各保留最近 12 次；未知项目单独保留）</div>
-            <div v-if="isGaussTask(row.code)" class="text-3 timing-note">累计详情耗时是各详情请求耗时之和，不是墙钟耗时；并发执行时可能大于明细阶段或整轮墙钟耗时。缺失统计显示“—”，不补零。</div>
-            <el-table :data="row.runs" size="small" border>
-              <el-table-column label="开始时间" width="140"><template #default="{ row: r }">{{ fmtTime(r.started_at) }}</template></el-table-column>
-              <el-table-column label="租户" width="110"><template #default="{ row: r }"><TenantTag :id="r.tenant_id" :name="r.tenant_name" /></template></el-table-column>
-              <el-table-column label="项目" min-width="170"><template #default="{ row: r }">{{ projectLabel(r as ProjectRun) }}</template></el-table-column>
-              <el-table-column label="触发" width="70"><template #default="{ row: r }">{{ r.trigger_type === 'MANUAL' ? '手动' : '调度' }}</template></el-table-column>
-              <el-table-column label="状态" width="90"><template #default="{ row: r }"><el-tag :type="taskStatus(r.status).type ?? 'info'" size="small">{{ taskStatus(r.status).label }}</el-tag></template></el-table-column>
-              <el-table-column label="耗时" width="76"><template #default="{ row: r }">{{ r.finished_at ? `${secs(r as TaskRun)} s` : '-' }}</template></el-table-column>
-              <el-table-column :label="cnt(row.code).b ? `${cnt(row.code).a} / ${cnt(row.code).b}` : cnt(row.code).a" width="96"><template #default="{ row: r }">{{ r.resource_total }}<template v-if="cnt(row.code).b"> / <b :class="{ danger: cnt(row.code).warn && r.abnormal_total }">{{ r.abnormal_total }}</b></template></template></el-table-column>
-              <el-table-column label="API 调用" width="80" prop="api_calls" />
-              <el-table-column label="API 错误" width="90"><template #default="{ row: r }">{{ r.stats?.hcs?.errors ?? '-' }}</template></el-table-column>
-              <el-table-column label="限流等待" width="100"><template #default="{ row: r }">{{ r.stats?.hcs ? `${Math.round(r.stats.hcs.rate_limit_ms)} ms` : '-' }}</template></el-table-column>
-              <el-table-column label="采集明细" min-width="220"><template #default="{ row: r }"><span class="text-2 collection-detail">{{ statsText(row.code, r as TaskRun) || '-' }}</span></template></el-table-column>
-              <el-table-column label="错误摘要" min-width="180" show-overflow-tooltip><template #default="{ row: r }"><span :class="{ danger: r.error_summary }">{{ r.error_summary ?? '-' }}</span></template></el-table-column>
-            </el-table>
-          </div>
-        </template>
-      </el-table-column>
-      <el-table-column label="任务" min-width="280">
-        <template #default="{ row }">
-          <b>{{ row.name }}</b>
-          <div class="text-3 mono">{{ row.code }}</div>
-          <el-button v-if="DATAARTS_SELECTION_TASKS[row.code] && user.can('collect:manage')" link type="primary"
-                     @click="openJobSelection(row.code)">监控作业 · 按项目 / 工作空间选择</el-button>
-          <div class="text-2 check-summary" :title="row.details.codes.join('、')">检查：{{ row.details.checks.join('、') || (row.details.provided ? '无规则检查项' : '历史返回未提供') }}</div>
-          <details class="task-description">
-            <summary>执行步骤 / 任务说明<span v-if="row.details.steps.length">（{{ row.details.steps.length }} 步）</span></summary>
-            <ol v-if="row.details.steps.length" class="task-steps"><li v-for="(step, index) in row.details.steps" :key="index">{{ step }}</li></ol>
-            <div v-else class="text-3 note">历史返回未提供执行步骤。</div>
-            <div v-if="row.note" class="text-3 note">{{ row.note }}</div>
-            <div v-if="ECS_POLICY_TASKS.includes(row.code)" class="text-3 note">各租户可单独设置频率、范围与指标（租户策略优先于这里的全局周期）。</div>
-            <div v-if="row.code === 'cce_cluster_health' && user.can('podevent:view')" class="text-3 note">采集哪些集群、启用哪些原生指标：<router-link :to="{ path: '/pod-events', query: { tab: 'clusters' } }">容器事件 → 集群与节点 → 采集配置</router-link></div>
-          </details>
-        </template>
-      </el-table-column>
-      <el-table-column label="服务" width="110"><template #default="{ row }">{{ serviceLabel(row.service) }}</template></el-table-column>
-      <el-table-column label="周期" width="130">
-        <template #default="{ row }">
-          <template v-if="row.cron"><div>{{ cronText(row.cron) }}</div><div class="mono text-3">{{ row.cron }}</div></template>
-          <template v-else>每 {{ humanize(row.interval_sec) }}</template>
-        </template>
-      </el-table-column>
-      <el-table-column label="下次执行" width="128">
-        <template #default="{ row }">
-          <span v-if="!row.enabled" class="text-3">已停用</span>
-          <template v-else-if="row.next_run">
-            <div class="num">{{ nextText(row.next_run) }}</div>
-            <el-tooltip v-if="row.next_run_source === 'estimate'" content="调度进程未上报（未运行或心跳超时），按上次执行时间 + 周期估算" placement="top">
-              <el-tag size="small" type="warning" effect="plain">预计</el-tag>
-            </el-tooltip>
-          </template>
-          <span v-else class="text-3">-</span>
-        </template>
-      </el-table-column>
-      <el-table-column label="各租户 / 项目最近一次" min-width="300">
-        <template #default="{ row }">
+    <el-empty v-if="!filteredTasks.length" :description="tasks.length ? '无匹配任务，请调整筛选条件' : '暂无巡检任务'" :image-size="72" />
+    <div class="task-grid" aria-label="任务定义与配置">
+      <TaskDefinitionCard v-for="task in filteredTasks" :key="task.code" :task="task" :service-name="serviceLabel(task.service)"
+        :cadence="task.cron ? cronText(task.cron) : `每 ${humanize(task.interval_sec)}`" :scope-label="task.code === 'data_cleanup' ? '平台全局内部任务' : definitionScope"
+        :resource-label="task.types.map(typeName).join('、') || '平台任务'" :next-run-label="task.next_run ? nextText(task.next_run) : '后端未上报'"
+        :checks="task.details.checks" :can-edit="canEdit" :can-run="user.can('task:run') && (task.code !== 'data_cleanup' || globalConfigScope)" :submitting="executions.pendingTasks.has(task.code)"
+        :toggling="toggling === task.code" :active="(task.active_execution_count ?? 0) > 0" :timeout-label="taskTimeout(task)"
+        :has-ecs-policy="ECS_POLICY_TASKS.includes(task.code)" :has-job-selection="!!DATAARTS_SELECTION_TASKS[task.code] && user.can('collect:manage')"
+        @detail="selectedTaskCode = task.code" @run="run(task)" @configure="openEdit(task)" @toggle="toggle(task, $event)"
+        @ecs="openEcsPolicy" @jobs="openJobSelection(task.code)" @scope="scopeTask = task" @select-targets="executions.chooseTargets(task.code)">
+        <template #latest>
           <div class="latest">
-            <div v-for="r in latestByTenant(row as InspectionTask)" :key="`${r.tenant_id ?? 'global'}:${r.project_ref ?? 'unknown'}`" class="lt" :class="r.status.toLowerCase()">
-              <TenantTag :id="r.tenant_id" :name="r.tenant_name" />
-              <span class="text-3">{{ projectLabel(r) }}</span>
+            <div v-if="task.latest_execution" class="lt"><el-tag :type="taskStatus(task.latest_execution.status).type" size="small">{{ taskStatus(task.latest_execution.status).label }}</el-tag><span>{{ task.latest_execution.phase_label }}</span><el-button link type="primary" @click="executions.open(task.latest_execution.execution_id)">打开最近执行</el-button></div>
+            <div v-for="r in latestByTenant(task).slice(0, 2)" :key="`${r.tenant_id ?? 'global'}:${r.project_ref ?? 'unknown'}`" class="lt">
+              <TenantTag :id="r.tenant_id" :name="r.tenant_name" /><span class="text-3">{{ projectLabel(r) }}</span>
               <el-tag :type="taskStatus(r.status).type ?? 'info'" size="small" effect="plain">{{ taskStatus(r.status).label }}</el-tag>
               <span class="text-3">{{ fromNow(r.started_at) }}</span>
-              <span class="cnt">{{ cnt(row.code).a }} {{ r.resource_total }}<template v-if="cnt(row.code).b"> · {{ cnt(row.code).b }} <b :class="{ danger: cnt(row.code).warn && r.abnormal_total }">{{ r.abnormal_total }}</b></template></span>
             </div>
-            <span v-if="!row.runs.length" class="text-3">未运行</span>
-            <div v-if="row.skipped_tenants?.length" class="lt skipped">
-              <el-tooltip :content="`这些租户在“采集开关”中关闭了 ${row.types.map((t: string) => typeName(t)).join('、')}，调度和手动执行都会跳过`" placement="top">
-                <el-tag size="small" type="info" effect="plain">已关闭采集</el-tag>
-              </el-tooltip>
-              <span class="text-3">{{ row.skipped_tenants.join('、') }}</span>
-            </div>
+            <span v-if="!task.runs.length" class="text-3">暂无执行记录</span>
+            <span v-if="latestByTenant(task).length > 2" class="text-3">另有 {{ latestByTenant(task).length - 2 }} 个租户 / 项目，打开详情查看</span>
+            <span v-if="task.skipped_tenants?.length" class="text-3">已关闭采集：{{ task.skipped_tenants.join('、') }}</span>
           </div>
         </template>
-      </el-table-column>
-      <el-table-column label="已展示执行成功率" width="150">
-        <template #default="{ row }"><el-progress v-if="successRate(row as InspectionTask) != null" :percentage="successRate(row as InspectionTask) ?? 0" :color="(successRate(row as InspectionTask) ?? 0) >= 90 ? '#2e7d32' : '#f57c00'" :stroke-width="8" /><span v-else class="text-3">未知（无已完成执行）</span></template>
-      </el-table-column>
-      <el-table-column label="启用" width="64" fixed="right">
-        <template #default="{ row }">
-          <el-switch :model-value="row.enabled" :aria-label="`${row.name}启用`" size="small" :disabled="!canEdit" :loading="toggling === row.code"
-                     @change="(v: string | number | boolean) => toggle(row as InspectionTask, !!v)" />
-        </template>
-      </el-table-column>
-      <el-table-column label="操作" width="170" fixed="right">
-        <template #default="{ row }">
-          <el-button v-perm="'task:run'" link type="primary" :icon="VideoPlay" :loading="running === row.code" :disabled="!row.enabled" @click="run(row as InspectionTask)">立即执行</el-button>
-          <el-button v-if="canEdit" link type="primary" @click="openEdit(row as InspectionTask)">修改</el-button>
-          <el-button v-if="ECS_POLICY_TASKS.includes(row.code)" link type="primary" @click="openEcsPolicy">监控配置</el-button>
-        </template>
-      </el-table-column>
-    </el-table>
+      </TaskDefinitionCard>
     </div>
+    </template>
+    <section v-else class="execution-workspace">
+      <div class="execution-filters"><el-select v-model="executions.taskCode.value" aria-label="筛选执行任务" placeholder="全部任务" clearable><el-option v-for="task in tasks" :key="task.code" :value="task.code" :label="`${serviceLabel(task.service)} · ${task.name}`" /></el-select><el-select v-model="executions.projectRef.value" aria-label="筛选执行项目" placeholder="全部项目" clearable @clear="executions.projectRef.value = null"><el-option v-for="project in executionProjects" :key="project.ref" :value="project.ref" :label="project.label" /></el-select></div>
+      <TaskExecutionList :items="executions.feed.data.value?.items ?? []" :mode="executions.mode.value" :queue-status="executions.queueStatus.value"
+        :total="executions.feed.data.value?.total ?? 0" :page="executions.page.value" :page-size="executions.pageSize" :loading="executions.feed.loading.value" :error="executions.feedError.value"
+        :can-cancel="user.can('task:run')" :can-retry="user.can('task:run')" :pending-actions="executions.pendingActions"
+        @update:mode="executions.mode.value = $event" @update:queue-status="executions.queueStatus.value = $event" @update:page="executions.page.value = $event"
+        @open="executions.open($event.execution_id)" @cancel="executions.cancel" @retry="executions.retry" @refresh="executions.feed.refresh" />
+    </section>
+    <TaskExecutionDrawer :model-value="!!executions.selectedId.value" :execution="executions.detail.data.value" :loading="executions.detail.loading.value" :error="executions.detailError.value"
+      :can-cancel="user.can('task:run')" :can-retry="user.can('task:run')" :pending-action="executions.pendingActions[executions.selectedId.value]"
+      @update:model-value="!$event && (executions.selectedId.value = '')" @refresh="executions.detail.refresh"
+      @cancel="executions.detail.data.value && executions.cancel(executions.detail.data.value)" @retry="executions.detail.data.value && executions.retry(executions.detail.data.value)" />
+    <TaskRunTargetDialog :model-value="!!executions.targetTaskCode.value" :task="executionTargetTask" :targets="executions.targets.data.value" :loading="executions.targets.loading.value"
+      :submitting="executions.pendingTasks.has(executions.targetTaskCode.value)" :error="executions.targetError.value" :can-run="user.can('task:run')"
+      @update:model-value="!$event && (executions.targetTaskCode.value = '')" @submit="executionTargetTask && run(executionTargetTask, $event)" @refresh="executions.targets.refresh" @existing="executions.open" />
+    <TaskDefinitionDrawer :model-value="!!selectedTask" :task="selectedTask" :service-name="selectedTask ? serviceLabel(selectedTask.service) : ''"
+      :cadence="selectedTask ? selectedTask.cron ? cronText(selectedTask.cron) : `每 ${humanize(selectedTask.interval_sec)}` : ''"
+      :scope-label="selectedTask?.code === 'data_cleanup' ? '平台全局内部任务' : definitionScope" :checks="selectedTask?.details.checks ?? []" :steps="selectedTask?.details.steps ?? []" :can-edit="canEdit" :can-configure-cce="user.can('podevent:view')" :timeout-label="selectedTask ? taskTimeout(selectedTask) : ''"
+      @update:model-value="!$event && (selectedTaskCode = '')" @configure="selectedTask && openEdit(selectedTask)" @scope="scopeTask = selectedTask">
+      <template #history><TaskRunHistory v-if="selectedTask" :task="selectedTask" :describe-run="statsText" :status="taskStatus" :project-label="projectLabel" @open-execution="executions.open" /></template>
+    </TaskDefinitionDrawer>
+    <TaskScopeDialog :model-value="!!scopeTask" :task="scopeTask" :tenant-id="app.currentTenant?.id ?? null" :can-manage="user.can('collect:manage')"
+      @update:model-value="!$event && (scopeTask = null)" @saved="load" />
     <div class="tip text-3">巡检 / 台账同步 / 容器事件采集由调度进程（scheduler）按周期执行，单个租户认证或接口失败只影响该租户；修改周期后调度进程最迟 30 秒生效；
       手动执行范围跟随顶部租户切换{{ app.currentTenant ? `（当前：${app.currentTenant.name}）` : '（当前：全部租户）' }}。</div>
 
@@ -175,6 +128,7 @@
         </el-form-item>
         <div v-if="edit.task.code === 'dcs_status'" class="text-3 hint">指标来自 DCS 原生接口，历史为实际采样记录。CPU 累计秒数不作为使用率，实例连接数暂无数据。</div>
         <div v-if="isGaussTask(edit.task.code)" class="text-3 hint">GaussDB 实例状态、磁盘容量、组件状态分别启停并设置周期；以本任务检查项为准。使用原生只读接口，不使用 AOM 映射；慢 SQL、会话、巡检报告在 GaussDB 页面按需查询。</div>
+        <TaskParameterFields v-if="edit.task.parameter_schema?.properties" v-model="edit.parameters" :schema="edit.task.parameter_schema" :disabled="!canEdit || edit.saving" :exclude="['p90_min_samples']" />
         <el-form-item v-if="hasLegacyAom" label="旧配置">
           <el-checkbox v-model="edit.clearLegacyAom" :disabled="edit.saving">清除旧 AOM 映射</el-checkbox>
           <div class="text-3 hint">AOM 已停用，旧映射不再生效。勾选后保存清除，保留其他任务参数。</div>
@@ -208,15 +162,29 @@
 </template>
 
 <script setup lang="ts">
-import { Calendar, Edit, VideoPlay } from '@element-plus/icons-vue'
+import { Calendar, Edit } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
-import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
-import { computed, h, onMounted, reactive, ref } from 'vue'
-import { type InspectionTask, type ReportSchedule, type TaskRun, listTasks, reportSchedule, runTask, saveReportSchedule, updateTask } from '@/api'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { type InspectionTask, type ReportSchedule, type TaskRun, reportSchedule, saveReportSchedule } from '@/api'
 import TenantTag from '@/components/TenantTag.vue'
 import RecipientSelect from '@/components/RecipientSelect.vue'
 import EcsPolicyDialog from '@/views/ecs/EcsPolicyDialog.vue'
 import JobSelectionDialog from './JobSelectionDialog.vue'
+import TaskDefinitionCard from './TaskDefinitionCard.vue'
+import TaskDefinitionDrawer from './TaskDefinitionDrawer.vue'
+import TaskRunHistory from './TaskRunHistory.vue'
+import TaskScopeDialog from './TaskScopeDialog.vue'
+import TaskExecutionList from './TaskExecutionList.vue'
+import TaskExecutionDrawer from './TaskExecutionDrawer.vue'
+import TaskRunTargetDialog from './TaskRunTargetDialog.vue'
+import TaskParameterFields from './TaskParameterFields.vue'
+import * as taskApi from '@/api/task-executions'
+import type { TaskDefinition, TaskDefinitionPatch, TaskParameterValue } from '@/types/task-executions'
+import { useTaskExecutions } from './composables/useTaskExecutions'
+import { executionStatus } from './composables/taskExecutionPresentation'
+import { taskParameterErrors } from './composables/taskParameters'
+import { newRequestId } from '@/utils/request-id'
 import type { JobSelectionType } from '@/api/job-selection'
 import { useAppStore } from '@/stores/app'
 import { useUserStore } from '@/stores/user'
@@ -229,6 +197,12 @@ const globalConfigScope = computed(() => !!user.user && user.user.tenant_ids == 
 const canEdit = computed(() => globalConfigScope.value && user.can('task:edit'))
 const canReportConfig = computed(() => globalConfigScope.value && user.can('report:config') && !!schedule.value?.editable)
 const loading = ref(false)
+let loadVersion = 0
+let disposed = false
+const requestScope = () => JSON.stringify([app.tenantId ?? app.currentTenant?.id ?? null, app.tenantSeq ?? 0, user.token ?? null, user.user?.id ?? null, user.user?.tenant_ids ?? null, user.user?.permissions ?? []])
+let definitionTimer: ReturnType<typeof setTimeout> | undefined
+let definitionController: AbortController | undefined
+onBeforeUnmount(() => { disposed = true; ++loadVersion; clearTimeout(definitionTimer); definitionController?.abort() })
 /** 这些任务按租户 ECS 采集策略调度（collection_policy.TASK_PHASES）；策略原先放在“租户接入”卡片上 */
 const ECS_POLICY_TASKS = ['ecs_status', 'ecs_metrics', 'ecs_quota']
 const DATAARTS_SELECTION_TASKS: Record<string, JobSelectionType> = {
@@ -245,14 +219,25 @@ function openEcsPolicy() {
   const tenant = app.currentTenant
   Object.assign(ecsPolicy, { visible: true, tenantId: tenant?.id ?? null, tenantName: tenant ? tenant.short_name || tenant.name : '' })
 }
-const tasks = ref<InspectionTask[]>([])
+const tasks = ref<TaskDefinition[]>([])
+const workspaceView = ref<'definitions' | 'executions'>('definitions')
+const definitionError = ref('')
+const activeExecutionCount = computed(() => tasks.value.reduce((total, task) => total + (task.active_execution_count ?? 0), 0))
+const taskTimeout = (task: TaskDefinition) => {
+  const seconds = task.effective_params?.timeout_sec ?? field(task.params, 'timeout_sec')
+  return typeof seconds === 'number' && Number.isFinite(seconds) && seconds >= 0 ? `${seconds} 秒` : ''
+}
+const selectedTaskCode = ref('')
+const selectedTask = computed(() => taskRows.value.find(task => task.code === selectedTaskCode.value) ?? null)
+const scopeTask = ref<InspectionTask | null>(null)
+const definitionScope = computed(() => `${app.currentTenant?.name ?? '可见租户'} · 各已启用项目`)
 // 仅解释白名单字段，未知 code 按纯文本显示，不从对象原型取字典项。
 const own = (value: object, key: string) => Object.prototype.hasOwnProperty.call(value, key)
 const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
 const field = (value: unknown, key: string): unknown => record(value) && own(value, key) ? value[key] : undefined
 const strings = (value: unknown): string[] => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && !!item.trim()) : []
 const serviceLabel = (code: string) => own(SERVICES, code) ? SERVICES[code]! : code
-const taskStatus = (code: string) => own(TASK_STATUS, code) ? TASK_STATUS[code]! : { label: code, type: 'info' as const }
+const taskStatus = (code: string) => own(TASK_STATUS, code) ? TASK_STATUS[code]! : executionStatus(code)
 const CHECK_LABELS = new Map<string, string>([
   ['job_status', '作业状态'], ['node_status', '节点状态'], ['instance_status', '实例状态'], ['cluster_status', '集群状态'],
   ['cpu', 'CPU 使用率'], ['memory', '内存使用率'], ['disk', '磁盘使用率'], ['components', '组件状态'], ['nodes', '逻辑节点状态'], ['reboot', '重启检测'],
@@ -269,8 +254,8 @@ const filters = reactive({ service: '', enabled: 'all', abnormal: false, keyword
 const serviceOptions = computed(() => [...new Set(tasks.value.map(task => task.service))].map(value => ({ value, label: serviceLabel(value) })))
 const taskRows = computed(() => tasks.value.map(task => ({ ...task, details: taskDetails(task) })))
 function hasRecentAbnormal(task: InspectionTask) {
-  return latestByTenant(task).some(run => !['RUNNING', 'SKIPPED'].includes(run.status) && (
-    ['FAILED', 'TIMEOUT', 'PARTIAL'].includes(run.status)
+  return latestByTenant(task).some(run => !['QUEUED', 'RUNNING', 'SKIPPED'].includes(run.status) && (
+    ['FAILED', 'TIMEOUT', 'PARTIAL', 'INTERRUPTED'].includes(run.status)
     || (cnt(task.code).warn && run.abnormal_total > 0)
     || (isGaussTask(task.code) && validCount(field(field(run.stats, 'gaussdb'), 'failed')) > 0)
   ))
@@ -306,19 +291,34 @@ function gaussStatsText(code: string, stats: unknown): string {
     `清单 ${ms('list_ms')}`, `明细 ${ms('detail_ms')}`, `详情累计 ${ms('detail_total_ms')}`, `单次详情最大 ${ms('detail_max_ms')}`, `墙钟 ${ms('wall_ms')}`].join(' · ')
 }
 const schedule = ref<ReportSchedule | null>(null)
-const running = ref('')
+const running = computed(() => [...executions.pendingTasks][0] ?? '')
 const expanded = ref<string[]>([])
 type ProjectRun = TaskRun & { project_ref?: number | null; project_scope?: string; project_label?: string }
 const projectLabel = (r: ProjectRun) => r.project_label ?? (r.project_ref != null ? `项目#${r.project_ref}` : '历史未知项目（未记录）')
 
 async function load() {
-  loading.value = true
-  try {
-    const [t, s] = await Promise.all([listTasks(), user.can('report:view') ? reportSchedule() : Promise.resolve(null)])
-    tasks.value = t
-    schedule.value = s
-    if (!expanded.value.length) expanded.value = t.filter(hasRecentAbnormal).map((x) => x.code).slice(0, 1)
-  } finally { loading.value = false }
+  if (disposed) return
+  const request = ++loadVersion
+  const scope = requestScope()
+  const isCurrent = () => !disposed && request === loadVersion && scope === requestScope()
+  clearTimeout(definitionTimer)
+  definitionController?.abort()
+  const controller = new AbortController()
+  definitionController = controller
+  loading.value = !tasks.value.length
+  const [taskResult, scheduleResult] = await Promise.allSettled([
+    taskApi.listTaskDefinitions({ tenantId: app.tenantId ?? null, signal: controller.signal }),
+    user.can('report:view') ? reportSchedule() : Promise.resolve(null),
+  ])
+  if (!isCurrent()) return
+  if (taskResult.status === 'fulfilled') {
+    tasks.value = taskResult.value
+    definitionError.value = ''
+    if (!expanded.value.length) expanded.value = tasks.value.filter(hasRecentAbnormal).map(task => task.code).slice(0, 1)
+  } else definitionError.value = '任务读取失败，当前保留上次后端结果；请重试。'
+  if (scheduleResult.status === 'fulfilled') schedule.value = scheduleResult.value
+  loading.value = false
+  definitionTimer = setTimeout(() => { void load() }, 5000)
 }
 onMounted(load)
 defineExpose({ reload: load })
@@ -351,23 +351,32 @@ const CRON_PRESETS = [
 ]
 
 // ---- 修改任务 ----
-const edit = reactive({ visible: false, task: null as InspectionTask | null, mode: 'interval' as 'interval' | 'cron', value: 1, unit: 60, cron: '', enabled: true, saving: false,
-  clearLegacyAom: false, p90MinSamples: 5,
+const edit = reactive({ visible: false, task: null as TaskDefinition | null, mode: 'interval' as 'interval' | 'cron', value: 1, unit: 60, cron: '', enabled: true, saving: false,
+  clearLegacyAom: false, p90MinSamples: 5, parameters: {} as Record<string, TaskParameterValue>,
 })
 const hasLegacyAom = computed(() => !!edit.task && Object.prototype.hasOwnProperty.call(edit.task.params ?? {}, 'aom')
   && (edit.task.params as { aom?: unknown }).aom != null)
-function openEdit(t: InspectionTask) {
-  if (edit.saving) return
+function openEdit(t: TaskDefinition) {
+  if (!canEdit.value || edit.saving) return
   const sec = t.interval_sec
   const unit = sec % 3600 === 0 ? 3600 : sec % 60 === 0 ? 60 : 1
   Object.assign(edit, { visible: true, task: t, mode: t.cron ? 'cron' : 'interval', value: sec / unit, unit, cron: t.cron ?? '', enabled: t.enabled,
-    clearLegacyAom: false, p90MinSamples: (t.params as { p90_min_samples?: number }).p90_min_samples ?? 5,
+    clearLegacyAom: false, p90MinSamples: t.effective_params?.p90_min_samples ?? (t.params as { p90_min_samples?: number }).p90_min_samples ?? 5,
+    parameters: Object.fromEntries(Object.entries(t.parameter_schema?.properties ?? {}).flatMap(([key, spec]) => {
+      const value = t.effective_params && own(t.effective_params, key) ? t.effective_params[key] : field(t.params, key) ?? spec.default
+      return value === null || typeof value === 'number' || typeof value === 'string' ? [[key, value]] : []
+    })),
   })
 }
 async function saveEdit() {
   if (edit.saving || !edit.task || !canEdit.value) return
   const t = edit.task
-  const body: { interval_sec?: number; cron?: string | null; enabled?: boolean; aom?: null; p90_min_samples?: number } = { enabled: edit.enabled }
+  const scope = requestScope()
+  const body: TaskDefinitionPatch = { enabled: edit.enabled }
+  const parameterErrors = t.parameter_schema ? taskParameterErrors(edit.parameters, t.parameter_schema) : []
+  if (parameterErrors.length) return ElMessage.warning(parameterErrors.join('；'))
+  if (typeof edit.parameters.timeout_sec === 'number') body.timeout_sec = edit.parameters.timeout_sec
+  if (t.code === 'mrs_job_status' && t.parameter_schema?.properties?.query_mode) body.mrs_options = Object.fromEntries(Object.entries(edit.parameters).filter(([key]) => key !== 'timeout_sec' && key !== 'p90_min_samples'))
   if (t.code === 'dgc_batch_instance') {
     if (!Number.isInteger(edit.p90MinSamples) || edit.p90MinSamples < 1 || edit.p90MinSamples > 10000) return ElMessage.warning('P90 最少样本数须为 1–10000 的整数')
     body.p90_min_samples = edit.p90MinSamples
@@ -383,25 +392,33 @@ async function saveEdit() {
   }
   edit.saving = true
   try {
-    const r = await updateTask(t.code, body)
+    const r = await taskApi.updateTaskDefinition(t.code, body, { tenantId: null })
+    if (disposed || scope !== requestScope()) return
     ElMessage.success(r.changed ? '已保存，调度进程最迟 30 秒生效' : '没有变化')
     edit.visible = false
     await load()
-  } finally { edit.saving = false }
+  } catch (error) {
+    if (!disposed && scope === requestScope()) ElMessage.error(error instanceof Error ? error.message : '任务配置保存失败，请重试')
+  } finally { if (!disposed && scope === requestScope()) edit.saving = false }
 }
 const toggling = ref('')
 async function toggle(t: InspectionTask, on: boolean) {
   if (!canEdit.value || toggling.value) return
+  const scope = requestScope()
   if (!on) {
     try { await ElMessageBox.confirm(`停用后“${t.name}”不再自动执行，相关检查项不会产生新告警。确认停用？`, '停用任务', { type: 'warning' }) }
     catch { return }
   }
+  if (disposed || scope !== requestScope() || !canEdit.value || toggling.value) return
   toggling.value = t.code
   try {
-    await updateTask(t.code, { enabled: on })
+    await taskApi.updateTaskDefinition(t.code, { enabled: on }, { tenantId: null })
+    if (disposed || scope !== requestScope()) return
     ElMessage.success(on ? '已启用' : '已停用')
     await load()
-  } finally { toggling.value = '' }
+  } catch (error) {
+    if (!disposed && scope === requestScope()) ElMessage.error(error instanceof Error ? error.message : '任务启停更新失败，请重试')
+  } finally { if (!disposed && scope === requestScope()) toggling.value = '' }
 }
 
 // ---- 定时报表 ----
@@ -415,12 +432,15 @@ function openSchedule() {
 }
 async function saveSchedule() {
   if (sched.saving || !canReportConfig.value) return
+  const scope = requestScope()
   sched.saving = true
   try {
-    schedule.value = await saveReportSchedule({ cron: sched.cron, enabled: sched.enabled, recipient_user_ids: [...sched.recipient_user_ids] })
+    const saved = await saveReportSchedule({ cron: sched.cron, enabled: sched.enabled, recipient_user_ids: [...sched.recipient_user_ids] })
+    if (disposed || scope !== requestScope()) return
+    schedule.value = saved
     ElMessage.success('已保存，调度进程最迟 30 秒按新时间生成报表')
     sched.visible = false
-  } finally { sched.saving = false }
+  } finally { if (!disposed && scope === requestScope()) sched.saving = false }
 }
 
 /** 每个租户 / 项目最近一次；空项目是独立的历史未知范围。 */
@@ -433,9 +453,13 @@ function latestByTenant(t: InspectionTask): ProjectRun[] {
   return [...seen.values()].sort((a, b) => (a.tenant_id ?? 0) - (b.tenant_id ?? 0)
     || (a.project_ref ?? 0) - (b.project_ref ?? 0))
 }
-const secs = (r: TaskRun) => Math.max(0, Math.round((new Date(r.finished_at!).getTime() - new Date(r.started_at).getTime()) / 100) / 10)
+const secs = (r: TaskRun) => {
+  if (!r.started_at || !r.finished_at) return null
+  const ms = Date.parse(r.finished_at) - Date.parse(r.started_at)
+  return Number.isFinite(ms) && ms >= 0 ? Math.round(ms / 100) / 10 : null
+}
 function successRate(t: InspectionTask): number | null {
-  const completed = t.runs.filter(r => !['RUNNING', 'SKIPPED'].includes(r.status))
+  const completed = t.runs.filter(r => ['SUCCESS', 'FAILED', 'TIMEOUT', 'PARTIAL', 'INTERRUPTED', 'CANCELLED'].includes(r.status))
   return completed.length ? Math.round(completed.filter(r => r.status === 'SUCCESS').length / completed.length * 100) : null
 }
 
@@ -525,31 +549,55 @@ function cnt(code: string): { a: string; b: string; warn: boolean } {
   return { a: '检查', b: '异常', warn: true }
 }
 
-async function run(t: InspectionTask) {
-  if (running.value) return
-  running.value = t.code
-  try {
-    const r = await runTask(t.code)
-    const ok = r.status === 'SUCCESS'
-    ElNotification({
-      title: `${t.name}：${taskStatus(r.status).label}`,
-      type: ok ? 'success' : 'warning',
-      duration: ok ? 4000 : 8000,
-      message: h('div', { class: 'run-result' }, r.runs.map((x) => h('div', { style: 'line-height:1.8' }, [
-        h('b', `${x.tenant_name ?? '平台'}　`),
-        `${taskStatus(x.status).label} · ${cnt(t.code).a} ${x.resource_total}${cnt(t.code).b ? ` / ${cnt(t.code).b} ${x.abnormal_total}` : ''} · API ${x.api_calls} 次`,
-        x.error_summary ? h('div', { style: 'color:var(--hi-p1);font-size:12px' }, x.error_summary) : null,
-      ]))),
-    })
-    if (r.skipped?.length) ElMessage.info(`已跳过关闭采集的租户：${r.skipped.join('、')}`)
-    else if (!r.runs.length) ElMessage.info('当前范围内没有启用的租户')
-    await load()
-  } finally { running.value = '' }
+const executions = useTaskExecutions({
+  scopeKey: requestScope,
+  tenantId: () => app.tenantId ?? null,
+  enabled: () => workspaceView.value === 'executions' && user.can('task:view'),
+  canRun: code => user.can('task:run') && (code !== 'data_cleanup' || globalConfigScope.value),
+  makeRequestKey: newRequestId,
+  confirmCancel: async execution => {
+    try { await ElMessageBox.confirm(`仅停止“${execution.task_name}”的本地巡检；云端作业不会被终止。确认停止？`, '停止本地巡检', { type: 'warning' }); return true }
+    catch { return false }
+  },
+  notice: (kind, message) => ElMessage[kind](message),
+  changed: load,
+  accepted: () => { workspaceView.value = 'executions' },
+}, taskApi)
+const executionTargetTask = computed(() => tasks.value.find(task => task.code === executions.targetTaskCode.value) ?? null)
+const executionProjects = computed(() => {
+  const options = new Map<number, string>()
+  for (const target of executions.targets.data.value?.targets ?? []) if (target.project_ref !== null) options.set(target.project_ref, `${target.tenant_name ?? '平台'} · ${target.project_label}`)
+  for (const item of executions.feed.data.value?.items ?? []) if (item.project_ref !== null) options.set(item.project_ref, `${item.tenant_name ?? '平台'} · ${item.project_label}`)
+  return [...options].map(([ref, label]) => ({ ref, label }))
+})
+async function run(t: InspectionTask, projectRefs?: number[]) {
+  if (!user.can('task:run') || !t.enabled) return
+  return executions.run(t.code, projectRefs)
 }
+
+watch(requestScope, () => {
+  ++loadVersion
+  definitionError.value = ''
+  tasks.value = []
+  schedule.value = null
+  selectedTaskCode.value = ''
+  scopeTask.value = null
+  edit.visible = false
+  edit.saving = false
+  toggling.value = ''
+  sched.visible = false
+  sched.saving = false
+  ecsPolicy.visible = false
+  jobSelection.visible = false
+  void load()
+}, { flush: 'sync' })
 </script>
 
 <style scoped lang="scss">
 .task-panel { min-width: 0; max-width: 100%; }
+.workspace-toolbar, .execution-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 16px; font-size: 12px; }
+.execution-filters .el-select { width: 280px; max-width: 100%; }
+.task-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)); gap: 14px; }
 .task-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px;
   .service-filter { width: 160px; }
   .enabled-filter { width: 150px; }

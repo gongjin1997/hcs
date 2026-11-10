@@ -1,3 +1,4 @@
+import { taskWorkspaceDependencies } from './taskWorkspaceHarness'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { compileScript, parse } from '@vue/compiler-sfc'
@@ -71,7 +72,7 @@ const api = {
 }
 const components = new Set<string>()
 const disposers: (() => void)[] = []
-function load(file: 'TenantDialog' | 'TenantPanel' | 'TaskPanel'): Vue.Component {
+function load(file: 'TenantDialog' | 'TenantPanel' | 'TaskPanel' | 'TaskDefinitionCard'): Vue.Component {
   const filename = resolve(import.meta.dirname, `../src/views/system/${file}.vue`)
   const { descriptor } = parse(readFileSync(filename, 'utf8'), { filename })
   for (const match of descriptor.template!.content.matchAll(/<el-([a-z][a-z0-9-]*)/g)) {
@@ -81,6 +82,7 @@ function load(file: 'TenantDialog' | 'TenantPanel' | 'TaskPanel'): Vue.Component
   const { outputText } = ts.transpileModule(compiled.content, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } })
   const icons = ['Delete', 'InfoFilled', 'Plus', 'QuestionFilled', 'CircleCheckFilled', 'CircleCloseFilled', 'Edit', 'Key', 'Lightning', 'MoreFilled', 'RemoveFilled', 'Select', 'WarningFilled', 'Calendar', 'VideoPlay']
   const dependencies: Record<string, unknown> = {
+    ...taskWorkspaceDependencies(api),
     vue: Vue, '@/api': api, '@/utils/dict': dict, './tenant-form': tenantForm, './TenantDialog.vue': { default: stub('TenantDialog') },
     '@/stores/user': { useUserStore: () => ({ user: { tenant_ids: tenantScope }, can: () => true, canAny: () => true, fetchMe: vi.fn(async () => undefined) }) },
     '@/stores/app': { useAppStore: () => ({ currentTenant: null, tenantId: null }) },
@@ -95,6 +97,8 @@ function load(file: 'TenantDialog' | 'TenantPanel' | 'TaskPanel'): Vue.Component
     if (name === '@/views/ecs/EcsPolicyDialog.vue') return { default: stub('EcsPolicyDialog') }
     if (name === './SmsTenantDialog.vue') return { default: stub('SmsTenantDialog') }
     if (name === './JobSelectionDialog.vue') return { default: stub('JobSelectionDialog') }
+    if (name === './TaskDefinitionCard.vue') return { default: load('TaskDefinitionCard') }
+    if (/^\.\/Task[A-Za-z]+\.vue$/.test(name)) return { default: stub('TaskComponent') }
     if (!(name in dependencies)) throw new Error(`Unexpected dependency ${name}`)
     return dependencies[name]
   }, exports)
@@ -276,7 +280,7 @@ const mapping = () => ({ namespace: 'QA.NAMESPACE', dimension: 'resource_id', me
 async function openTask(row = task()) {
   taskRows = [row]
   const root = await mount(Tasks)
-  await click(find(root, el => el.tag === 'Button' && text(el) === '修改'))
+  await click(find(root, el => el.tag === 'Button' && ['周期配置', '执行参数'].includes(text(el))))
   return root
 }
 const saveTask = (root: TreeNode) => click(find(root, el => el.tag === 'Button' && text(el) === '保存'))
@@ -329,7 +333,7 @@ describe('TaskPanel AOM 全面停用', () => {
     await click(find(root, el => el.tag === 'Button' && text(el) === '取消'))
     expect(api.updateTask).not.toHaveBeenCalled()
     expect(row.params).toEqual(original)
-    await click(find(root, el => el.tag === 'Button' && text(el) === '修改'))
+    await click(find(root, el => el.tag === 'Button' && ['周期配置', '执行参数'].includes(text(el))))
     expect(find(root, el => el.tag === 'Checkbox' && text(el) === '清除旧 AOM 映射').props.modelValue).toBe(false)
     await saveTask(root)
     expect(api.updateTask.mock.calls[0][1]).not.toHaveProperty('aom')
@@ -354,7 +358,7 @@ describe('TaskPanel AOM 全面停用', () => {
     tenantScope = [7]
     taskRows = [task('ecs_metrics', mapping())]
     const root = await mount(Tasks)
-    expect(walk(root).some(el => el.tag === 'Button' && text(el) === '修改')).toBe(false)
+    expect(walk(root).some(el => el.tag === 'Button' && ['周期配置', '执行参数'].includes(text(el)))).toBe(false)
     expect(walk(root).some(el => el.tag === 'Checkbox' && text(el) === '清除旧 AOM 映射')).toBe(false)
     expect(api.updateTask).not.toHaveBeenCalled()
   })

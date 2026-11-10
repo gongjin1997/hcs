@@ -23,7 +23,7 @@ from app.hcs.client import metrics_delta
 from app.models import AlarmEvent, InspectionRun, Resource, ResourceChange
 from app.models.alarm import ACTIVE_STATUSES
 from app.models.base import utcnow
-from app.services import collect_scope, collect_switch, collection_policy, platform_watch, settings_service
+from app.services import collect_scope, collect_switch, collection_policy, execution_runtime, platform_watch, settings_service
 from app.services.catalog import LEDGER_TASK_CODE, RESOURCE_TYPES, type_name
 from app.services.tenancy import Target, legacy_target, resolve_targets
 
@@ -227,7 +227,7 @@ def sync_ledger(db: Session, *, client: HcsClient | None = None, target: Target 
     """同步一个租户项目的台账（target 为空时按环境变量单账号兜底）。"""
     sync_started = perf_counter()
     target = target or legacy_target()
-    run = InspectionRun(task_code=LEDGER_TASK, tenant_id=target.tenant_id, project_ref=target.project_ref,
+    run = execution_runtime.new_run(db, task_code=LEDGER_TASK, tenant_id=target.tenant_id, project_ref=target.project_ref,
                         trigger_type=trigger, started_at=utcnow(),
                         status="RUNNING", stats={})
     db.add(run)
@@ -309,6 +309,8 @@ def sync_ledger(db: Session, *, client: HcsClient | None = None, target: Target 
     stats: dict[str, dict] = {}
     now = utcnow()
     for rtype in wanted:
+        execution_runtime.progress("inventory_fetch", current=wanted.index(rtype), total=len(wanted),
+                                   unit="类资源", resource_type=rtype, message=f"同步{type_name(rtype)}清单")
         snapshot_started = perf_counter()
         calls_at_snapshot_start = client.calls
         progress: dict[str, object] = {"phase": "fetch", "record_count": None}
@@ -401,6 +403,8 @@ def sync_ledger(db: Session, *, client: HcsClient | None = None, target: Target 
     run.status = ("FAILED" if errors else "SKIPPED") if not stats else ("PARTIAL" if errors else "SUCCESS")
     run.error_summary = "\n".join(errors[:20]) or None
     run.finished_at, run.api_calls = utcnow(), max(0, client.calls - calls_before)
+    execution_runtime.progress("saving", current=len(stats), total=len(wanted), unit="类资源",
+                               message="保存台账同步结果", api_calls=run.api_calls)
     db.commit()
     log.info("ledger_sync_finished", extra={"event": "ledger_sync_finished", "run_id": run.id,
              "tenant_id": target.tenant_id, "project_ref": target.project_ref, "status": run.status,

@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field, StrictInt, field_validator
 from app.metrics import SOURCES
 
 from .common import ORMModel
+from .task_execution import ExecutionOut
 
 
 class TaskRunOut(ORMModel):
@@ -15,7 +16,7 @@ class TaskRunOut(ORMModel):
     project_scope: str = "UNKNOWN"
     project_label: str = "历史未知项目（未记录）"
     trigger_type: str
-    started_at: datetime
+    started_at: datetime | None = None
     finished_at: datetime | None = None
     status: str
     resource_total: int
@@ -23,6 +24,24 @@ class TaskRunOut(ORMModel):
     api_calls: int
     error_summary: str | None = None
     stats: dict = Field(default_factory=dict)
+    execution_id: str | None = None
+    run_id: int | None = None
+    request_id: str | None = None
+    phase: str | None = None
+    phase_label: str | None = None
+    current: int | None = None
+    total: int | None = None
+    unit: str | None = None
+    message: str | None = None
+    created_at: datetime | None = None
+    queued_at: datetime | None = None
+    heartbeat_at: datetime | None = None
+    deadline_at: datetime | None = None
+    elapsed_sec: float | None = None
+    timeout_sec: int | None = None
+    cancel_requested: bool = False
+    progress: dict = Field(default_factory=dict)
+    history: list[dict] = Field(default_factory=list)
 
 
 class TaskScopeOut(BaseModel):
@@ -43,6 +62,32 @@ class TaskScopeOut(BaseModel):
     effective_finished_at: datetime | None = None
     effective_resource_total: int | None = None
     effective_abnormal_total: int | None = None
+
+
+class TaskOut(BaseModel):
+    code: str
+    name: str
+    service: str
+    interval_sec: int
+    cron: str | None = None
+    enabled: bool
+    params: dict = Field(default_factory=dict)
+    effective_params: dict = Field(default_factory=dict)
+    parameter_schema: dict = Field(default_factory=dict)
+    next_run: datetime | str | None = None
+    next_run_source: str
+    types: list[str] = Field(default_factory=list)
+    note: str | None = None
+    checks: list[str] = Field(default_factory=list)
+    steps: list[str] = Field(default_factory=list)
+    min_interval: int = 30
+    skipped_tenants: list[str] = Field(default_factory=list)
+    scopes: list[TaskScopeOut] = Field(default_factory=list)
+    history_limit_per_scope: int = 12
+    runs: list[TaskRunOut] = Field(default_factory=list)
+    latest_execution: ExecutionOut | None = None
+    active_execution_count: int = 0
+    queued_count: int = 0
 
 
 class ProjectIn(BaseModel):

@@ -94,6 +94,46 @@ LEDGER_TYPES = [k for k, v in RESOURCE_TYPES.items() if v["ledger"]]
 INSPECT_ONLY_TYPES = [k for k, v in RESOURCE_TYPES.items() if not v["ledger"]]
 
 # ---- 采集范围：采集开关之下再细分，只巡检（或屏蔽）一部分对象 ----
+# MRS 任务页可编辑的有限参数；API 层使用 collectors.mrs_params.validate_mrs_params 校验。
+# 仅为参数数据，不含 endpoint、请求头、凭据或任意云端请求模板。
+MRS_NATIVE_PARAM_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "properties": {
+        "query_mode": {"type": "string", "default": "active_and_recent", "title": "查询模式",
+                       "enum": ["active_and_recent", "active_only", "recent_only", "all_history"],
+                       "description": "默认活动状态（不限制提交时间）并集近24h；仅最近会遗漏长期执行；全历史须显式选择。"},
+        "submitted_window_hours": {"type": "number", "default": 24, "exclusiveMinimum": 0, "maximum": 744,
+                                   "title": "近期提交窗口（小时）"},
+        "submitted_time_begin": {"type": "integer", "minimum": 100000000000, "maximum": 253402300799999,
+                                 "title": "显式窗口起点（UTC毫秒）"},
+        "submitted_time_end": {"type": "integer", "minimum": 100000000000, "maximum": 253402300799999,
+                               "title": "显式窗口终点（UTC毫秒，省略取本轮开始时间）"},
+        "page_size": {"type": "integer", "default": 100, "minimum": 1, "maximum": 1000, "title": "每页条数"},
+        "max_pages": {"type": "integer", "default": 24, "minimum": 1, "maximum": 200, "title": "整轮执行列表页数预算"},
+        "max_items": {"type": "integer", "default": 2000, "minimum": 1, "maximum": 20000,
+                      "title": "整轮返回条数预算（含跨查询重复）"},
+        "max_calls": {"type": "integer", "default": 30, "minimum": 1, "maximum": 400,
+                      "title": "整轮调用预算（逻辑查询与底层请求尝试分别受此上限约束，含发现/失败/重试）"},
+        "max_clusters": {"type": "integer", "default": 1000, "minimum": 1, "maximum": 20000,
+                         "title": "范围内集群数上限"},
+        "job_offset_mode": {"type": "string", "default": "page", "enum": ["page", "offset"],
+                            "title": "局点分页语义（均从1开始）"},
+        "elapsed_time_unit": {"type": ["string", "null"], "default": None,
+                              "enum": [None, "milliseconds", "seconds"], "title": "经局点确认的elapsed_time单位"},
+    },
+    "description": "活动查询不带时间窗；显式时间与小时窗口互斥。超预算/筛选矛盾不能记完整成功；硬deadline由执行器控制。",
+}
+MRS_NODE_PARAM_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "properties": {
+        "window_hours": {"type": "number", "default": 24, "exclusiveMinimum": 0, "maximum": 72,
+                         "title": "DataArts实例窗口（小时）"},
+        "max_details": {"type": "integer", "default": 500, "minimum": 1, "title": "每工作空间详情查询上限"},
+        "hcs_concurrency": {"type": "integer", "default": 4, "minimum": 1, "maximum": 16, "title": "详情查询并发数"},
+    },
+}
+MRS_TASK_PARAM_SCHEMAS = {"mrs_job_status": MRS_NATIVE_PARAM_SCHEMA, "dgc_mrs_node_status": MRS_NODE_PARAM_SCHEMA}
+
 # 每类资源可用于“包含 / 排除”规则的匹配维度。匹配引擎见 app.collectors.scope，存取与同步见 app.services.collect_scope。
 # - id / name：资源 ID / 名称；cluster 同时匹配集群名称与集群 ID
 # - env / business / owner / critical 来自台账管理字段（页面维护），只有台账类资源提供；
@@ -146,7 +186,8 @@ TASK_SPECS: tuple[TaskSpec, ...] = (
              default_enabled=False),
     TaskSpec("mrs_job_status", "MRS 原生作业执行", "mrs", 300, ("mrs_job",), ("job_status",),
              note="只读 MRS cluster_infos + V2 job-executions；局点已有调用证据，上传的 8.5.1 PDF 未列出 V2 作业；"
-                  "状态与结果分离，不猜 elapsed_time 单位，不按 Flink 类型推断流批", default_enabled=False),
+                  "默认活动状态无时间窗并集近24h，按执行去重；整轮页/条/调用预算，缺口不可报完整成功；"
+                  "状态与结果分离，不猜 elapsed_time 单位", default_enabled=False),
     TaskSpec("dgc_mrs_node_status", "DataArts MRS 节点状态", "dataarts", 300, ("dgc_mrs_node",), ("job_status",),
              note="独立读取 DataArts 实例详情的 MRSSpark/MapReduce/MRSFlinkJob/MRSHetuEngine/HiveSQL/SparkSQL 节点；"
                   "仅依赖 DataArts 工作空间，不代表 MRS 原生执行全集", default_enabled=False),
@@ -194,7 +235,8 @@ TASK_STEPS: dict[str, tuple[str, ...]] = {
     "dgc_realtime_status": ("读取已配置工作空间作业", "并发查询作业与节点状态", "评估状态规则"),
     "dgc_batch_instance": ("查询批作业及最近实例", "计算有效执行耗时和 P90 基线", "检查失败与运行超时"),
     "mrs_cluster_status": ("查询 MRS 集群", "检查集群状态"),
-    "mrs_job_status": ("读取 MRS 集群清单", "分页读取每个集群的原生作业执行", "分别检查状态与结果"),
+    "mrs_job_status": ("读取并筛选 MRS 集群", "按活动状态与近期窗口分页读取执行（共享整轮预算）",
+                       "按集群/执行ID去重并检查范围覆盖", "分别检查状态与结果"),
     "dgc_mrs_node_status": ("读取 DataArts 作业实例", "检查实例详情中的 MRS 类节点"),
     "gaussdb_status": ("查询 GaussDB 实例清单", "检查实例状态"),
     "gaussdb_storage": ("查询实例清单并筛选在线实例", "并发查询磁盘用量", "保存容量历史并检查磁盘规则"),

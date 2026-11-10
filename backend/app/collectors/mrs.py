@@ -15,6 +15,7 @@ from app.hcs import HcsError
 from .base import Observation, RunContext, log_collection_failure
 from .dataarts import BATCH_STATES, dataarts_error, millis, paged_list, text_or_none
 from .mrs_native import CLUSTER_STATES, MrsClusterCollector, MrsJobCollector  # noqa: F401 兼容原导入路径
+from .mrs_params import mrs_progress
 from .scope import subject_of
 
 log = logging.getLogger(__name__)
@@ -96,10 +97,18 @@ class DataArtsMrsNodeCollector:
             if not scope.keep({"workspace": ws}):      # 采集范围：整个工作空间在范围外，不请求实例列表
                 continue
             headers = {"workspace": ws} if ws else None
+            mrs_progress(ctx, "dataarts_mrs_workspace", workspace=ws, message="读取DataArts实例")
 
-            def fetch_instances(p: dict, h: dict | None = headers) -> dict:
-                return ctx.client.get("dataarts", "/v1/{project_id}/jobs/instances/detail",
+            def fetch_instances(p: dict, h: dict | None = headers, workspace: str = ws) -> dict:
+                mrs_progress(ctx, "dataarts_mrs_instances_page", unit="page", workspace=workspace, page=p["offset"],
+                             message="读取实例分页")
+                body = ctx.client.get("dataarts", "/v1/{project_id}/jobs/instances/detail",
                                       params={**window, **p}, headers=h)
+                mrs_progress(ctx, "dataarts_mrs_instances_page", current=p["offset"] + 1, unit="page", workspace=workspace,
+                             response_total=body.get("total") if isinstance(body, dict) else None,
+                             returned_count=len(body["instances"]) if isinstance(body, dict)
+                             and isinstance(body.get("instances"), list) else None)
+                return body
 
             try:
                 insts = paged_list(fetch_instances, "instances")
@@ -150,11 +159,21 @@ class DataArtsMrsNodeCollector:
                     return inst, None, e
 
             concurrency = max(1, min(16, int(ctx.params.get("hcs_concurrency", 4))))
+            results: list[tuple[dict, list[dict] | None, HcsError | None]] = []
             with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="dataarts-mrs") as pool:
-                results = [f.result() for f in [pool.submit(copy_context().run, fetch_detail, i) for i in pending]]
+                # 复用原详情线程池；只提交一批，批间由主线程进度回调检查执行器deadline/租约。
+                for start in range(0, len(pending), concurrency):
+                    mrs_progress(ctx, "dataarts_mrs_details", current=len(results), total=len(pending), unit="instance",
+                                 workspace=ws, message="读取实例详情批次")
+                    futures = [pool.submit(copy_context().run, fetch_detail, i) for i in pending[start:start + concurrency]]
+                    results.extend(f.result() for f in futures)
+                    mrs_progress(ctx, "dataarts_mrs_details", current=len(results), total=len(pending), unit="instance",
+                                 workspace=ws)
             stats["details_queried"] += len(results)
             failures = 0
             for inst, nodes, error in results:
+                mrs_progress(ctx, "dataarts_mrs_nodes_process", current=len(obs), unit="node", workspace=ws,
+                             instance_id=millis(inst["instanceId"]))
                 if error is not None or nodes is None:
                     failures += 1
                     ctx.errors.append(f"job={inst['jobName']}: {error}")
@@ -172,10 +191,13 @@ class DataArtsMrsNodeCollector:
                     observation = self._observation(ws, inst, n, now_ms, ctx)
                     observation.attrs["mrs_node_manifest"] = manifest
                     obs.append(observation)
+                stats["mrs_nodes"] = len(obs)
         if not scope.open:     # 节点级规则：详情与复用的快照里都可能含范围外的节点（"无 MRS 节点"的判断不受影响）
             obs = [o for o in obs if scope.keep(subject_of(o.resource_type, o.resource_id, o.name, o.attrs))]
         stats["mrs_nodes"] = len(obs)
         ctx.stats.update(dgc_mrs_nodes=stats)
+        mrs_progress(ctx, "dataarts_mrs_complete", current=len(obs), unit="node", instances=stats["instances"],
+                     details_queried=stats["details_queried"], details_reused=stats["details_reused"])
         if not ctx.errors:  # 有局部失败时本轮清单不完整，保留旧记录，避免丢掉未扫描作业的结论
             self._save_scan_state(ctx, seen_keys)
         return obs

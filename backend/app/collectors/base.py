@@ -56,6 +56,12 @@ class RunContext:
         只用已知的维度提问（其余维度不给），拿不准时保留，最终判定在巡检流水线。"""
         return self.scopes.get(self.tenant_id, resource_type) if self.scopes is not None else OPEN
 
+    def progress(self, phase: str | None = None, **details) -> None:
+        """向持久执行记录报告真实阶段与计数；直接运行采集器时为空操作。"""
+        from app.services.execution_runtime import progress
+
+        progress(phase, **details)
+
 
 def previous_attrs(ctx: RunContext, resource_type: str, ids: list[str], key: str) -> dict[str, dict]:
     """上一次保存在资源记录里的某个对象型属性（只读本租户、本项目）；接口本轮失败时用来保留上次的结果。"""

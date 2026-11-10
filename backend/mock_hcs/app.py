@@ -825,7 +825,9 @@ def mrs_clusters(ds: DS, pageSize: int = 10, currentPage: int = 1):  # noqa: N80
 @app.get("/v2/{project_id}/clusters/{cluster_id}/job-executions")
 def mrs_native_job_executions(ds: DS, cluster_id: str, offset: int = Query(1, ge=1),
                               limit: int = Query(100, ge=1, le=1000),
-                              submitted_time_begin: int | None = None):
+                              submitted_time_begin: int | None = None, submitted_time_end: int | None = None,
+                              job_state: str | None = Query(None, pattern=
+                                  "^(NEW|NEW_SAVING|SUBMITTED|ACCEPTED|RUNNING|FINISHED|FAILED|KILLED)$")):
     """仅开发合成契约，offset 为 1 起始页码，不作为 HCS 8.5.1 产品文档证据。"""
     if not any(c["clusterId"] == cluster_id for c in oa.mrs_clusters(ds)):
         raise err(404, "cluster not found")
@@ -836,8 +838,12 @@ def mrs_native_job_executions(ds: DS, cluster_id: str, offset: int = Query(1, ge
              "submitted_time": base - 1000 * i, "started_time": base,
              "finished_time": base + 60_000 if i == 1 else None,
              "elapsed_time": 60_000 if i == 1 else 300_000} for i in (1, 2)]
+    if job_state is not None:
+        rows = [r for r in rows if r["job_state"] == job_state]
     if submitted_time_begin is not None:
         rows = [r for r in rows if r["submitted_time"] >= submitted_time_begin]
+    if submitted_time_end is not None:
+        rows = [r for r in rows if r["submitted_time"] <= submitted_time_end]
     return {"total_record": len(rows), "job_list": _page(rows, offset, limit)}
 
 

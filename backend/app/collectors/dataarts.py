@@ -2,7 +2,7 @@ import logging
 import math
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextvars import copy_context
 from urllib.parse import quote
 
@@ -46,7 +46,8 @@ def _display_time(value: object) -> str | int | float | None:
     return None
 
 
-def paged_list(fetch: Callable[[dict], dict], key: str) -> list[dict]:
+def paged_list(fetch: Callable[[dict], dict], key: str, *, ctx: RunContext | None = None,
+               phase: str = "dataarts_list", workspace: str = "", **details) -> list[dict]:
     # EDOC1100450764 的两个列表都把 offset 定义为从 0 开始的页号，而非记录数。
     expected_total: int | None = None
 
@@ -59,6 +60,12 @@ def paged_list(fetch: Callable[[dict], dict], key: str) -> list[dict]:
         if expected_total is not None and total != expected_total:
             raise dataarts_error("DataArts 分页 total 发生变化，未使用不完整清单或计算基线")
         expected_total = total
+        if ctx is not None:
+            pages = max(1, math.ceil(total / params["limit"]))
+            ctx.progress(phase, current=min(params["offset"] + 1, pages), total=pages, unit="page",
+                         workspace=workspace,
+                         returned_count=len(body.get(key, [])) if isinstance(body.get(key), list) else None,
+                         message="读取 DataArts 分页", **details)
         return body
     return list(page_all(complete, key, mode="page", start=0, limit=100))
 
@@ -78,7 +85,7 @@ def _list_jobs(ctx: RunContext, workspace: str, job_type: str) -> list[dict]:
         _page_log(ctx, workspace, "job_definitions", body, "jobs", params, job_type=job_type)
         return body
 
-    jobs = paged_list(fetch, "jobs")
+    jobs = paged_list(fetch, "jobs", ctx=ctx, phase="dataarts_job_list", workspace=workspace, job_type=job_type)
     if any(not isinstance(job.get("name"), str) or not job["name"]
            or job.get("jobType") not in (None, job_type) for job in jobs):
         raise dataarts_error("DataArts 作业清单包含无效名称或不匹配的 jobType")
@@ -142,7 +149,12 @@ def _definition_metadata(ctx: RunContext, workspace: str, jobs: list[dict], reso
 
     concurrency = max(1, min(16, int(ctx.params.get("hcs_concurrency", 4))))
     with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="dataarts-definition") as pool:
-        results = [future.result() for future in [pool.submit(copy_context().run, fetch, job) for job in jobs]]
+        futures = [pool.submit(copy_context().run, fetch, job) for job in jobs]
+        results = []
+        for index, future in enumerate(as_completed(futures), 1):
+            results.append(future.result())
+            ctx.progress("dataarts_definitions", current=index, total=len(jobs), unit="job",
+                         workspace=workspace, message="读取作业定义")
     failed = 0
     for name, _, error in results:
         if error is not None:
@@ -242,12 +254,22 @@ class DataArtsRealtimeCollector:
 
             # 列表接口未保证含节点状态，仍查询所有明细；仅 HTTP 并发，ORM/观测组装留在主线程。
             concurrency = max(1, min(16, int(ctx.params.get("hcs_concurrency", 4))))
+            ctx.progress("dataarts_realtime_status", current=0, total=len(jobs), unit="job",
+                         workspace=ws, message="查询已选实时作业状态")
             with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="dataarts") as pool:
                 futures = [pool.submit(copy_context().run, fetch_status, job) for job in jobs]
-                states = [future.result() for future in futures]
+                positions = {future: index for index, future in enumerate(futures)}
+                states: list[tuple[dict, dict | None, HcsError | None] | None] = [None] * len(futures)
+                for completed, future in enumerate(as_completed(futures), 1):
+                    states[positions[future]] = future.result()
+                    ctx.progress("dataarts_realtime_status", current=completed, total=len(jobs), unit="job",
+                                 workspace=ws, message="查询已选实时作业状态")
             metadata = _definition_metadata(ctx, ws, jobs, "dgc_realtime_job")
             failures = 0
-            for j, st, error in states:
+            for result in states:
+                if result is None:
+                    raise RuntimeError("DataArts 状态采集线程未完成")
+                j, st, error = result
                 if error or st is None:
                     failures += 1
                     ctx.errors.append(f"job={j['name']}: {error}" if error else f"job={j['name']}: 无状态响应")
@@ -329,7 +351,8 @@ class DataArtsBatchCollector:
 
             instance_failed = False
             try:
-                insts = paged_list(fetch_instances, "instances")
+                insts = paged_list(fetch_instances, "instances", ctx=ctx, phase="dataarts_batch_instances",
+                                   workspace=ws, job_type="BATCH")
                 if any(not isinstance(i.get("jobName"), str) or not i["jobName"]
                        or millis(i.get("planTime")) is None or not isinstance(i.get("status"), str)
                        or millis(i.get("instanceId")) is None for i in insts):

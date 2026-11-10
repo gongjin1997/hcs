@@ -79,7 +79,8 @@ def test_gaussdb_schedule_and_clear_preserve_other_params_and_are_idempotent(mem
     mem_db.add(task)
     mem_db.commit()
     response = client.put("/api/v1/system/tasks/gaussdb_status", json={"interval_sec": 600, "enabled": False})
-    assert response.status_code == 200 and response.json()["data"]["params"] == params
+    assert response.status_code == 200 and response.json()["data"]["params"] == {"timeout_sec": 300}
+    assert not {"aom", "native", "window_hours"} & response.json()["data"]["params"].keys()
     assert task.params == params and task.interval_sec == 600 and not task.enabled
     cleared = client.put("/api/v1/system/tasks/gaussdb_status", json={"aom": None})
     assert cleared.status_code == 200 and task.params == {"window_hours": 6, "native": {"slow_sql": True}}
@@ -113,7 +114,9 @@ def test_any_task_can_clear_legacy_aom_without_losing_other_params(mem_db, manag
     mem_db.add(task)
     mem_db.commit()
     response = client.put(f"/api/v1/system/tasks/{code}", json={"interval_sec": 600})
-    assert response.status_code == 200 and response.json()["data"]["params"] == params
+    assert response.status_code == 200 and response.json()["data"]["params"] == {"timeout_sec": 300}
+    assert task.params == params  # Legacy/internal parameters stay stored, but are not a public response contract.
+    assert not {"aom", "native", "window_hours"} & response.json()["data"]["params"].keys()
     cleared = client.put(f"/api/v1/system/tasks/{code}", json={"aom": None})
     assert cleared.status_code == 200 and task.params == {"native": {"keep": True}, "window_hours": 6}
     assert client.put(f"/api/v1/system/tasks/{code}", json={"aom": None}).status_code == 200

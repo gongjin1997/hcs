@@ -1,3 +1,4 @@
+import { taskWorkspaceDependencies } from './taskWorkspaceHarness'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { compileScript, parse } from '@vue/compiler-sfc'
@@ -109,6 +110,7 @@ export function mountPersonnel(file: string, options: {
     '@/stores/user': { useUserStore: () => ({ user: options.user ?? { id: 1, tenant_ids: null }, can: options.can ?? (() => true), canAny: () => true }) },
     'vue-router': { useRoute: () => ({ query: {} }), useRouter: () => ({ replace, push }) },
     './useUserImport': { useUserImport },
+    ...taskWorkspaceDependencies(options.api),
     ...options.dependencies,
   }
   const exports: Record<string, unknown> = {}

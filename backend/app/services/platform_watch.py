@@ -1,7 +1,7 @@
 """平台自身告警（服务 = platform）：平台自己出问题时也要有人知道。
 
 | 规则 | 触发 | 恢复 |
-| R-PLAT-001 巡检任务连续失败 | 同任务/租户/项目 FAILED、TIMEOUT、PARTIAL 累计至 N 次，SKIPPED 不清零 | 同范围真实 SUCCESS |
+| R-PLAT-001 巡检任务连续失败 | FAILED/TIMEOUT/PARTIAL/INTERRUPTED 累计；排队/取消/跳过不清零 | 同范围真实 SUCCESS |
 | R-PLAT-002 租户认证失败 | 任务报 401 / 403（账号密码错误、AK/SK 失效、权限被回收） | 同任务/租户/项目真实 SUCCESS |
 | R-PLAT-003 通知发送失败 | 通知重试 5 次后仍失败（SMTP 不可用、收件人被拒） | 之后有通知发送成功 |
 | R-PLAT-004 后台进程心跳超时 | 调度 / 通知进程超过 N 分钟没有心跳（默认 3） | 心跳恢复 |
@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import and_, case, event, func, or_, select
 from sqlalchemy.orm import Session
 
 from app import __version__
@@ -32,6 +32,7 @@ from app.models import (
     InspectionTask,
     Notification,
     Role,
+    TaskExecution,
     User,
     WorkerHeartbeat,
 )
@@ -62,13 +63,69 @@ RULES: dict[str, dict[str, str]] = {
     "R-PLAT-004": {"name": "后台进程心跳超时", "resource_type": "platform_worker", "check_item": "heartbeat",
                    "runbook": "1. 在部署目录执行 make status 查看 scheduler / notifier 容器是否在运行、是否反复重启\n"
                               "2. make logs S=scheduler（或 notifier）查看最近的报错（常见：数据库连接失败、磁盘满）\n"
-                              "3. 执行 docker compose up -d scheduler notifier 重新拉起；心跳恢复后自动恢复\n"
+                              "3. 执行 docker-compose up -d scheduler notifier 重新拉起；心跳恢复后自动恢复\n"
                               "4. 调度进程停止期间巡检不会执行，恢复后检查“巡检任务”页各任务的最近运行"},
 }
 AUTH_ERROR = re.compile(r"\[(401|403)\]")
 WORKERS = {"scheduler": "调度进程", "notifier": "通知进程"}
-UNSUCCESSFUL = ("FAILED", "TIMEOUT", "PARTIAL")
-NEUTRAL = ("RUNNING", "SKIPPED")
+UNSUCCESSFUL = ("FAILED", "TIMEOUT", "PARTIAL", "INTERRUPTED")
+NEUTRAL = ("QUEUED", "RUNNING", "SKIPPED", "CANCELLED")
+_PENDING_RUNS = "_platform_watch_pending_runs"
+_COMMITTED_RUNS = "_platform_watch_committed_runs"
+
+
+def defer_on_run(db: Session, run_id: int) -> None:
+    """Queue one outcome after its enclosing transaction commits.
+
+    Durable finish owns the ACTIVE-to-terminal guard and calls this before
+    committing. A fresh Session is required because after_commit cannot issue
+    SQL on the Session whose transaction just completed. Dispatch waits until
+    transaction end so its original connection is released even with pool_size=1.
+    """
+    transaction = db.get_nested_transaction() or db.get_transaction()
+    if transaction is None:
+        raise RuntimeError("任务终态必须在事务内登记平台告警")
+    pending = db.info.setdefault(_PENDING_RUNS, {})
+    pending.setdefault(run_id, transaction)
+
+
+@event.listens_for(Session, "after_commit")
+def _mark_committed_runs(db: Session) -> None:
+    if db.in_nested_transaction():
+        return
+    db.info[_COMMITTED_RUNS] = db.info.pop(_PENDING_RUNS, {})
+
+
+@event.listens_for(Session, "after_transaction_end")
+def _publish_committed_runs(db: Session, transaction) -> None:
+    if transaction.parent is not None:
+        return
+    pending = db.info.pop(_COMMITTED_RUNS, {})
+    for run_id in pending:
+        try:
+            with Session(bind=db.get_bind(), expire_on_commit=False, autoflush=False) as watched:
+                run = watched.get(InspectionRun, run_id)
+                if run is not None and run.finished_at is not None and run.status not in ("QUEUED", "RUNNING"):
+                    _on_run(watched, run)
+                    watched.commit()
+        except Exception:
+            log.exception("platform watch failed after committing run %s", run_id)
+
+
+@event.listens_for(Session, "after_soft_rollback")
+def _discard_rolled_back_runs(db: Session, previous_transaction) -> None:
+    def belongs(transaction) -> bool:
+        while transaction is not None:
+            if transaction is previous_transaction:
+                return True
+            transaction = transaction.parent
+        return False
+
+    if previous_transaction.parent is None:
+        db.info.pop(_PENDING_RUNS, None)
+    else:
+        db.info[_PENDING_RUNS] = {run_id: transaction for run_id, transaction in db.info.get(_PENDING_RUNS, {}).items()
+                                if not belongs(transaction)}
 
 
 def run_outcome(runs: Sequence, *, skipped: bool = False) -> str:
@@ -76,12 +133,16 @@ def run_outcome(runs: Sequence, *, skipped: bool = False) -> str:
     statuses = [r.status for r in runs]
     if not statuses or all(status == "SKIPPED" for status in statuses):
         return "SKIPPED"
-    if all(status in ("FAILED", "TIMEOUT") for status in statuses):
+    if any(status == "RUNNING" for status in statuses):
+        return "RUNNING"
+    if any(status == "QUEUED" for status in statuses):
+        return "QUEUED"
+    if all(status == "CANCELLED" for status in statuses):
+        return "CANCELLED"
+    if all(status in ("FAILED", "TIMEOUT", "INTERRUPTED") for status in statuses):
         return "FAILED"
     if all(status == "SUCCESS" for status in statuses) and not skipped:
         return "SUCCESS"
-    if any(status == "RUNNING" for status in statuses):
-        return "RUNNING"
     return "PARTIAL"
 
 
@@ -97,7 +158,7 @@ def task_scopes(db: Session, *, tenant_ids: list[int] | None = None, include_glo
     """One deterministic row per task/tenant/project, without a global history limit.
 
     SQL windows count unsuccessful completed attempts back to the last real
-    SUCCESS. SKIPPED/RUNNING preserve evidence but neither reset nor increment.
+    SUCCESS. QUEUED/RUNNING/SKIPPED/CANCELLED neither reset nor increment.
     Ordering uses completion time, with ID as a stable tie breaker.
     """
     model = InspectionRun
@@ -180,7 +241,8 @@ def scope_execution_status(scope: dict) -> str:
 
 def task_last_status(scopes: list[dict]) -> str | None:
     values = [scope_execution_status(scope) for scope in scopes]
-    return next((status for status in ("FAILED", "TIMEOUT", "PARTIAL", "RUNNING", "SKIPPED", "SUCCESS")
+    return next((status for status in ("FAILED", "TIMEOUT", "INTERRUPTED", "PARTIAL", "RUNNING", "QUEUED",
+                                       "CANCELLED", "SKIPPED", "SUCCESS")
                  if status in values), None)
 
 
@@ -273,7 +335,11 @@ def _tenant_label(db: Session, tenant_id: int | None) -> str:
 
 def on_run(db: Session, run: InspectionRun) -> None:
     """每次任务运行结束后调用（巡检 / 台账同步 / 数据清理）。任何异常只记日志，不影响任务本身。"""
+    # Durable lifecycle registered the terminal outcome before commit. The old
+    # pipeline/ledger callback must not emit the same platform outcome again.
     try:
+        if db.scalar(select(TaskExecution.id).where(TaskExecution.run_id == run.id).limit(1)) is not None:
+            return
         _on_run(db, run)
         db.commit()
     except Exception:  # noqa: BLE001

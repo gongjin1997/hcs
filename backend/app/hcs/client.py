@@ -101,8 +101,14 @@ class HcsClient:
 
     def _send(self, service: str, method: str, path: str, *, params: dict | None = None, json: Any = None,
               headers: dict | None = None, host_vars: dict | None = None) -> httpx.Response:
+        from app.services.execution_runtime import progress
+
+        progress(api_calls=self.calls, service=service)
         with request_budget(seconds=self.acquire_timeout):
-            return self._send_scoped(service, method, path, params=params, json=json, headers=headers, host_vars=host_vars)
+            try:
+                return self._send_scoped(service, method, path, params=params, json=json, headers=headers, host_vars=host_vars)
+            finally:
+                progress(api_calls=self.calls, service=service)
 
     def _send_scoped(self, service: str, method: str, path: str, *, params: dict | None = None, json: Any = None,
                      headers: dict | None = None, host_vars: dict | None = None) -> httpx.Response:

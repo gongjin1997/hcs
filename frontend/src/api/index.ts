@@ -123,7 +123,7 @@ export const collectPodEvents = () =>
 
 // ---- 系统：平台信息 / 巡检任务 ----
 export interface TaskRun {
-  id: number; tenant_id: number | null; tenant_name: string | null; trigger_type: string; started_at: string; finished_at: string | null
+  id: number; tenant_id: number | null; tenant_name: string | null; trigger_type: string; started_at: string | null; finished_at: string | null
   status: string; resource_total: number; abnormal_total: number; api_calls: number; error_summary: string | null; stats: Record<string, any>
   project_ref?: number | null; project_scope?: 'PROJECT' | 'UNKNOWN' | 'GLOBAL'; project_label?: string
 }

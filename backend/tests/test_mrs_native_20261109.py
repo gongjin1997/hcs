@@ -42,8 +42,13 @@ class NativeClient:
         if self.respond:
             return deepcopy(self.respond(path, kwargs["params"]))
         p = kwargs["params"]
+        jobs = self.jobs
+        if "job_state" in p:
+            jobs = [j for j in jobs if j.get("job_state") == p["job_state"]]
+        if "submitted_time_begin" in p:
+            jobs = [j for j in jobs if p["submitted_time_begin"] <= j["submitted_time"] <= p["submitted_time_end"]]
         start = (p["offset"] - 1) * p["limit"]
-        return {"job_list": deepcopy(self.jobs[start:start + p["limit"]]), "total_record": str(len(self.jobs))}
+        return {"job_list": deepcopy(jobs[start:start + p["limit"]]), "total_record": str(len(jobs))}
 
 
 def context(client, **params):
@@ -61,8 +66,9 @@ def test_native_only_calls_mrs_and_preserves_same_name_concurrent_executions():
     ctx = context(client, page_size=1)
     rows = MrsJobCollector().collect(ctx)
     assert {o.resource_id for o in rows} == {"c1/a", "c1/b"}
-    assert {o.name for o in rows} == {"same"} and len(client.calls) == 3
+    assert {o.name for o in rows} == {"same"} and len(client.calls) == 8
     assert all(o.resource_type == "mrs_job" and o.attrs["source"] == "mrs_job_execution" for o in rows)
+    rows.sort(key=lambda row: row.resource_id)
     assert rows[0].status_raw == "FINISHED" and rows[0].facts["job_result"] == "SUCCEEDED"
     assert rows[0].attrs["engine"] is None and "mode" not in rows[0].attrs
     assert rows[0].metrics["run_minutes"] == 1 and rows[1].metrics["run_minutes"] == 2
@@ -137,7 +143,7 @@ def test_incomplete_or_contradictory_pagination_never_yields_partial_snapshot(ca
         if case == "changing-total":
             return {"total_record": 2 if page == 1 else 3, "job_list": [job(str(page))]}
         return {"total_record": 0, "job_list": [job()]}
-    ctx = context(NativeClient(respond=respond), page_size=1)
+    ctx = context(NativeClient(respond=respond), page_size=1, query_mode="all_history")
     assert MrsJobCollector().collect(ctx) == [] and ctx.errors
 
 
@@ -147,7 +153,8 @@ def test_short_pages_follow_total_with_one_based_record_offset():
     def respond(path, p):
         offsets.append(p["offset"])
         return {"total_record": 3, "job_list": [job(str(p["offset"]))]}
-    rows = MrsJobCollector().collect(context(NativeClient(respond=respond), job_offset_mode="offset", page_size=100))
+    rows = MrsJobCollector().collect(context(NativeClient(respond=respond), job_offset_mode="offset", page_size=100,
+                                           query_mode="all_history"))
     assert len(rows) == 3 and offsets == [1, 2, 3]
 
 
@@ -156,7 +163,7 @@ def test_one_cluster_failure_preserves_other_cluster_and_marks_partial():
         if "/c1/" in path:
             raise HcsError(503, "SYNTHETIC.FAILURE", "unavailable")
         return {"total_record": 1, "job_list": [job()]}
-    ctx = context(NativeClient(clusters=[("c1", "one"), ("c2", "two")], respond=respond))
+    ctx = context(NativeClient(clusters=[("c1", "one"), ("c2", "two")], respond=respond), query_mode="all_history")
     assert [row.resource_id for row in MrsJobCollector().collect(ctx)] == ["c2/exec-1"] and len(ctx.errors) == 1
 
 
@@ -183,7 +190,7 @@ def test_scope_cuts_clusters_before_job_calls_and_execution_ids_after_list():
     ctx.scopes = Scopes(raw={(11, "mrs_job"): {"rules": [{"effect": "include", "match": {
         "cluster": ["two"], "job": ["same"], "id": ["b"]}}]}})
     assert [row.resource_id for row in MrsJobCollector().collect(ctx)] == ["c2/b"]
-    assert len(client.calls) == 2 and "/c2/" in client.calls[1][1]
+    assert len(client.calls) == 7 and all("/c2/" in call[1] for call in client.calls[1:])
 
 
 def test_legacy_workspace_scope_rejected_before_calls():
@@ -271,10 +278,11 @@ def test_default_and_legacy_node_window_never_filter_long_running_native_jobs():
         assert rows[0].attrs["duration_basis"] == "start_now_milliseconds"
 
 
-def test_explicit_native_submitted_window_is_opt_in():
+def test_explicit_native_submitted_window_only_changes_recent_partition():
     client = NativeClient()
     MrsJobCollector().collect(context(client, submitted_window_hours=12))
-    assert client.calls[1][2]["params"]["submitted_time_begin"] == NOW - 12 * 3_600_000
+    assert "submitted_time_begin" not in client.calls[1][2]["params"]
+    assert client.calls[-1][2]["params"]["submitted_time_begin"] == NOW - 12 * 3_600_000
 
 
 @pytest.mark.parametrize("state", ["NEW", "NEW_SAVING", "SUBMITTED", "ACCEPTED", "RUNNING"])
@@ -366,7 +374,7 @@ def test_native_queue_and_safe_page_diagnostics(caplog):
         rows = MrsJobCollector().collect(context(client))
     assert rows[0].attrs["queue"] == "analytics"
     pages = [r for r in caplog.records if r.msg == "job_collection_page"]
-    assert len(pages) == 1 and pages[0].cloud_service == "mrs"
-    assert pages[0].response_total == pages[0].returned_count == 1
+    assert len(pages) == 6 and all(p.cloud_service == "mrs" for p in pages)
+    assert pages[-1].query == "recent" and pages[-1].response_total == pages[-1].returned_count == 1
     assert any(r.msg == "job_collection_summary" and r.executions == 1 for r in caplog.records)
     assert "do-not-log-payload" not in caplog.text

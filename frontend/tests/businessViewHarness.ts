@@ -1,3 +1,4 @@
+import { taskWorkspaceDependencies } from './taskWorkspaceHarness'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { compileScript, parse } from '@vue/compiler-sfc'
@@ -63,6 +64,7 @@ export function mountBusinessScript<T extends object>(file: string, options: {
     './cluster-options': podClusterOptions,
     './collect-scope': collectScope,
     'vue-router': { useRoute: () => route, useRouter: () => ({ replace: vi.fn(async () => undefined), push: vi.fn(async () => undefined) }) },
+    ...taskWorkspaceDependencies(options.api),
     ...options.dependencies,
   }
   const exports: Record<string, unknown> = {}

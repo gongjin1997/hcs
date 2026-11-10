@@ -285,16 +285,16 @@ describe('通知模拟和记录筛选', () => {
 })
 
 describe('系统与容器重复提交', () => {
-  it('手动运行任务不得重叠并覆盖运行中标记', async () => {
+  it('同一任务重复点击只接受一次排队请求', async () => {
     const pending = deferred<unknown>()
     const api = { runTask: vi.fn(() => pending.promise), listTasks: vi.fn(async () => []), reportSchedule: vi.fn(async () => null) }
-    const view = mountBusinessScript<{ run(task: { code: string; name: string }): Promise<void>; running: string }>('system/TaskPanel.vue', { api })
+    const view = mountBusinessScript<{ run(task: { code: string; name: string; enabled: boolean; runs: never[] }): Promise<void>; running: string }>('system/TaskPanel.vue', { api })
     dispose.push(view.unmount)
-    const run = view.state.run({ code: 'ecs_status', name: 'ECS' })
-    await view.state.run({ code: 'dcs_status', name: 'DCS' })
+    const run = view.state.run({ code: 'ecs_status', name: 'ECS', enabled: true, runs: [] })
+    await view.state.run({ code: 'ecs_status', name: 'ECS', enabled: true, runs: [] })
     expect(api.runTask).toHaveBeenCalledTimes(1)
     expect(view.state.running).toBe('ecs_status')
-    pending.resolve({ status: 'SUCCESS', runs: [] }); await run
+    pending.resolve({ status: 'QUEUED', execution_ids: ['accepted'], runs: [], skipped: [], request_id: 'request', deduplicated: false }); await run
     expect(view.state.running).toBe('')
   })
 

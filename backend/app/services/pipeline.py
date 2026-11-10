@@ -49,6 +49,7 @@ from . import (
     collect_scope,
     collect_switch,
     collection_policy,
+    execution_runtime,
     inspection_evidence,
     job_selection,
     platform_watch,
@@ -458,7 +459,8 @@ def process_observations(db: Session, service: str, observations: list[Observati
                 observations=groups[(resource.resource_type, resource.resource_id)])
     db.flush()
     refresh_health(db, list({**missing_resources, **{r.id: r for r in resources.values()}}.values()), now)
-    db.commit()
+    if execution_runtime.current() is None:
+        db.commit()
     return events, sum(1 for r in resources.values() if r.health not in ("OK", "UNKNOWN"))
 
 
@@ -466,7 +468,8 @@ def run_task(db: Session, task_code: str, *, client: HcsClient | None = None, ta
              trigger: str = "SCHEDULE") -> InspectionRun:
     """对单个租户目标执行一次任务（target 为空时按环境变量单账号兜底）。"""
     target = target or (legacy_target() if task_code != CLEANUP_TASK else None)
-    with log_context(task=task_code, task_execution_id=uuid4().hex, run_id=None,
+    control = execution_runtime.current()
+    with log_context(task=task_code, task_execution_id=control.execution_id if control else uuid4().hex, run_id=None,
                      tenant_id=target.tenant_id if target else None,
                      project_id=target.project_id if target else None,
                      project_ref=target.project_ref if target else None, trigger=trigger):
@@ -479,7 +482,8 @@ def run_task(db: Session, task_code: str, *, client: HcsClient | None = None, ta
             claimed = collection_policy.claim(db, target.tenant_id, target.project_ref, phase, policy,
                                                force=trigger != "SCHEDULE")
             if claimed is None:
-                run = InspectionRun(task_code=task_code, tenant_id=target.tenant_id, project_ref=target.project_ref,
+                run = execution_runtime.new_run(db, task_code=task_code, tenant_id=target.tenant_id,
+                                    project_ref=target.project_ref,
                                     trigger_type=trigger, started_at=utcnow(), finished_at=utcnow(), status="SKIPPED",
                                     error_summary="采集阶段已关闭、尚未到期或正在执行", stats={"phase": phase})
                 db.add(run)
@@ -507,14 +511,16 @@ def _run_task(db: Session, task_code: str, *, client: HcsClient | None, target: 
     target = target or legacy_target()
     if task_code == LEDGER_TASK:                   # 台账同步与巡检共用任务调度、运行记录
         log.info("task_started", extra={"event": "task_started", "cloud_service": "ledger"})
-        result = sync_ledger(db, client=client, target=target, trigger=trigger)
+        control = execution_runtime.current()
+        result = sync_ledger(db, client=client, target=target, trigger=trigger,
+                             types=control.params.get("_ledger_types") if control else None)
         _log_run(result, started, cloud_service="ledger")
         return result
     collector = TASKS.get(task_code)
     if collector is None:
         raise BizError(ErrorCode.NOT_FOUND, f"未实现的巡检任务：{task_code}", 404)
     task = db.get(InspectionTask, task_code)
-    run = InspectionRun(task_code=task_code, tenant_id=target.tenant_id, project_ref=target.project_ref,
+    run = execution_runtime.new_run(db, task_code=task_code, tenant_id=target.tenant_id, project_ref=target.project_ref,
                         trigger_type=trigger, started_at=utcnow(),
                         status="RUNNING")
     db.add(run)
@@ -546,9 +552,11 @@ def _run_task(db: Session, task_code: str, *, client: HcsClient | None, target: 
         calls_before, stats_before = client.calls, client.metrics_snapshot()
         collection = settings_service.get_collect(db)
         client.configure_qps(collection.hcs_qps)
+        control = execution_runtime.current()
+        params = control.params if control else (task.params if task else {})
         ctx = RunContext(client=client, account=target.code, project_id=target.project_id,
                          workspaces=list(target.workspaces), params={"hcs_concurrency": collection.hcs_concurrency,
-                                                                    **((task.params if task else {}) or {})},
+                                                                    **(params or {})},
                          tenant_id=target.tenant_id, tenant_name=target.short_name, project_ref=target.project_ref,
                          region=target.region, db=db, tenant=target.tenant)
         ctx.params.update(_task_code=task_code)
@@ -565,7 +573,9 @@ def _run_task(db: Session, task_code: str, *, client: HcsClient | None, target: 
             ctx.params.pop("prometheus", None)
             if policy.prometheus is not None:
                 ctx.params["prometheus"] = dict(policy.prometheus.queries)
+        ctx.progress("collecting", message="读取云资源状态")
         observations = collector.collect(ctx)
+        ctx.progress("evaluating", current=len(observations), unit="条观测", message="检查采集范围并评估规则")
         if collector.service == "gaussdb":
             _inspection_task_scope(db, ctx)
             if "_inspection_tasks" in ctx.params and task_code not in ctx.params["_inspection_tasks"]:
@@ -615,6 +625,8 @@ def _run_task(db: Session, task_code: str, *, client: HcsClient | None, target: 
         client_calls = max(0, client.calls - calls_before) if client is not None else 0
         if client is not None:
             run.stats = {**(run.stats or {}), "hcs": metrics_delta(client.metrics_snapshot(), stats_before)}
+    execution_runtime.progress("saving", current=run.resource_total, total=run.resource_total,
+                               unit="resource", message="保存巡检结果", api_calls=client_calls)
     run.finished_at, run.api_calls = utcnow(), client_calls
     db.commit()
     _log_run(run, started, observation_count=len(observations), event_count=len(events), error_count=error_count)
@@ -625,14 +637,15 @@ def _run_task(db: Session, task_code: str, *, client: HcsClient | None, target: 
 
 
 def run_cleanup_task(db: Session, trigger: str = "SCHEDULE") -> InspectionRun:
-    with log_context(task=CLEANUP_TASK, task_execution_id=uuid4().hex, run_id=None,
+    control = execution_runtime.current()
+    with log_context(task=CLEANUP_TASK, task_execution_id=control.execution_id if control else uuid4().hex, run_id=None,
                      tenant_id=None, project_id=None, project_ref=None, trigger=trigger):
         return _run_cleanup_task(db, trigger)
 
 
 def _run_cleanup_task(db: Session, trigger: str) -> InspectionRun:
     started = perf_counter()
-    run = InspectionRun(task_code=CLEANUP_TASK, tenant_id=None, trigger_type=trigger, started_at=utcnow(),
+    run = execution_runtime.new_run(db, task_code=CLEANUP_TASK, tenant_id=None, trigger_type=trigger, started_at=utcnow(),
                         status="RUNNING", stats={})
     db.add(run)
     db.commit()

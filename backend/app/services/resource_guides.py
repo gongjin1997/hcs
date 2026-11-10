@@ -1158,8 +1158,11 @@ _CONTENT: dict[str, tuple[str, list[str], list[str], list[str]]] = {
         ["按集群及 job_id 核对状态与结果；同名执行分别展示和告警。",
          "FINISHED 仅表示执行结束，应继续核对 job_result；未知结果不认定成功。"],
         ["elapsed_time 单位须经局点确认；不由 Flink 类型推断流批模式。",
-         "默认无提交时间过滤，避免漏掉长期 Flink；submitted_window_hours 是显式过滤选项。"],
+         "默认 active_and_recent：五种活动状态不限制提交时间，再并集近24h执行，按cluster_id/job_id去重。",
+         "submitted_window_hours 只调整近期分支；可选 active_only/recent_only/all_history，后两者需明确理解覆盖范围。",
+         "max_pages/max_items/max_calls 是整轮共享预算；超限、分页不完整或筛选矛盾报告覆盖不可确认，不自动扫全历史。"],
         ["本局点历史调用成功，不代表上传的 HCS 8.5.1 PDF 完全确认 V2 契约。",
+         "官方公有云SDK定义job_state与提交时间筛选；逐页核对响应一致性不等于局点已证明无遗漏。",
          "旧 workspace/job/node 范围只继承到节点任务；native 采集开关关闭，待重新授权。", _STALE],
     ),
     "dgc_mrs_node": (

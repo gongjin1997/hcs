@@ -13,18 +13,20 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app import __version__
+from app.collectors.mrs_params import mrs_parameter_schema, validate_mrs_params
 from app.collectors.registry import TASKS
 from app.core.audit import Auditor, get_auditor
 from app.core.config import get_settings
 from app.core.db import get_db
 from app.core.deps import CurrentUser, Scope, get_scope, require_perm
 from app.core.events import broadcaster
-from app.core.response import BizError, ErrorCode, not_found, ok
+from app.core.response import ApiResponse, BizError, ErrorCode, not_found, ok
+from app.hcs import HcsError
 from app.ledger.sync import LEDGER_TASK
 from app.metrics import CAPABILITIES, SOURCES
 from app.models import AlarmEvent, InspectionRun, InspectionTask, Notification, WorkerHeartbeat
@@ -33,14 +35,15 @@ from app.models.base import utcnow
 from app.schemas.alarm import AlarmOut
 from app.schemas.collect_scope import ScopeIn
 from app.schemas.job_selection import JobResourceType, JobSelectionIn
-from app.schemas.system import TaskRunOut, TaskScopeOut
+from app.schemas.system import TaskOut, TaskRunOut, TaskScopeOut
+from app.schemas.task_execution import ExecutionAdmissionOut, TaskRunIn
 from app.services import (
     catalog,
     collect_scope,
     collect_switch,
+    execution_views,
     inspection_evidence,
     job_selection,
-    pipeline,
     platform_watch,
     settings_service,
     silence_service,
@@ -104,7 +107,11 @@ def info(_: object = Depends(require_perm("task:view", "tenant:view", any_of=Tru
 
 # ---------------- 巡检任务 ----------------
 class TaskPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     p90_min_samples: int | None = Field(None, strict=True, ge=1, le=10000)
+    timeout_sec: int | None = Field(None, strict=True, ge=15, le=3600)
+    mrs_options: dict | None = None
     interval_sec: int | None = Field(None, ge=30, le=7 * 86400)
     cron: str | None = None                  # 空字符串 = 改回按周期执行
     enabled: bool | None = None
@@ -144,13 +151,8 @@ def _tenant_name(tm: dict, tid: int | None) -> str | None:
     return (tm[tid].short_name or tm[tid].name) if tid in tm else None
 
 
-def _skipped(db: Session, code: str, scope: Scope, tm: dict) -> list[str]:
-    if code in (CLEANUP_TASK,):
-        return []
-    return [t.label for t in pipeline.skipped_targets(db, code, scope.tenant_ids)]
-
-
-@router.get("/tasks", summary="巡检任务与项目运行（每个租户项目独立保留最近记录）")
+@router.get("/tasks", summary="巡检任务与项目运行（每个租户项目独立保留最近记录）",
+            response_model=ApiResponse[list[TaskOut]])
 def tasks(db: Session = Depends(get_db), scope: Scope = Depends(get_scope),
           _: object = Depends(require_perm("task:view")), project_ref: Annotated[int | None, Query(ge=1)] = None,
           unknown_project: bool = False):
@@ -161,36 +163,44 @@ def tasks(db: Session = Depends(get_db), scope: Scope = Depends(get_scope),
     now = utcnow()
     all_scopes = platform_watch.task_scopes(db, tenant_ids=scope.tenant_ids, include_global=scope.full,
                                            project_ref=project_ref, unknown_project=unknown_project)
+    definitions = list(db.scalars(select(InspectionTask).order_by(InspectionTask.code)))
+    availability = execution_views.TargetAvailability(db, scope, definitions)
+    q = scope.apply(select(InspectionRun), InspectionRun.tenant_id, include_global=True)
+    if project_ref is not None:
+        q = q.where(InspectionRun.project_ref == project_ref)
+    if unknown_project:
+        q = q.where(InspectionRun.project_ref.is_(None),
+                    or_(InspectionRun.task_code != CLEANUP_TASK, InspectionRun.tenant_id.is_not(None)))
+    ranked = q.with_only_columns(InspectionRun.id, func.row_number().over(
+        partition_by=(InspectionRun.task_code, InspectionRun.tenant_id, InspectionRun.project_ref),
+        order_by=(func.coalesce(InspectionRun.finished_at, InspectionRun.started_at).desc(),
+                  InspectionRun.id.desc())).label("position")).subquery()
+    all_runs = list(db.scalars(select(InspectionRun).join(ranked, InspectionRun.id == ranked.c.id)
+                              .where(ranked.c.position <= 12)
+                              .order_by(func.coalesce(InspectionRun.finished_at, InspectionRun.started_at).desc(),
+                                        InspectionRun.id.desc())))
+    latest, run_executions, counts = execution_views.task_execution_data(
+        db, scope, all_runs, project_ref=project_ref, unknown_project=unknown_project)
     out = []
-    for t in db.scalars(select(InspectionTask).order_by(InspectionTask.code)):
-        q = scope.apply(select(InspectionRun).where(InspectionRun.task_code == t.code), InspectionRun.tenant_id,
-                        include_global=True)
-        if project_ref is not None:
-            q = q.where(InspectionRun.project_ref == project_ref)
-        if unknown_project:
-            q = q.where(InspectionRun.project_ref.is_(None),
-                        or_(InspectionRun.task_code != CLEANUP_TASK, InspectionRun.tenant_id.is_not(None)))
-        ranked = q.with_only_columns(InspectionRun.id, func.row_number().over(
-            partition_by=(InspectionRun.tenant_id, InspectionRun.project_ref),
-            order_by=(func.coalesce(InspectionRun.finished_at, InspectionRun.started_at).desc(),
-                      InspectionRun.id.desc())).label("position")).subquery()
-        runs = db.scalars(select(InspectionRun).join(ranked, InspectionRun.id == ranked.c.id)
-                          .where(ranked.c.position <= 12)
-                          .order_by(func.coalesce(InspectionRun.finished_at, InspectionRun.started_at).desc(),
-                                    InspectionRun.id.desc())).all()
+    for t in definitions:
+        runs = [r for r in all_runs if r.task_code == t.code]
         current = [s for s in all_scopes if s["task_code"] == t.code]
         next_run = nxt.get(t.code) if nxt else _estimate_next(t, runs[0].started_at if runs else None, now)
         out.append({"code": t.code, "name": t.name, "service": t.service, "interval_sec": t.interval_sec,
-                    "cron": t.cron, "enabled": t.enabled, "params": t.params, "next_run": next_run,
+                    "cron": t.cron, "enabled": t.enabled, **execution_views.parameter_view(t), "next_run": next_run,
+                    "latest_execution": latest.get(t.code),
+                    **counts.get(t.code, {"active_execution_count": 0, "queued_count": 0}),
                     "next_run_source": "scheduler" if nxt else "estimate",
                     "types": collect_switch.TASK_TYPES.get(t.code, []), "note": TASK_NOTES.get(t.code),
                     "checks": list(catalog.TASK_BY_CODE[t.code].checks) if t.code in catalog.TASK_BY_CODE else [],
                     "steps": list(catalog.TASK_STEPS.get(t.code, ())),
-                    "min_interval": MIN_INTERVAL.get(t.code, 30), "skipped_tenants": _skipped(db, t.code, scope, tm),
+                    "min_interval": MIN_INTERVAL.get(t.code, 30), "skipped_tenants": availability.skipped(t),
                     "scopes": [TaskScopeOut(**{k: v for k, v in s.items() if k != "run"},
                                            tenant_name=_tenant_name(tm, s["tenant_id"])).model_dump() for s in current],
                     "history_limit_per_scope": 12,
                     "runs": [TaskRunOut.model_validate(r).model_copy(update={
+                        **{key: value for key, value in run_executions.get(r.id, {}).items() if key != "id"},
+                        "stats": execution_views.safe_stats(r.stats or {}),
                         "tenant_name": _tenant_name(tm, r.tenant_id),
                         "project_scope": platform_watch.scope_kind(r.task_code, r.tenant_id, r.project_ref),
                         "project_label": f"项目#{r.project_ref}" if r.project_ref is not None else
@@ -209,6 +219,31 @@ def update_task(code: str, body: TaskPatch, db: Session = Depends(get_db), audit
         raise not_found("巡检任务")
     data = body.model_dump(exclude_unset=True)
     before: dict[str, object] = {"interval_sec": t.interval_sec, "cron": t.cron, "enabled": t.enabled}
+    fields: dict = {}
+    options: dict = {}
+    if "mrs_options" in data:
+        if code != "mrs_job_status":
+            raise BizError(ErrorCode.BAD_REQUEST, "MRS 参数仅用于 MRS 原生作业执行任务")
+        if data["mrs_options"] is None:
+            raise BizError(ErrorCode.BAD_REQUEST, "MRS 参数须为对象；传空对象重置默认配置")
+        fields = mrs_parameter_schema(code)["properties"]
+        try:
+            options = validate_mrs_params(code, data["mrs_options"])
+        except HcsError as exc:
+            raise BizError(ErrorCode.BAD_REQUEST, "MRS 参数不正确：" + str(exc)) from exc
+    if "timeout_sec" in data:
+        before["timeout_sec"] = execution_views.parameter_view(t)["params"]["timeout_sec"]
+        params = dict(t.params or {})
+        if data["timeout_sec"] is None:
+            params.pop("timeout_sec", None)
+        else:
+            params["timeout_sec"] = data["timeout_sec"]
+        t.params = params
+    if "mrs_options" in data:
+        before["mrs_options"] = {k: v for k, v in execution_views.parameter_view(t)["params"].items() if k in fields}
+        params = {k: v for k, v in (t.params or {}).items() if k not in fields}
+        params.update(options)
+        t.params = params
     if "p90_min_samples" in data:
         if code != "dgc_batch_instance":
             raise BizError(ErrorCode.BAD_REQUEST, "P90 样本数仅用于 DataArts 批作业任务")
@@ -244,6 +279,10 @@ def update_task(code: str, body: TaskPatch, db: Session = Depends(get_db), audit
         params.pop("aom", None)
         t.params = params
     after: dict[str, object] = {"interval_sec": t.interval_sec, "cron": t.cron, "enabled": t.enabled}
+    if "timeout_sec" in data:
+        after["timeout_sec"] = execution_views.parameter_view(t)["params"]["timeout_sec"]
+    if "mrs_options" in data:
+        after["mrs_options"] = {k: v for k, v in execution_views.parameter_view(t)["params"].items() if k in fields}
     if "p90_min_samples" in data:
         after["p90_min_samples"] = (t.params or {}).get("p90_min_samples", 5)
     if "aom" in data:
@@ -256,39 +295,37 @@ def update_task(code: str, body: TaskPatch, db: Session = Depends(get_db), audit
         audit.log("task.update", target_type="task", target_id=code, target_name=t.name, detail={"changes": diff})
     else:
         db.commit()
-    return ok({**after, "code": code, "params": t.params or {}, "changed": bool(diff)})
+    return ok({**after, "code": code, **execution_views.parameter_view(t), "changed": bool(diff)})
 
 
-@router.post("/tasks/{code}/run", summary="立即执行（按当前租户范围逐个租户执行；关闭采集的租户跳过）")
-def run_task(code: str, db: Session = Depends(get_db), scope: Scope = Depends(get_scope),
-             audit: Auditor = Depends(get_auditor), _: object = Depends(require_perm("task:run"))):
+@router.post("/tasks/{code}/run", status_code=202, summary="接受任务并持久排队（后台按租户项目执行）",
+             response_model=ApiResponse[ExecutionAdmissionOut])
+def run_task(code: str, body: TaskRunIn | None = None, db: Session = Depends(get_db), scope: Scope = Depends(get_scope),
+             audit: Auditor = Depends(get_auditor), user: CurrentUser = Depends(require_perm("task:run"))):
+    from app.services import task_execution
+
     task = db.get(InspectionTask, code)
     if task is None:
         raise not_found("巡检任务")
     if code == CLEANUP_TASK and not scope.full:
         raise BizError(ErrorCode.FORBIDDEN, "数据清理为全局任务，需要全部租户的数据权限", 403)
+    if not task.enabled:
+        raise BizError(ErrorCode.CONFLICT, "巡检任务已禁用，请先启用任务", 409)
     if code not in TASKS and code not in (LEDGER_TASK, CLEANUP_TASK):
         raise BizError(ErrorCode.BAD_REQUEST, f"任务没有对应的采集器：{code}")
-    tm = tenant_map(db)
-    skipped = _skipped(db, code, scope, tm)
-    runs = pipeline.run_all(db, code, trigger="MANUAL", tenant_ids=scope.tenant_ids)
-    if not runs and skipped:
-        raise BizError(ErrorCode.CONFLICT, f"当前范围内的租户都已关闭该任务的采集：{'、'.join(skipped)}", 409,
-                       {"skipped": skipped})
-    items = [{"run_id": r.id, "tenant_id": r.tenant_id, "project_ref": r.project_ref,
-              "tenant_name": _tenant_name(tm, r.tenant_id),
-              "status": r.status, "resource_total": r.resource_total, "abnormal_total": r.abnormal_total,
-              "api_calls": r.api_calls, "error_summary": r.error_summary, "stats": r.stats or {}} for r in runs]
-    failed = [i for i in items if i["status"] in ("FAILED", "TIMEOUT")]
-    outcome = platform_watch.run_outcome(runs, skipped=bool(skipped))
-    audit.log("task.run", target_type="task", target_id=code, target_name=task.name,
-              tenant_id=scope.single, result="SUCCESS" if outcome == "SUCCESS" else "FAILED",
-              detail={"outcome": outcome, "runs": [{"tenant": i["tenant_name"], "project_ref": i["project_ref"],
-                      "status": i["status"]} for i in items], "skipped": skipped})
-    if outcome == "FAILED":
-        raise BizError(ErrorCode.HCS_UPSTREAM, "执行失败：" + "；".join(
-            f"{i['tenant_name'] or '默认'}：{i['error_summary']}" for i in failed)[:500], 502, {"runs": items})
-    return ok({"runs": items, "skipped": skipped, "status": outcome})
+    body = body or TaskRunIn(project_refs=None, idempotency_key=None)
+    if code == CLEANUP_TASK and body.project_refs is not None:
+        raise BizError(ErrorCode.BAD_REQUEST, "数据清理为全局内部任务，不能指定租户项目")
+    execution_views.ensure_projects(db, scope, body.project_refs)
+    result = task_execution.enqueue(db, code, tenant_ids=None if code == CLEANUP_TASK else scope.tenant_ids,
+                                    project_refs=body.project_refs,
+                                    trigger="MANUAL", requested_by=user.display_name or user.username,
+                                    request_key=body.idempotency_key)
+    data = execution_views.admission(db, scope, result)
+    audit.log("task.enqueue", target_type="task", target_id=code, target_name=task.name,
+              tenant_id=scope.single, detail={"outcome": data["status"], "execution_ids": data["execution_ids"],
+                                             "request_id": data["request_id"], "deduplicated": data["deduplicated"]})
+    return ok(data, "任务已接受，等待后台执行")
 
 
 # ---------------- 采集开关 ----------------

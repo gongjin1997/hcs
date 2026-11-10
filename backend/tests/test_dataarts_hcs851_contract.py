@@ -18,8 +18,10 @@ from app.hcs.auth import AkSkAuth
 from app.hcs.client import HcsClient
 from app.hcs.endpoints import EndpointResolver
 from app.hcs.errors import HcsError
-from app.models import Resource
+from app.models import HcsAccount, HcsProject, Resource
 from app.rules.loader import sync_default_rules
+from app.schemas.job_selection import JobSelectionIn
+from app.services import collect_scope, job_selection
 from app.services.pipeline import run_task
 from app.services.tenancy import Target
 
@@ -111,6 +113,38 @@ def test_official_realtime_example_keeps_missing_node_status_unknown_and_priorit
     assert row.facts == {"status": "NORMAL"} and row.metrics == {"nodes": 1, "bad_nodes": None}
     assert row.attrs["priority"] == 0 and row.attrs["engine"] is None
     assert row.attrs["nodes"][0]["status"] is None
+
+
+def test_realtime_selection_uses_531_list_5315_selected_status_and_reports_actual_progress(mem_db):
+    account = HcsAccount(id=101, code="synthetic", name="Synthetic", iam_endpoint="https://invalid.test",
+                         domain_name="synthetic")
+    project = HcsProject(id=1001, account_id=101, region_id="synthetic", project_id="synthetic-project",
+                         external_domain="invalid.test", workspaces=["workspace-one"])
+    mem_db.add_all([account, project])
+    mem_db.commit()
+    job_selection.save(mem_db, 101, "dgc_realtime_job",
+                       JobSelectionIn(project_ref=1001, workspace="workspace-one", mode="selected",
+                                      jobs=["job_keep"]), "test")
+    mem_db.commit()
+
+    client = ContractClient(jobs=[job("job_keep"), job("job_ignore")], statuses={
+        "job_keep": status("job_keep", nodes=[]), "job_ignore": status("job_ignore", nodes=[]),
+    })
+    ctx = context(client)
+    ctx.db, ctx.scopes = mem_db, collect_scope.load(mem_db)
+    progress = []
+    ctx.progress = lambda phase=None, **details: progress.append({"phase": phase, **details})
+
+    rows = dataarts.DataArtsRealtimeCollector().collect(ctx)
+
+    assert [row.name for row in rows] == ["job_keep"]
+    list_request = next((path, kwargs) for path, kwargs in client.calls if path == "/v1/{project_id}/jobs")
+    assert list_request[1]["params"] == {"offset": 0, "limit": 100, "jobType": "REAL_TIME"}
+    status_requests = [(path, kwargs) for path, kwargs in client.calls if path.endswith("/status")]
+    assert len(status_requests) == 1 and status_requests[0][0].endswith("/job_keep/status")
+    status_progress = [item for item in progress if item["phase"] == "dataarts_realtime_status"]
+    assert [(item["current"], item["total"]) for item in status_progress] == [(0, 1), (1, 1)]
+    assert not ctx.errors
 
 
 @pytest.mark.parametrize("kind", ["realtime", "batch"])

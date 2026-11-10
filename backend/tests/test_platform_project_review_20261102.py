@@ -394,21 +394,19 @@ def test_dashboard_unknown_window_is_none_not_event_row_count(mem_db):
     assert data["top_restart"][0]["count"] is None
 
 
-@pytest.mark.parametrize("endpoint", ["system", "pod"])
 @pytest.mark.parametrize("result", ["PARTIAL", "TIMEOUT", "SKIPPED"])
-def test_manual_endpoint_result_and_audit_do_not_claim_success(task, mem_db, monkeypatch, endpoint, result):
+def test_manual_pod_endpoint_result_and_audit_do_not_claim_success(task, mem_db, monkeypatch, result):
     from app.api.v1 import pod_events
     from app.core.response import BizError
 
     task.code = "cce_pod_events"
     mem_db.commit()
     row = run(mem_db, result, -1, code=task.code, watch=False)
-    monkeypatch.setattr(system.pipeline, "run_all", lambda *_a, **_kw: [row])
-    monkeypatch.setattr(system, "_skipped", lambda *_a: [])
+    monkeypatch.setattr(pod_events.pipeline, "run_all", lambda *_a, **_kw: [row])
     audits = []
     audit = SimpleNamespace(log=lambda *_a, **kw: audits.append(kw))
-    invoke = (lambda: system.run_task(task.code, db=mem_db, scope=Scope(None, True, None), audit=audit)) \
-        if endpoint == "system" else (lambda: pod_events.collect_now(db=mem_db, scope=Scope(None, True, None), audit=audit))
+    def invoke():
+        return pod_events.collect_now(db=mem_db, scope=Scope(None, True, None), audit=audit)
     if result == "TIMEOUT":
         with pytest.raises(BizError) as error:
             invoke()
@@ -416,3 +414,26 @@ def test_manual_endpoint_result_and_audit_do_not_claim_success(task, mem_db, mon
     else:
         assert invoke()["data"]["status"] == result
     assert audits[0]["result"] != "SUCCESS"
+
+
+@pytest.mark.parametrize("previous_status", ["PARTIAL", "TIMEOUT", "SKIPPED"])
+def test_system_enqueue_audit_does_not_claim_a_completed_inspection(task, mem_db, monkeypatch, previous_status):
+    from app.core.deps import CurrentUser
+    from app.models import HcsAccount, HcsProject, TaskExecution
+
+    task.code = "dcs_status"
+    mem_db.add(HcsAccount(id=1, code="tenant", name="租户", iam_endpoint="https://example.invalid", domain_name="test"))
+    mem_db.flush()
+    mem_db.add(HcsProject(id=101, account_id=1, project_id="p", region_id="r", external_domain="example.invalid"))
+    mem_db.commit()
+    previous = run(mem_db, previous_status, -1, code=task.code, watch=False)
+    audits = []
+    audit = SimpleNamespace(log=lambda action, **kw: audits.append({"action": action, **kw}))
+    user = CurrentUser(id=1, username="operator", display_name="operator", permissions=["task:run"])
+    response = system.run_task(task.code, db=mem_db, scope=Scope([1], True, user), audit=audit, user=user)
+    assert response["data"]["status"] == "QUEUED"
+    execution = mem_db.get(TaskExecution, response["data"]["execution_ids"][0])
+    assert execution.status == "QUEUED" and execution.finished_at is None
+    assert previous.status == previous_status and previous.finished_at is not None
+    assert audits[0]["action"] == "task.enqueue" and audits[0]["detail"]["outcome"] == "QUEUED"
+    assert "runs" not in audits[0]["detail"]

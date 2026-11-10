@@ -383,7 +383,20 @@ def due(db: Session, tenant_id: int | None, project_ref: int | None, phase: str,
         return False
     value = db.scalar(select(SysSetting.value).where(SysSetting.key == clock_key(tenant_id, project_ref, rtype, phase)))
     interval, cron, _source = schedule(db, tenant_id, phase, policy, rtype)
-    return _due(value or {}, interval, now or utcnow(), cron)
+    return _due(_live_clock(db, value or {}), interval, now or utcnow(), cron)
+
+
+def _live_clock(db: Session, value: dict) -> dict:
+    """持久执行已结束时，旧阶段租约不能再挡住下一次执行。"""
+    execution_id = value.get("execution_id")
+    if not execution_id:
+        return value
+    from app.models import TaskExecution
+
+    row = db.get(TaskExecution, execution_id)
+    if row is None or row.status not in ("QUEUED", "RUNNING"):
+        return {key: entry for key, entry in value.items() if key not in ("token", "lease_until", "execution_id")}
+    return value
 
 
 @dataclass(frozen=True)
@@ -403,13 +416,18 @@ def _claim(db: Session, tenant_id: int | None, project_ref: int | None, phase: s
     _insert(db, key, {"tenant_id": tenant_id, "project_ref": project_ref, "resource_type": rtype, "phase": phase})
     for _ in range(5):
         value = db.scalar(select(SysSetting.value).where(SysSetting.key == key)) or {}
-        lease = _at(value.get("lease_until"))
-        if (lease is not None and lease > now) or (not force and not _due(value, interval, now, cron)):
+        live_value = _live_clock(db, value)
+        lease = _at(live_value.get("lease_until"))
+        if (lease is not None and lease > now) or (not force and not _due(live_value, interval, now, cron)):
             db.commit()
             return None
         token = uuid4().hex
+        from .execution_runtime import current
+
+        control = current()
         changed = db.scalar(update(SysSetting).where(SysSetting.key == key, SysSetting.value == value)
-            .values(value={**value, "token": token, "lease_until": (now + timedelta(seconds=LEASE_SEC)).isoformat(),
+            .values(value={**live_value, **({"execution_id": control.execution_id} if control else {}),
+                           "token": token, "lease_until": (now + timedelta(seconds=LEASE_SEC)).isoformat(),
                            "started_at": now.isoformat()}).returning(SysSetting.key),
             execution_options={"synchronize_session": False})
         db.commit()
@@ -442,6 +460,8 @@ def _finish(db: Session, claimed: Claim, *, success: bool | None, now: datetime)
     for _ in range(5):
         value = db.scalar(select(SysSetting.value).where(SysSetting.key == claimed.key)) or {}
         if value.get("token") != claimed.token:
+            return False
+        if success is None and _live_clock(db, value) != value:
             return False
         new = dict(value)
         if success is None:

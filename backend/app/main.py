@@ -22,6 +22,23 @@ from app.core.response import BizError, ErrorCode
 log = logging.getLogger(__name__)
 
 
+async def _recover_executions() -> None:
+    """API 重启不接管活跃执行；只回收已到期租约，scheduler 离线时也能收敛状态。"""
+    from app.services.task_execution import reap
+
+    def recover():
+        with SessionLocal() as db:
+            reap(db)
+
+    while True:
+        try:
+            await asyncio.to_thread(recover)
+        except Exception as exc:
+            log.error("execution_recovery_failed", extra={"event": "execution_recovery_failed",
+                      "exception_type": type(exc).__name__})
+        await asyncio.sleep(5)
+
+
 def _err(status: int, code: int, message: str, data=None) -> JSONResponse:
     return JSONResponse(status_code=status, content={"code": code, "message": message, "data": jsonable_encoder(data)})
 
@@ -45,10 +62,14 @@ def create_app() -> FastAPI:
                     log.info("demo data seeded")
         broadcaster.bind_loop(asyncio.get_running_loop())
         forwarder = asyncio.create_task(redis_forwarder()) if settings.redis_url else None
+        recovery = asyncio.create_task(_recover_executions())
         try:
             log.info("service.ready", extra={"version": __version__, "redis_enabled": bool(settings.redis_url)})
             yield
         finally:
+            recovery.cancel()
+            with suppress(asyncio.CancelledError):
+                await recovery
             if forwarder:
                 forwarder.cancel()
                 with suppress(asyncio.CancelledError):

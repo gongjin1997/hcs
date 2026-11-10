@@ -10,7 +10,6 @@
 """
 import logging
 import signal
-from collections import Counter
 from collections.abc import Callable
 from contextvars import copy_context
 from datetime import UTC, datetime, timedelta
@@ -31,12 +30,11 @@ from app.core.config import ensure_prod_ready, get_settings
 from app.core.db import SessionLocal
 from app.core.logging import log_context, setup_logging
 from app.ledger.sync import LEDGER_TASK
-from app.ledger.sync import sync_all as sync_inventory
 from app.models import InspectionTask, SysSetting
 from app.reports import service as report_service
-from app.services import collection_policy, platform_watch, settings_service
+from app.services import collection_policy, platform_watch, settings_service, task_execution
 from app.services.cleanup import CLEANUP_TASK
-from app.services.pipeline import run_all
+from app.workers.executions import Supervisor
 
 log = logging.getLogger("scheduler")
 NAME = "scheduler"
@@ -125,26 +123,15 @@ def _run_locked(code: str, ttl: int, fn: Callable[[], None]) -> None:
 
 def execute(code: str, ttl: int) -> None:
     def job() -> None:
-        started = perf_counter()
         with SessionLocal() as db:
-            runs = run_all(db, code)
-            statuses = dict(Counter(r.status for r in runs))
-            outcome = platform_watch.run_outcome(runs)
-            level = logging.WARNING if outcome not in ("SUCCESS", "SKIPPED") else logging.INFO
-            log.log(level if runs else logging.DEBUG, "job_finished", extra={
-                "event": "job_finished", "cost_ms": round((perf_counter() - started) * 1000, 2),
-                "target_count": len(runs), "statuses": statuses, "outcome": outcome, "run_ids": [r.id for r in runs],
-                "scopes": [{"tenant_id": r.tenant_id, "project_ref": getattr(r, "project_ref", None),
-                            "status": r.status} for r in runs],
-                "resource_count": sum(r.resource_total for r in runs), "api_calls": sum(r.api_calls for r in runs)})
+            task_execution.enqueue(db, code, trigger="SCHEDULE")
     _with_lock(code, ttl, job)
 
 
 def execute_ecs_inventory() -> None:
     def job() -> None:
         with SessionLocal() as db:
-            # The legacy ledger job retains its original interval/cron for all other types.
-            sync_inventory(db, types=[collection_policy.RESOURCE_TYPE])
+            task_execution.enqueue(db, LEDGER_TASK, trigger="SCHEDULE", inventory_only=True)
     _with_lock("ecs_inventory", 900, job)
 
 
@@ -257,6 +244,8 @@ def main() -> None:
                               job_defaults={"max_instances": 1, "coalesce": True, "misfire_grace_time": 30})
     jobs = JobSync(sched, s.timezone)
     jobs.sync()
+    supervisor = Supervisor()
+    supervisor.start()
 
     def sync() -> None:
         try:
@@ -280,6 +269,7 @@ def main() -> None:
     try:
         sched.start()
     finally:
+        supervisor.close()
         log.info("scheduler_stopped", extra={"event": "scheduler_stopped"})
 
 

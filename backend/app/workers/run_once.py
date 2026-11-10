@@ -22,7 +22,7 @@ from app.models import HcsAccount
 from app.reports.builder import KINDS
 from app.reports.service import generate
 from app.services.cleanup import CLEANUP_TASK
-from app.services.pipeline import run_all, run_cleanup_task
+from app.services.task_execution import enqueue
 from app.services.tenant_check import check_tenant
 
 log = logging.getLogger(__name__)
@@ -84,15 +84,17 @@ def _execute() -> None:
                 for c in res["checks"]:
                     print(f"  {'✔' if c['ok'] else '✘'} {c['name']}")
             return
-        if a.task == CLEANUP_TASK:
-            run = run_cleanup_task(db, trigger="MANUAL")
-            print(f"{run.task_code}: {run.status} run_id={run.id} {run.stats or {}}")
-            return
-        if a.task not in TASKS and a.task != LEDGER_TASK:
+        if a.task not in TASKS and a.task not in (LEDGER_TASK, CLEANUP_TASK):
             p.error(f"未知任务：{a.task}")
-        for run in run_all(db, a.task, trigger="MANUAL", tenant_ids=[tenant.id] if tenant else None):
-            print(f"{run.task_code}[tenant={run.tenant_id}]: {run.status} resources={run.resource_total} "
-                  f"abnormal={run.abnormal_total} api_calls={run.api_calls} run_id={run.id}")
+        result = enqueue(db, a.task, trigger="MANUAL", requested_by="cli",
+                         tenant_ids=[tenant.id] if tenant else None)
+        for run in result["runs"]:
+            print(f"{run['task_code']}[tenant={run['tenant_id']}]: {run['status']} "
+                  f"execution_id={run['execution_id']} run_id={run['run_id']}")
+        if not result["runs"]:
+            print("当前范围内没有可执行目标")
+        else:
+            print("已加入队列，由 scheduler 执行；可在巡检任务页面查看进度。")
 
 
 if __name__ == "__main__":

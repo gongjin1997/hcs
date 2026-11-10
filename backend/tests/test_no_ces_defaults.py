@@ -516,7 +516,8 @@ def test_task_patch_omitting_mapping_preserves_all_existing_params(mem_db, manag
     task = configured_task(mem_db, params)
     response = client.put("/api/v1/system/tasks/ecs_status", json={"enabled": False})
     assert response.status_code == 200, response.text
-    assert task.params == params and response.json()["data"]["params"] == params
+    assert task.params == params and response.json()["data"]["params"] == {"timeout_sec": 300}
+    assert not {"aom", "window_hours"} & response.json()["data"]["params"].keys()
     audit = mem_db.scalar(select(AuditLog).where(AuditLog.action == "task.update"))
     assert audit.detail["changes"] == {"enabled": [True, False]}
 
@@ -527,7 +528,7 @@ def test_task_patch_null_removes_only_aom_and_is_idempotent(mem_db, management_a
     response = client.put("/api/v1/system/tasks/ecs_status", json={"aom": None})
     assert response.status_code == 200, response.text
     assert task.params == {"window_hours": 6}
-    assert response.json()["data"]["params"] == {"window_hours": 6}
+    assert response.json()["data"]["params"] == {"timeout_sec": 300}
     audit = mem_db.scalar(select(AuditLog).where(AuditLog.action == "task.update"))
     assert audit.detail["changes"] == {"aom": [mapping(), None]}
     again = client.put("/api/v1/system/tasks/ecs_status", json={"aom": None})
@@ -555,7 +556,7 @@ def test_new_task_mapping_is_rejected_without_editing_or_auditing_other_params(m
 
 
 
-def test_old_task_mapping_metadata_is_readable_but_cannot_be_resubmitted(mem_db, management_api):
+def test_old_task_mapping_is_preserved_privately_and_cannot_be_resubmitted(mem_db, management_api):
     client, _, _, _ = management_api
     configured = {**mapping(), "units": {"cpu_util": "Percent"}, "period": 60, "window_sec": 600,
                   "prometheus_instance_id": "test-prometheus"}
@@ -565,7 +566,10 @@ def test_old_task_mapping_metadata_is_readable_but_cannot_be_resubmitted(mem_db,
     assert task.params == {"window_hours": 6, "aom": configured}
     listed = client.get("/api/v1/system/tasks")
     assert listed.status_code == 200, listed.text
-    assert next(row for row in listed.json()["data"] if row["code"] == task.code)["params"] == task.params
+    public = next(row for row in listed.json()["data"] if row["code"] == task.code)
+    assert public["params"] == {"timeout_sec": 300}
+    assert not {"aom", "window_hours"} & public["params"].keys()
+    assert "test-prometheus" not in listed.text and "custom_cpu" not in listed.text
     assert mem_db.scalar(select(AuditLog).where(AuditLog.action == "task.update")) is None
 
 

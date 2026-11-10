@@ -28,6 +28,8 @@ from app.models import (
     Resource,
     ResourceChange,
     Silence,
+    TaskExecution,
+    TaskExecutionCancel,
 )
 from app.models.base import utcnow
 
@@ -48,6 +50,10 @@ def _purge(db: Session, model, id_col, *conds) -> int:
         ids = list(db.scalars(select(id_col).where(*conds).limit(BATCH)))
         if not ids:
             return total
+        if model is InspectionRun:
+            execution_ids = select(TaskExecution.id).where(TaskExecution.run_id.in_(ids))
+            db.execute(delete(TaskExecutionCancel).where(TaskExecutionCancel.execution_id.in_(execution_ids)))
+            db.execute(delete(TaskExecution).where(TaskExecution.run_id.in_(ids)))
         db.execute(delete(model).where(id_col.in_(ids)))
         db.commit()
         total += len(ids)
@@ -61,7 +67,7 @@ def run_cleanup(db: Session, now: datetime | None = None) -> dict[str, int]:
     ago = lambda days: now - timedelta(days=days)  # noqa: E731
     out: dict[str, int] = {}
     out["inspection_run"] = _purge(db, InspectionRun, InspectionRun.id, InspectionRun.started_at < ago(r.inspection_run_days),
-                                   InspectionRun.status != "RUNNING")
+                                   InspectionRun.status.not_in(("RUNNING", "QUEUED")))
     out["notification"] = _purge(db, Notification, Notification.id, Notification.created_at < ago(r.notification_days),
                                  Notification.status.in_(("SENT", "FAILED", "MERGED")))
     # 已恢复 / 已关闭的告警：先删处理时间线和通知，再删告警本身

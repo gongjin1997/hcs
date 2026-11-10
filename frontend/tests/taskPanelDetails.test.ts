@@ -3,8 +3,9 @@ import { readFileSync } from 'node:fs'
 import { parse } from '@vue/compiler-sfc'
 import dayjs from 'dayjs'
 import { reactive } from 'vue'
+import type { TaskDefinition } from '../src/types/task-executions'
 import type { InspectionTask, ReportSchedule, TaskRun } from '../src/api'
-import { mountBusinessScript } from './businessViewHarness'
+import { deferred, mountBusinessScript, settleView } from './businessViewHarness'
 import { allNodes, clickButton, findNode, mountPersonnel, settlePersonnel, textOf } from './personnelHarness'
 
 const dispose: (() => void)[] = []
@@ -29,18 +30,19 @@ interface Panel {
   tasks: InspectionTask[]; filteredTasks: InspectionTask[]; expanded: string[]
   filters: { service: string; enabled: string; abnormal: boolean; keyword: string }
   serviceOptions: { value: string; label: string }[]
+  run(task: InspectionTask): Promise<void>
   load(): Promise<void>; resetFilters(): void; hasRecentAbnormal(task: InspectionTask): boolean
   taskDetails(task: InspectionTask): { codes: string[]; checks: string[]; steps: string[]; provided: boolean }
   gaussStatsText(code: string, stats: unknown): string; statsText(code: string, run: TaskRun): string
   taskStatus(code: string): { label: string; type: string }; serviceLabel(code: string): string
   openEdit(task: InspectionTask): void; saveEdit(): Promise<void>; toggle(task: InspectionTask, on: boolean): Promise<void>
-  edit: { value: number; unit: number; enabled: boolean; cron: string; p90MinSamples: number; visible: boolean }
+  edit: { value: number; unit: number; enabled: boolean; cron: string; p90MinSamples: number; visible: boolean; parameters: Record<string, string | number | null> }
   canEdit: boolean; canReportConfig: boolean
   openEcsPolicy(): void; ecsPolicy: { tenantId: number | null; tenantName: string; visible: boolean }
   successRate(task: InspectionTask): number | null
 }
 async function panel(rows: InspectionTask[] = [], options: { tenantIds?: number[] | null; permissions?: string[]; confirm?: () => Promise<unknown> } = {}) {
-  const api = { listTasks: vi.fn(async () => rows), reportSchedule: vi.fn(async () => schedule), updateTask: vi.fn(async () => ({ changed: true })) }
+  const api = { listTasks: vi.fn(async () => rows), reportSchedule: vi.fn(async () => schedule), updateTask: vi.fn(async () => ({ changed: true })), runTask: vi.fn() }
   const confirm = options.confirm ?? vi.fn(async () => 'confirm')
   const identity = reactive({ tenant_ids: options.tenantIds ?? null })
   const can = (permission: string) => !options.permissions || options.permissions.includes(permission)
@@ -98,11 +100,12 @@ describe('TaskPanel 检查项、步骤及组合筛选', () => {
     expect(state.hasRecentAbnormal(task('other-project', { runs: [run(), run({ status: 'FAILED', project_ref: 12 })] }))).toBe(true)
     expect(state.hasRecentAbnormal(task('other-tenant', { runs: [run(), run({ status: 'TIMEOUT', tenant_id: 8 })] }))).toBe(true)
     expect(state.hasRecentAbnormal(task('unknown-project', { runs: [run(), run({ status: 'PARTIAL', project_ref: null })] }))).toBe(true)
-    for (const status of ['RUNNING', 'SKIPPED']) expect(state.hasRecentAbnormal(task('skipped', { runs: [run({ status, abnormal_total: 3 })] }))).toBe(false)
+    for (const status of ['QUEUED', 'RUNNING', 'SKIPPED']) expect(state.hasRecentAbnormal(task('skipped', { runs: [run({ status, abnormal_total: 3 })] }))).toBe(false)
     expect(state.hasRecentAbnormal(task('ledger_sync', { runs: [run({ abnormal_total: 5 })] }))).toBe(false)
     expect(state.hasRecentAbnormal(task('data_cleanup', { runs: [run({ abnormal_total: 5 })] }))).toBe(false)
     expect(state.hasRecentAbnormal(task('gaussdb_storage', { runs: [run({ stats: { gaussdb: gauss } })] }))).toBe(true)
     expect(state.hasRecentAbnormal(task('ecs_status', { runs: [run({ abnormal_total: 1 })] }))).toBe(true)
+    expect(state.hasRecentAbnormal(task('interrupted', { runs: [run({ status: 'INTERRUPTED' })] }))).toBe(true)
     expect(state.hasRecentAbnormal(task())).toBe(false)
   })
 
@@ -165,6 +168,61 @@ describe('TaskPanel 保留授权、独立周期及已有管理行为', () => {
     expect(readonly.api.reportSchedule).not.toHaveBeenCalled()
   })
 
+  it('只有白名单 params 的任务仍展示后端整轮超时', async () => {
+    const rows = [task('mrs_job_status', { service: 'mrs', params: { timeout_sec: 180 } })]
+    const view = mountPersonnel('system/TaskPanel.vue', { api: { listTasks: vi.fn(async () => rows), reportSchedule: vi.fn(async () => null) },
+      dependencies: { dayjs: { default: dayjs } } })
+    dispose.push(view.unmount)
+    await settlePersonnel()
+    const card = findNode(view.root, 'Component', node => (node.props.task as InspectionTask | undefined)?.code === 'mrs_job_status' && 'checks' in node.props)
+    expect(card.props['timeout-label']).toBe('180 秒')
+  })
+
+  it('MRS 原生参数使用真实 schema 与 mrs_options，仅提交白名单并保留周期', async () => {
+    const mrs: TaskDefinition = { ...task('mrs_job_status', { service: 'mrs', params: { internal_secret: '不得回传', query_mode: 'active_and_recent' } }),
+      effective_params: { timeout_sec: 300, query_mode: 'active_only', max_calls: 30 },
+      parameter_schema: { properties: { timeout_sec: { type: 'integer', minimum: 15, maximum: 3600 }, query_mode: { type: 'string', enum: ['active_only'] }, max_calls: { type: 'integer', minimum: 1, maximum: 400 } } } }
+    const view = await panel([mrs])
+    view.state.openEdit(mrs)
+    expect(view.state.edit.parameters).not.toHaveProperty('internal_secret')
+    view.state.edit.parameters.timeout_sec = 180
+    view.state.edit.parameters.max_calls = 50
+    await view.state.saveEdit()
+    expect(view.api.updateTask).toHaveBeenCalledExactlyOnceWith('mrs_job_status', { enabled: true, interval_sec: 120, cron: '', timeout_sec: 180, mrs_options: { query_mode: 'active_only', max_calls: 50 } })
+  })
+
+  it('只读执行守卫不会发写请求，即使直接触发处理函数', async () => {
+    const readonly = await panel([task()], { permissions: ['task:view'] })
+    await readonly.state.run(task())
+    expect(readonly.api.runTask).not.toHaveBeenCalled()
+  })
+
+  it('切换租户立即清空旧任务，并丢弃旧租户的迟到列表响应', async () => {
+    const view = await panel([task()])
+    const old = deferred<InspectionTask[]>(), current = deferred<InspectionTask[]>()
+    view.api.listTasks.mockReturnValueOnce(old.promise).mockReturnValueOnce(current.promise)
+    const previousLoad = view.state.load()
+    view.appState.tenantId = 8
+    expect(view.state.tasks).toEqual([])
+    current.resolve([task('new-tenant')]); await settleView(); await settleView()
+    old.resolve([task('stale-tenant')]); await previousLoad
+    expect(view.state.tasks.map(task => task.code)).toEqual(['new-tenant'])
+  })
+
+  it('配置写入失败显示实际错误，保留编辑内容和原启停状态', async () => {
+    const row = task()
+    const view = await panel([row])
+    view.state.openEdit(row)
+    view.api.updateTask.mockRejectedValueOnce(new Error('参数存在冲突'))
+    await expect(view.state.saveEdit()).resolves.toBeUndefined()
+    expect(view.messages.error).toHaveBeenCalledWith('参数存在冲突')
+    expect(view.state.edit.visible).toBe(true)
+    view.api.updateTask.mockRejectedValueOnce(new Error('暂时无法更新'))
+    await expect(view.state.toggle(row, false)).resolves.toBeUndefined()
+    expect(view.messages.error).toHaveBeenCalledWith('暂时无法更新')
+    expect(view.state.tasks[0]!.enabled).toBe(true)
+  })
+
   it('停用仍先确认，取消不更新；确认后只提交当前任务', async () => {
     const confirm = vi.fn<() => Promise<unknown>>().mockRejectedValueOnce('cancel').mockResolvedValue('confirm')
     const { state, api } = await panel([task()], { confirm })
@@ -197,34 +255,25 @@ describe('TaskPanel 实际 Vue 模板的筛选和详情连接', () => {
     expect(parsed.descriptor.styles.every(style => style.scoped)).toBe(true)
   })
 
-  it('检查项在任务名下，步骤默认折叠，统计说明在运行记录中，筛选可重置', async () => {
+  it('任务卡片承载检查项，详情接收步骤和运行记录，筛选可重置', async () => {
     const rows = [task(), task('gaussdb_storage', { name: 'GaussDB 磁盘容量', checks: ['disk'], steps: ['筛选在线实例', '并发查询磁盘用量'], runs: [run({ stats: { gaussdb: gauss } })] })]
     const view = mountPersonnel('system/TaskPanel.vue', { api: { listTasks: vi.fn(async () => rows), reportSchedule: vi.fn(async () => schedule) },
       dependencies: { dayjs: { default: dayjs }, '@/stores/app': { useAppStore: () => ({ currentTenant: { name: '测试租户' } }) } } })
     dispose.push(view.unmount)
     await settlePersonnel()
-    expect(textOf(view.root)).toContain('检查：磁盘使用率')
-    expect(textOf(view.root)).toContain('不是墙钟耗时')
-    expect(textOf(view.root)).toContain('详情失败 1')
-    expect(textOf(view.root)).toContain('当前：测试租户')
-    const details = allNodes(view.root).filter(node => node.tag === 'details')
-    expect(details).toHaveLength(2)
-    expect(details.every(node => !node.props.open)).toBe(true)
-    const steps = allNodes(view.root).filter(node => node.tag === 'ol')
-    expect(textOf(steps[1]!)).toBe('筛选在线实例并发查询磁盘用量')
+    const card = findNode(view.root, 'Component', node => (node.props.task as InspectionTask | undefined)?.code === 'gaussdb_storage' && 'checks' in node.props)
+    expect(card.props.checks).toEqual(['磁盘使用率'])
+    expect(card.props['scope-label']).toContain('测试租户')
+    ;(card.props.onDetail as () => void)()
+    await settlePersonnel()
+    const drawer = findNode(view.root, 'Component', node => 'steps' in node.props)
+    expect(drawer.props.steps).toEqual(['筛选在线实例', '并发查询磁盘用量'])
+    expect(drawer.props['model-value']).toBe(true)
     const search = findNode(view.root, 'Input', node => node.props['aria-label'] === '搜索巡检任务')
     ;(search.props['onUpdate:modelValue'] as (value: string) => void)('不存在')
     await settlePersonnel()
-    const table = findNode(view.root, 'Table')
-    expect(table.props['scrollbar-always-on']).toBe(true)
-    const fixedColumns = allNodes(view.root).filter(node => node.tag === 'TableColumn' && ['启用', '操作'].includes(String(node.props.label)))
-    expect(fixedColumns.map(node => [node.props.label, node.props.fixed])).toEqual([['启用', 'right'], ['操作', 'right']])
-    expect(table.props.data).toEqual([])
-    expect(table.props['empty-text']).toBe('无匹配任务，请调整筛选条件')
-    const reset = findNode(view.root, 'Button', node => textOf(node) === '重置')
-    ;(reset.props.onClick as () => void)()
-    await settlePersonnel()
-    expect((findNode(view.root, 'Table').props.data as unknown[])).toHaveLength(2)
+    expect(findNode(view.root, 'Empty').props.description).toBe('无匹配任务，请调整筛选条件')
+    await clickButton(view.root, '重置')
     expect(textOf(view.root)).toContain('显示 2 / 2 项')
   })
 
@@ -238,8 +287,10 @@ describe('TaskPanel 实际 Vue 模板的筛选和详情连接', () => {
     } })
     dispose.push(view.unmount)
     await settlePersonnel()
-    await clickButton(view.root, '监控配置')
-    const dialog = findNode(view.root, 'Component', item => 'tenant-id' in item.props)
+    const card = findNode(view.root, 'Component', item => item.props['has-ecs-policy'] === true)
+    ;(card.props.onEcs as () => void)()
+    await settlePersonnel()
+    const dialog = findNode(view.root, 'Component', item => 'tenant-id' in item.props && 'tenant-name' in item.props)
     expect(dialog.props).toMatchObject({ modelValue: true, 'tenant-id': 7, 'tenant-name': '测试' })
   })
 })
