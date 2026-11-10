@@ -122,29 +122,58 @@ def native_state_known(facts: dict) -> bool:
 
 
 class _BudgetExceeded(HcsError):
-    def __init__(self, key: str):
-        super().__init__(0, "LOCAL.MRS_BUDGET", f"MRS 整轮 {key} 预算耗尽，覆盖不可确认，未继续请求")
+    def __init__(self, key: str, *, limit: int, used: int | None = None,
+                 query_total: int | None = None, required_total: int | None = None):
+        self.details = {"budget_key": key, "budget_limit": limit}
+        values = [f"上限={limit}"]
+        for name, label, value in (("budget_used", "已用", used), ("query_total", "本查询总数", query_total),
+                                   ("required_total", "本轮至少需要", required_total)):
+            if value is not None:
+                self.details[name] = value
+                values.append(f"{label}={value}")
+        hint = ("请检查共享请求额度或执行超时" if key == "upstream_request_budget" else
+                "请在巡检任务 → MRS 原生作业执行 → 编辑中调整整轮条数、页数和调用上限，或调整采集范围")
+        super().__init__(0, "LOCAL.MRS_BUDGET",
+                         f"MRS 整轮 {key} 预算不足（{'，'.join(values)}）；覆盖未完成，未继续请求。{hint}")
 
 
 class _NativeBudget:
     def __init__(self, ctx: RunContext, config: dict, stats: dict):
         self.ctx, self.config, self.stats = ctx, config, stats
 
+    def exceeded(self, key: str, *, query_total: int | None = None,
+                 required_total: int | None = None) -> _BudgetExceeded:
+        counter = {"max_calls": "calls", "max_pages": "pages", "max_items": "items_returned",
+                   "max_clusters": "clusters"}.get(key)
+        return _BudgetExceeded(key, limit=self.config["max_calls" if key == "upstream_request_budget" else key],
+                               used=self.stats[counter] if counter else None,
+                               query_total=query_total, required_total=required_total)
+
+    def record_exceeded(self, exc: _BudgetExceeded, **context) -> None:
+        self.stats["budget_exceeded"] = {**exc.details, **context}
+        log.warning("mrs_budget_exceeded", extra={
+            "event": "mrs_budget_exceeded", "cloud_service": "mrs",
+            "tenant_id": self.ctx.tenant_id, "project_ref": self.ctx.project_ref,
+            **self.stats["budget_exceeded"],
+            **{key: self.stats[key] for key in ("calls", "pages", "items_returned", "queries_completed")},
+        })
+
     def request(self, path: str, params: dict, *, jobs: bool = False) -> dict:
         if self.stats["calls"] >= self.config["max_calls"]:
-            raise _BudgetExceeded("max_calls")
+            raise self.exceeded("max_calls")
         if jobs:
             if self.stats["pages"] >= self.config["max_pages"]:
-                raise _BudgetExceeded("max_pages")
+                raise self.exceeded("max_pages")
             if self.stats["items_returned"] >= self.config["max_items"]:
-                raise _BudgetExceeded("max_items")
+                raise self.exceeded("max_items")
             self.stats["pages"] += 1
         self.stats["calls"] += 1  # 失败逻辑调用计数；底层重试/鉴权尝试另受外层共享请求额度约束。
         try:
             return self.ctx.client.get("mrs", path, params=params)
         except HcsError as exc:
             if exc.code == "LOCAL.REQUEST_BUDGET":
-                raise _BudgetExceeded("upstream_request_budget") from exc
+                # 底层重试/鉴权及父请求预算不等于逻辑 GET 次数，不伪造已用额度。
+                raise self.exceeded("upstream_request_budget") from exc
             raise
 
 
@@ -215,12 +244,13 @@ def _query_jobs(ctx: RunContext, budget: _NativeBudget, cid: str, label: str, fi
                  "offset_mode": mode, "response_total": total, "returned_count": len(items),
                  "cost_ms": request_cost_ms, **filters})
         if stats["items_returned"] > config["max_items"] or total > available:
-            raise _BudgetExceeded("max_items")
+            raise budget.exceeded("max_items", query_total=total,
+                                  required_total=stats["items_returned"] - query["items"] + total)
         return data
 
     try:
         if available <= 0:
-            raise _BudgetExceeded("max_items")
+            raise budget.exceeded("max_items")
         jobs = list(page_all(fetch, "job_list", mode=mode, start=0 if mode == "offset" else 1,
                              total_key="total_record", limit=min(config["page_size"], available),
                              max_pages=config["max_pages"], max_items=available))
@@ -272,9 +302,11 @@ class MrsJobCollector:
             stats["clusters"] = len(clusters)
             stats["queries_planned"] = len(clusters) * len(queries)
             if len(clusters) > config["max_clusters"]:
-                raise _BudgetExceeded("max_clusters")
+                raise budget.exceeded("max_clusters")
         except HcsError as exc:
             stats["coverage"] = "unconfirmed"
+            if isinstance(exc, _BudgetExceeded):
+                budget.record_exceeded(exc)
             ctx.errors.append(f"MRS 集群清单未完成: {exc}")
             log_collection_failure(log, ctx, exc, cloud_service="mrs", phase="native_clusters")
             return []
@@ -293,6 +325,7 @@ class MrsJobCollector:
                     ctx.errors.append(f"cluster={cid} query={label}: {exc}")
                     log_collection_failure(log, ctx, exc, cloud_service="mrs", phase="job_executions", cluster_id=cid)
                     if isinstance(exc, _BudgetExceeded):
+                        budget.record_exceeded(exc, cluster_id=cid, query=label)
                         exhausted = True
                         break
                     continue

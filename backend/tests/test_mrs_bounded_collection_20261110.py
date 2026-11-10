@@ -198,7 +198,7 @@ def test_api_full_replacement_removes_old_native_windows_and_preserves_execution
         return public
 
     public = replace({"query_mode": "all_history"})
-    assert public["page_size"] == 100 and public["max_calls"] == 30
+    assert public["page_size"] == 100 and public["max_calls"] == 400
     assert not {"submitted_time_begin", "submitted_time_end", "submitted_window_hours"} & public.keys()
     assert saved["timeout_sec"] == 321 and saved["_internal"] == {"version": 2} and saved["window_hours"] == 48
     assert "timeout_sec" not in public and "_internal" not in public and "window_hours" not in public
@@ -223,6 +223,74 @@ def test_budget_counts_duplicate_rows_across_queries_and_does_not_publish_partia
     assert ctx.errors and ctx.stats["mrs_jobs"]["items_returned"] == 2
     assert not ctx.stats["mrs_jobs"]["coverage_complete"]
     assert len(client.calls) == 6  # 清单+五个活动查询，预算不允许再猜近期为空。
+    assert ctx.stats["mrs_jobs"]["budget_exceeded"] == {
+        "budget_key": "max_items", "budget_limit": 2, "budget_used": 2, "cluster_id": "c1", "query": "recent",
+    }
+    assert "本查询总数" not in ctx.errors[0]  # 未请求近期查询，不能虚构其总数。
+
+
+def test_default_budget_completes_large_recent_queries_across_clusters():
+    client = Client([execution("long", "RUNNING", 9000), execution("active", "ACCEPTED"),
+                     *(execution(f"recent-{i}") for i in range(2500))], clusters=("c1", "c2"))
+    ctx = context(client)
+
+    rows = MrsJobCollector().collect(ctx)
+
+    assert len(rows) == 5004 and not ctx.errors
+    assert {"c1/long", "c2/long", "c1/recent-2499", "c2/recent-2499"} <= {r.resource_id for r in rows}
+    stats = ctx.stats["mrs_jobs"]
+    assert stats["coverage_complete"] and stats["clusters_completed"] == 2
+    assert stats["items_returned"] == 5006 and stats["duplicates"] == 2
+    assert stats["pages"] == 62 and stats["calls"] == len(client.calls) == 63
+    assert stats["queries_completed"] == stats["queries_planned"] == 12
+    assert stats["budgets"] == {"max_calls": 400, "max_pages": 200, "max_items": 20000,
+                                "max_clusters": 1000, "page_size": 100}
+
+
+def test_default_budget_can_read_twenty_thousand_recent_rows_without_changing_page_size():
+    client = Client(execution(str(i)) for i in range(20000))
+    ctx = context(client, query_mode="recent_only")
+
+    assert len(MrsJobCollector().collect(ctx)) == 20000 and not ctx.errors
+    assert ctx.stats["mrs_jobs"]["coverage_complete"]
+    assert ctx.stats["mrs_jobs"]["pages"] == 200
+    assert len(client.calls) == 201
+    assert {p["limit"] for path, p in client.calls if "job-executions" in path} == {100}
+
+
+def test_item_budget_error_reports_insufficient_capacity_before_limit_is_used(caplog):
+    client = Client(execution(str(i)) for i in range(2501))
+    ctx = context(client, query_mode="recent_only", max_items=2000)
+    caplog.set_level(logging.WARNING, logger="app.collectors.mrs_native")
+
+    assert MrsJobCollector().collect(ctx) == []
+
+    assert len(client.calls) == 2 and not ctx.stats["mrs_jobs"]["coverage_complete"]
+    error = ctx.errors[0]
+    assert "max_items" in error and "上限=2000" in error and "已用=100" in error
+    assert "本查询总数=2501" in error and "本轮至少需要=2501" in error
+    assert "巡检任务" in error and "预算耗尽" not in error
+    record = next(r for r in caplog.records if r.msg == "mrs_budget_exceeded")
+    assert record.cluster_id == "c1" and record.query == "recent"
+    assert record.budget_key == "max_items" and record.budget_limit == 2000 and record.budget_used == 100
+    assert record.query_total == record.required_total == 2501
+    assert record.calls == 2 and record.pages == 1 and record.items_returned == 100
+
+
+def test_item_budget_requirement_includes_previous_clusters_but_not_current_page_twice():
+    client = Client((execution(str(i)) for i in range(1200)), clusters=("c1", "c2"))
+    ctx = context(client, query_mode="recent_only", max_items=2000)
+
+    rows = MrsJobCollector().collect(ctx)
+
+    assert len(rows) == 1200 and all(r.resource_id.startswith("c1/") for r in rows)
+    stats = ctx.stats["mrs_jobs"]
+    assert stats["clusters_completed"] == 1 and not stats["coverage_complete"]
+    assert stats["items_returned"] == 1300 and len(client.calls) == 14
+    assert stats["budget_exceeded"] == {
+        "budget_key": "max_items", "budget_limit": 2000, "budget_used": 1300,
+        "query_total": 1200, "required_total": 2400, "cluster_id": "c2", "query": "recent",
+    }
 
 
 def test_exact_item_budget_on_last_query_can_complete_and_keeps_page_size_stable():
@@ -245,6 +313,8 @@ def test_failed_calls_are_not_free_and_cannot_reset_budget_for_next_cluster():
     assert MrsJobCollector().collect(ctx) == []
     assert len(client.calls) == ctx.stats["mrs_jobs"]["calls"] == 3
     assert ctx.errors and not ctx.stats["mrs_jobs"]["coverage_complete"]
+    assert ctx.stats["mrs_jobs"]["budget_exceeded"]["budget_key"] == "max_calls"
+    assert ctx.stats["mrs_jobs"]["budget_exceeded"]["budget_used"] == 3
 
 
 def test_client_retry_attempts_share_round_call_budget_and_do_not_get_fresh_allowance():
@@ -264,6 +334,8 @@ def test_client_retry_attempts_share_round_call_budget_and_do_not_get_fresh_allo
     assert MrsJobCollector().collect(ctx) == [] and ctx.errors
     assert client.wire_attempts == 3 and ctx.stats["mrs_jobs"]["calls"] <= 3
     assert not ctx.stats["mrs_jobs"]["coverage_complete"]
+    assert ctx.stats["mrs_jobs"]["budget_exceeded"]["budget_key"] == "upstream_request_budget"
+    assert "budget_used" not in ctx.stats["mrs_jobs"]["budget_exceeded"]
 
 
 def test_cluster_discovery_pagination_is_charged_and_cannot_return_partial_inventory():

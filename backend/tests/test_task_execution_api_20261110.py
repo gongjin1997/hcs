@@ -236,7 +236,7 @@ def test_mrs_execution_detail_exposes_only_the_enqueue_time_option_whitelist(mem
         "timeout_sec": 90, "p90_min_samples": None,
         "mrs": {"query_mode": "active_only", "submitted_window_hours": None,
                 "submitted_time_begin": None, "submitted_time_end": None, "page_size": 50,
-                "max_pages": 24, "max_items": 2000, "max_calls": 12, "max_clusters": 1000,
+                "max_pages": 200, "max_items": 20000, "max_calls": 12, "max_clusters": 1000,
                 "job_offset_mode": "page", "elapsed_time_unit": None},
     }
     assert "must-not-leak" not in response.text and "private" not in response.text
@@ -424,6 +424,38 @@ def test_mrs_invalid_and_null_configuration_cannot_modify_existing_parameters(me
     assert response.status_code == 200, response.text
     assert task.params["query_mode"] == "active_and_recent" and task.params["submitted_window_hours"] == 24
     assert task.params["timeout_sec"] == 90 and task.params["secret"] == "internal"
+
+
+def test_mrs_saved_limits_are_preserved_and_larger_limits_reach_next_execution(mem_db, execution_api):
+    client, _ = execution_api
+    task = InspectionTask(code="mrs_job_status", name="MRS 原生作业", service="mrs", interval_sec=300,
+                          enabled=True, params={"query_mode": "active_and_recent", "submitted_window_hours": 6,
+                                                "max_items": 2000, "max_pages": 24, "max_calls": 30,
+                                                "secret": "internal"})
+    mem_db.add(task)
+    mem_db.commit()
+
+    unchanged = client.put("/api/v1/system/tasks/mrs_job_status", json={"timeout_sec": 120})
+    assert unchanged.status_code == 200, unchanged.text
+    params = unchanged.json()["data"]["effective_params"]
+    assert {key: params[key] for key in ("max_items", "max_pages", "max_calls")} == {
+        "max_items": 2000, "max_pages": 24, "max_calls": 30,
+    }
+    options = {key: value for key, value in params.items() if key != "timeout_sec"}
+    options.update(max_items=20000, max_pages=200, max_calls=400)
+    saved = client.put("/api/v1/system/tasks/mrs_job_status", json={"mrs_options": options})
+    assert saved.status_code == 200, saved.text
+    assert task.params["submitted_window_hours"] == 6 and task.params["secret"] == "internal"
+    assert task.params["timeout_sec"] == 120
+
+    accepted = client.post("/api/v1/system/tasks/mrs_job_status/run", json={"project_refs": [11]})
+    assert accepted.status_code == 202, accepted.text
+    dto = accepted.json()["data"]["runs"][0]
+    assert {key: dto["options"]["mrs"][key] for key in options} == options
+    assert dto["options"]["timeout_sec"] == 120
+    queued = mem_db.get(TaskExecution, dto["execution_id"])
+    assert all(queued.params[key] == value for key, value in options.items())
+    assert "internal" not in accepted.text and "secret" not in saved.json()["data"]["params"]
 
 
 def test_running_view_includes_current_progress_counters_before_run_commit(mem_db, execution_api):
