@@ -1,4 +1,5 @@
 """MRS 范围/预算合成回归；不访问云端。"""
+import logging
 from copy import deepcopy
 
 import pytest
@@ -302,10 +303,11 @@ def test_missing_or_outside_submitted_time_cannot_prove_window_coverage(submitte
     assert ctx.stats["mrs_jobs"]["coverage"] == "unconfirmed"
 
 
-def test_progress_uses_actual_counts_and_deadline_exceptions_propagate():
+def test_progress_uses_actual_counts_and_deadline_exceptions_propagate(caplog):
     ctx = context(Client([execution("a")]), query_mode="recent_only")
     updates = []
     ctx.progress = lambda phase, **details: updates.append((phase, details))
+    caplog.set_level(logging.INFO, logger="app.collectors.mrs_native")
     assert len(MrsJobCollector().collect(ctx)) == 1
     assert {p for p, _ in updates} >= {"mrs_clusters", "mrs_executions_page", "mrs_executions_process"}
     assert any(p == "mrs_executions_page" and d["current"] == d["total"] == 1 for p, d in updates)
@@ -313,6 +315,10 @@ def test_progress_uses_actual_counts_and_deadline_exceptions_propagate():
                for p, d in updates)
     assert all("percent" not in d and "percentage" not in d for _, d in updates)
     assert any(p == "mrs_executions_process" and d["current"] == d["total"] == 1 for p, d in updates)
+    request_logs = [record for record in caplog.records if record.msg == "job_collection_page"]
+    assert len(request_logs) == 1 and request_logs[0].cost_ms >= 0
+    cluster_logs = [record for record in caplog.records if record.msg == "mrs_api_page_completed"]
+    assert len(cluster_logs) == 1 and cluster_logs[0].phase == "cluster_discovery" and cluster_logs[0].cost_ms >= 0
     client = Client()
     ctx = context(client)
 
@@ -323,6 +329,27 @@ def test_progress_uses_actual_counts_and_deadline_exceptions_propagate():
     with pytest.raises(TimeoutError):
         MrsJobCollector().collect(ctx)
     assert len(client.calls) == 1
+
+
+def test_failed_mrs_page_log_includes_query_context_and_elapsed_time(caplog):
+    client = Client()
+    get = client.get
+
+    def fail_job_query(service, path, *, params):
+        if "job-executions" in path:
+            raise HcsError(504, "HTTP.504", "synthetic upstream timeout")
+        return get(service, path, params=params)
+
+    client.get = fail_job_query
+    ctx = context(client, query_mode="recent_only")
+    caplog.set_level(logging.WARNING, logger="app.collectors.mrs_native")
+
+    assert MrsJobCollector().collect(ctx) == []
+
+    failure = next(record for record in caplog.records if record.msg == "mrs_api_page_failed")
+    assert failure.phase == "job_executions" and failure.cluster_id == "c1" and failure.query == "recent"
+    assert failure.request_attempted is True and failure.cost_ms >= 0
+    assert failure.error_code == "HTTP.504" and failure.getMessage() == "mrs_api_page_failed"
 
 
 def test_unmanaged_runcontext_progress_keeps_local_real_statistics():

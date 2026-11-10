@@ -27,8 +27,17 @@ def _clusters(ctx: RunContext, request=None) -> list[dict]:
     def fetch(params: dict) -> dict:
         mrs_progress(ctx, "mrs_clusters", current=params["currentPage"] - 1, unit="page",
                      page=params["currentPage"], message="读取集群清单")
-        data = (request("/v1.1/{project_id}/cluster_infos", params) if request is not None
-                else ctx.client.get("mrs", "/v1.1/{project_id}/cluster_infos", params=params))
+        started = time.perf_counter()
+        try:
+            data = (request("/v1.1/{project_id}/cluster_infos", params) if request is not None
+                    else ctx.client.get("mrs", "/v1.1/{project_id}/cluster_infos", params=params))
+        except HcsError as exc:
+            log.warning("mrs_api_page_failed", extra={"event": "mrs_api_page_failed", "cloud_service": "mrs",
+                        "phase": "cluster_discovery", "page": params["currentPage"],
+                        "cost_ms": round((time.perf_counter() - started) * 1000, 2),
+                        "error_code": exc.code, "error_type": type(exc).__name__})
+            raise
+        cost_ms = round((time.perf_counter() - started) * 1000, 2)
         nonlocal expected_total
         if not isinstance(data, dict):
             raise HcsError(0, "LOCAL.INVALID_RESPONSE", "MRS 集群响应不是对象")
@@ -40,6 +49,10 @@ def _clusters(ctx: RunContext, request=None) -> list[dict]:
         mrs_progress(ctx, "mrs_clusters", current=params["currentPage"], total=total_pages, unit="page",
                      response_total=total,
                      returned_count=len(data["clusters"]) if isinstance(data.get("clusters"), list) else None)
+        log.info("mrs_api_page_completed", extra={"event": "mrs_api_page_completed", "cloud_service": "mrs",
+                 "phase": "cluster_discovery", "page": params["currentPage"], "page_size": params["pageSize"],
+                 "response_total": total, "returned_count": len(data["clusters"])
+                 if isinstance(data.get("clusters"), list) else None, "cost_ms": cost_ms})
         return data
 
     clusters = list(page_all(fetch, "clusters",
@@ -152,7 +165,19 @@ def _query_jobs(ctx: RunContext, budget: _NativeBudget, cid: str, label: str, fi
         mrs_progress(ctx, "mrs_executions_page", current=query["pages"], unit="page", cluster_id=cid,
                      query=label, page=params["offset"], calls=stats["calls"],
                      items_returned=stats["items_returned"], message="读取执行分页")
-        data = budget.request(f"/v2/{{project_id}}/clusters/{quote(cid, safe='')}/job-executions", params, jobs=True)
+        calls_before = stats["calls"]
+        started = time.perf_counter()
+        try:
+            data = budget.request(f"/v2/{{project_id}}/clusters/{quote(cid, safe='')}/job-executions", params,
+                                  jobs=True)
+        except HcsError as exc:
+            log.warning("mrs_api_page_failed", extra={"event": "mrs_api_page_failed", "cloud_service": "mrs",
+                        "phase": "job_executions", "cluster_id": cid, "query": label, "page": params["offset"],
+                        "request_attempted": stats["calls"] > calls_before,
+                        "cost_ms": round((time.perf_counter() - started) * 1000, 2),
+                        "error_code": exc.code, "error_type": type(exc).__name__})
+            raise
+        request_cost_ms = round((time.perf_counter() - started) * 1000, 2)
         query["pages"] += 1
         if not isinstance(data, dict):
             raise HcsError(0, "LOCAL.INVALID_RESPONSE", "MRS 作业响应不是对象")
@@ -187,7 +212,8 @@ def _query_jobs(ctx: RunContext, budget: _NativeBudget, cid: str, label: str, fi
         log.info("job_collection_page", extra={"event": "job_collection_page", "cloud_service": "mrs",
                  "phase": "native_executions", "tenant_id": ctx.tenant_id, "project_ref": ctx.project_ref,
                  "cluster_id": cid, "query": label, "page": params["offset"], "page_size": params["limit"],
-                 "offset_mode": mode, "response_total": total, "returned_count": len(items), **filters})
+                 "offset_mode": mode, "response_total": total, "returned_count": len(items),
+                 "cost_ms": request_cost_ms, **filters})
         if stats["items_returned"] > config["max_items"] or total > available:
             raise _BudgetExceeded("max_items")
         return data
