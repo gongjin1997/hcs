@@ -81,6 +81,27 @@ def test_idempotency_and_active_target_deduplication_are_returned_as_dtos(mem_db
     assert mem_db.scalar(select(func.count()).select_from(TaskExecution)) == 1
 
 
+def test_finished_idempotent_repeat_reports_persisted_outcome_over_http(mem_db, execution_api):
+    client, user = execution_api
+    user.tenant_ids = [1]
+    row = enqueue(mem_db, key="finished-request")
+    complete(mem_db, row, "SUCCESS")
+
+    core_result = task_execution.enqueue(mem_db, "dcs_status", [1], project_refs=[11],
+                                         request_key="finished-request")
+    assert core_result["status"] == "QUEUED" and core_result["deduplicated"] is True
+    assert core_result["execution_ids"] == [row.id]
+
+    response = client.post("/api/v1/system/tasks/dcs_status/run",
+                           json={"project_refs": [11], "idempotency_key": "finished-request"})
+    assert response.status_code == 202, response.text
+    data = response.json()["data"]
+    assert data["status"] == "SUCCESS" and data["deduplicated"] is True
+    assert data["runs"][0]["status"] == "SUCCESS" and data["execution_ids"] == [row.id]
+    audit = mem_db.scalar(select(AuditLog).where(AuditLog.action == "task.enqueue").order_by(AuditLog.id.desc()))
+    assert audit.detail["outcome"] == "SUCCESS"
+
+
 @pytest.mark.parametrize("body", [
     {"project_refs": []}, {"project_refs": [True]}, {"project_refs": ["11"]}, {"project_refs": [11, 11]},
     {"project_refs": [0]}, {"force": True}, {"tenant_ids": [2]}, {"idempotency_key": ""},
@@ -260,10 +281,18 @@ def test_targets_explain_disabled_switch_project_and_active_execution(mem_db, ex
     assert "任务" in client.get("/api/v1/system/tasks/dcs_status/targets").json()["data"]["targets"][0]["reason"]
 
 
-def test_cleanup_is_global_and_requires_full_scope_even_with_task_run(mem_db, execution_api):
+def test_cleanup_is_global_and_requires_full_scope_even_with_task_run(mem_db, execution_api, monkeypatch):
     client, user = execution_api
     mem_db.add(InspectionTask(code="data_cleanup", name="数据清理", service="platform", interval_sec=86400, enabled=True))
     mem_db.commit()
+    original_enqueue = task_execution.enqueue
+    tenant_scopes = []
+
+    def record_scope(db, task_code, tenant_ids=None, **kwargs):
+        tenant_scopes.append(tenant_ids)
+        return original_enqueue(db, task_code, tenant_ids=tenant_ids, **kwargs)
+
+    monkeypatch.setattr(task_execution, "enqueue", record_scope)
     user.tenant_ids = [1]
     assert client.post("/api/v1/system/tasks/data_cleanup/run").status_code == 403
     assert client.get("/api/v1/system/tasks/data_cleanup/targets").json()["data"]["targets"] == []
@@ -271,6 +300,7 @@ def test_cleanup_is_global_and_requires_full_scope_even_with_task_run(mem_db, ex
     assert client.post("/api/v1/system/tasks/data_cleanup/run", json={"project_refs": [11]}).status_code == 400
     response = client.post("/api/v1/system/tasks/data_cleanup/run", headers={"X-Tenant-Id": "1"})
     assert response.status_code == 202, response.text
+    assert tenant_scopes == [None]
     dto = response.json()["data"]["runs"][0]
     assert dto["tenant_id"] is None and dto["project_ref"] is None
     user.tenant_ids = [1]
@@ -377,6 +407,22 @@ def test_tasks_merge_execution_progress_without_losing_legacy_run_ids(mem_db, ex
     assert run["id"] == run["run_id"] == active.run_id and run["execution_id"] == active.id
     assert run["phase"] == "queued" and run["started_at"] is None
     assert "heartbeat_at" in run and "progress" in run and "history" in run
+
+
+def test_execution_detail_uses_legacy_target_labels_and_localizes_finished_phase(mem_db, execution_api):
+    client, _ = execution_api
+    row = enqueue(mem_db)
+    row.tenant_id, row.project_ref = 999, 999
+    row.target = {"tenant_label": "历史租户名称", "project_label": "历史项目名称"}
+    complete(mem_db, row, "SUCCESS")
+
+    response = client.get(f"/api/v1/system/executions/{row.id}")
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["tenant_name"] == "历史租户名称" and data["project_label"] == "历史项目名称"
+    assert data["phase"] == "finished" and data["phase_label"] == "执行结束"
+    assert data["history"][-1]["phase"] == "finished"
+    assert data["history"][-1]["phase_label"] == "执行结束"
 
 
 def test_task_list_queries_do_not_grow_per_task_or_run(mem_db, execution_api):
