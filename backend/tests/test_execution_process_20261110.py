@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 
-def test_real_process_deadline_cancel_crash_and_restart(tmp_path):
+def test_real_process_deadline_cancel_graceful_stop_crash_and_restart(tmp_path):
     env = {**os.environ, "INSPECTOR_DATABASE_URL": f"sqlite:///{tmp_path / 'execution.db'}",
            "INSPECTOR_ENV": "test", "INSPECTOR_DEMO_SEED": "false", "INSPECTOR_REDIS_URL": "",
            "INSPECTOR_HCS_MOCK_URL": "", "PYTHONPATH": str(Path(__file__).resolve().parents[1])}

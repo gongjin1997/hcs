@@ -58,6 +58,7 @@ services:
   scheduler:        # 巡检任务 / 台账同步 / 定时报表 / 数据清理（APScheduler + Redis 锁）
     <<: *backend
     command: ["python", "-m", "app.workers.scheduler"]
+    stop_grace_period: 45s
     healthcheck: {test: ["CMD", "python", "-m", "app.tools.status", "--check", "scheduler"], interval: 60s, timeout: 20s, start_period: 90s, retries: 3}
     depends_on: {api: {condition: service_healthy}}
 

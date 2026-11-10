@@ -129,6 +129,23 @@ def verify():
         assert state["calls"] == count and state["writes"] == 0
         results["cancel"] = "local child stopped, no cloud mutation requests"
 
+        # A normal service stop must end owned children before the container exits.
+        with SessionLocal() as db:
+            db.get(InspectionTask, "dcs_status").params = {"timeout_sec": 90}
+            db.commit()
+        state["delay"] = 9
+        before = state["calls"]
+        graceful = submit()
+        wait_for(lambda: state["calls"] > before)
+        service.terminate()
+        service.wait(timeout=15)
+        wait_for(lambda: snapshot(graceful)["status"] == "INTERRUPTED", timeout=5)
+        count = state["calls"]
+        time.sleep(1)
+        assert state["calls"] == count and state["writes"] == 0
+        results["graceful_stop"] = "SIGTERM stops the child and commits INTERRUPTED before worker exit"
+        service = launch()
+
         # SIGKILL 整个监督器，重启后活租约不被当成已失联；随后租约按真实时钟过期。
         with SessionLocal() as db:
             db.get(InspectionTask, "dcs_status").params = {"timeout_sec": 90}
@@ -152,7 +169,7 @@ def verify():
         wait_for(lambda: snapshot(retry)["status"] not in queue.ACTIVE)
         assert snapshot(retry)["status"] == "SUCCESS"
         with SessionLocal() as db:
-            assert db.scalar(select(func.count()).select_from(InspectionRun)) == 5
+            assert db.scalar(select(func.count()).select_from(InspectionRun)) == 6
             assert db.scalar(select(func.count()).select_from(Resource)) == 1
         assert snapshot(interrupted)["status"] == "INTERRUPTED" and state["writes"] == 0
         results["restart"] = "SIGKILL + restart preserves live lease, reclaims orphan, retry creates new history"

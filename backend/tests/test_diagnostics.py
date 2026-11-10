@@ -276,6 +276,7 @@ def test_docker_logging_limits_and_safe_nginx_configuration():
     compose = yaml.safe_load((ROOT / "deploy/docker-compose.yml").read_text())
     for service in compose["services"].values():
         assert service["logging"] == {"driver": "json-file", "options": {"max-size": "50m", "max-file": "5"}}
+    assert compose["services"]["scheduler"]["stop_grace_period"] == "45s"
     demo = yaml.safe_load((ROOT / "deploy/docker-compose.demo.yml").read_text())
     assert all(demo["services"][name]["logging"]["options"]["max-file"] == "5" for name in ("mock-hcs", "mailpit"))
     configuration = (ROOT / "deploy/nginx/snippets/logging.conf").read_text()
