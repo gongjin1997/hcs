@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from app.core.db import Base
-from app.models import AlarmEvent, InspectionRun, InspectionTask, SysSetting, TaskExecution
+from app.models import AlarmEvent, InspectionRun, InspectionTask, TaskExecution
 from app.models.base import utcnow
 from app.services import platform_watch, settings_service
 
@@ -161,7 +161,7 @@ def test_watch_failure_cannot_rollback_the_durable_terminal_transaction(mem_db, 
     mem_db.commit()
 
 
-def test_durable_finish_dispatches_watch_once_in_the_terminal_transaction(mem_db, monkeypatch):
+def test_durable_finish_defers_watch_once_until_outer_commit(mem_db, monkeypatch):
     from app.services import task_execution
 
     run = watch_run(mem_db, status="RUNNING", durable=True)
@@ -174,12 +174,14 @@ def test_durable_finish_dispatches_watch_once_in_the_terminal_transaction(mem_db
 
     task_execution.finish(mem_db, execution, "INTERRUPTED", "synthetic worker interrupted")
 
-    assert observed == [(mem_db, run.id, "INTERRUPTED")]
-    assert mem_db.scalar(select(InspectionRun.status).where(InspectionRun.id == run.id)) == "INTERRUPTED"
+    assert observed == []
+    assert run.status == "INTERRUPTED"
     platform_watch.on_run(mem_db, run)  # Legacy pipeline/ledger completion hook is suppressed.
     task_execution.finish(mem_db, execution, "FAILED", "late duplicate result")
-    assert len(observed) == 1
+    assert observed == []
     mem_db.commit()
+    assert len(observed) == 1 and observed[0][0] is not mem_db
+    assert observed[0][1:] == (run.id, "INTERRUPTED")
 
 
 def test_unmanaged_pipeline_keeps_its_existing_on_run_callback(mem_db, monkeypatch):
@@ -189,25 +191,6 @@ def test_unmanaged_pipeline_keeps_its_existing_on_run_callback(mem_db, monkeypat
     monkeypatch.setattr(platform_watch, "_on_run", lambda db, run: observed.append(run.id))
     platform_watch.on_run(mem_db, row)
     assert observed == [row.id]
-
-
-def test_on_run_commit_false_isolates_failure_without_ending_outer_transaction(mem_db, monkeypatch):
-    row = watch_run(mem_db)
-    mem_db.commit()
-
-    def fail_after_write(db, _run):
-        db.add(SysSetting(key="watch-savepoint", value={"partial": True}))
-        db.flush()
-        raise RuntimeError("synthetic watch failure")
-
-    monkeypatch.setattr(platform_watch, "_on_run", fail_after_write)
-    platform_watch.on_run(mem_db, row, commit=False)
-
-    assert mem_db.in_transaction()
-    assert mem_db.get(SysSetting, "watch-savepoint") is None
-    mem_db.add(SysSetting(key="outer-transaction", value={"continues": True}))
-    mem_db.commit()
-    assert mem_db.get(SysSetting, "outer-transaction") is not None
 
 
 @pytest.mark.parametrize("status", ["SUCCESS", "PARTIAL", "FAILED", "TIMEOUT", "INTERRUPTED", "CANCELLED", "SKIPPED"])
@@ -231,10 +214,11 @@ def test_real_durable_failure_alert_is_emitted_after_terminal_commit_only_once(m
     row.finished_at = None
     mem_db.commit()
     task_execution.finish(mem_db, row, "INTERRUPTED", "synthetic worker interrupted")
+    assert mem_db.scalar(select(AlarmEvent).where(AlarmEvent.rule_id == "R-PLAT-001")) is None
+    mem_db.commit()
     alarm = mem_db.scalar(select(AlarmEvent).where(AlarmEvent.rule_id == "R-PLAT-001"))
     assert alarm is not None and alarm.status == "FIRING" and alarm.detail["last_failure_run_id"] == run.id
     original_count = alarm.count
-    mem_db.commit()
     # The old successful return path still invokes on_run after durable finish; it must be a no-op.
     platform_watch.on_run(mem_db, run)
     task_execution.finish(mem_db, row, "FAILED", "late duplicate result")

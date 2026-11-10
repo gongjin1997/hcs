@@ -98,8 +98,8 @@ def test_legacy_recovery_dispatches_one_watch_for_each_stale_run(mem_db, queued,
     assert queue.reap(mem_db) == 0
     assert queue.reap(mem_db, legacy_before=now) == 1
     assert old.status == "INTERRUPTED" and done.status == "SUCCESS" and queued.status == "RUNNING"
-    assert observed == [(mem_db, old.id, "INTERRUPTED")]
-    mem_db.commit()
+    assert len(observed) == 1 and observed[0][0] is not mem_db
+    assert observed[0][1:] == (old.id, "INTERRUPTED")
 
 
 @pytest.mark.parametrize("stop", ["cancel", "lease", "owner", "deadline", "terminal"])

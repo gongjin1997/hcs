@@ -142,10 +142,9 @@ def finish(db: Session, row: TaskExecution, status: str, message: str | None = N
                    "status": status, "message": message or status}]
     row.progress = {**(row.progress or {}), "phase": "finished", "message": message or status}
     if run is not None:
-        from .platform_watch import on_run
+        from .platform_watch import defer_on_run
 
-        db.flush()
-        on_run(db, run, commit=False)
+        defer_on_run(db, row.run_id)
     log.info("execution_finished", extra={"event": "execution_finished", "task_execution_id": row.id,
              "run_id": row.run_id, "task": row.task_code, "tenant_id": row.tenant_id,
              "project_ref": row.project_ref, "status": status, "error_code": code})
@@ -226,10 +225,9 @@ def reap(db: Session, *, legacy_before: datetime | None = None) -> int:
         for run in stale:
             run.status, run.finished_at = "INTERRUPTED", now
             run.error_summary = "服务升级前的执行没有持久执行器记录，已结束；请重新执行"
-            from .platform_watch import on_run
+            from .platform_watch import defer_on_run
 
-            db.flush()
-            on_run(db, run, commit=False)
+            defer_on_run(db, run.id)
         changed += len(stale)
     db.commit()
     return changed
