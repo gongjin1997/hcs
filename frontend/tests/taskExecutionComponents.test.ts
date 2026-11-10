@@ -23,6 +23,12 @@ describe('执行实例的真实展示与操作', () => {
     expect(textOf(view.root)).not.toContain('SUCCESS')
   })
 
+  it('显示MRS当前集群与查询范围', () => {
+    const view = card(execution({ progress: { phase: 'mrs_executions_page', cluster_id: 'cluster-a', query: 'active_RUNNING' } }))
+    expect(textOf(view.root)).toContain('集群 cluster-a')
+    expect(textOf(view.root)).toContain('活动作业：RUNNING')
+  })
+
   it('旧心跳和长耗时不在前端推断超时，最终原因取自后端新状态', async () => {
     const view = card(execution({ heartbeat_at: '2020-01-01T00:00:00Z', elapsed_sec: 99000 }))
     expect(textOf(view.root)).toContain('RUNNING')
@@ -99,10 +105,11 @@ describe('执行实例的真实展示与操作', () => {
   })
 
   it('执行详情显示标识、后台时间与真实阶段记录', () => {
-    const item = execution({ history: [{ phase: 'AUTH', phase_label: '认证', at: '2026-11-10T01:00:01Z', message: '认证完成' }, { phase: 'COLLECT', phase_label: '采集', current: 2, total: 8 }] })
+    const item = execution({ history: [{ phase: 'AUTH', phase_label: '认证', at: '2026-11-10T01:00:01Z', message: '认证完成' }, { phase: 'COLLECT', phase_label: '采集', current: 2, total: 8,
+      cluster_id: 'cluster-a', query: 'recent' }] })
     const view = mountPersonnel('system/TaskExecutionDrawer.vue', { props: { modelValue: true, execution: item, loading: false, error: '', canCancel: false, canRetry: false } })
     dispose.push(view.unmount)
-    for (const label of ['execution-old', 'request-batch-1', '认证完成', '2 / 8', '300 秒', '云端作业']) expect(textOf(view.root)).toContain(label)
+    for (const label of ['execution-old', 'request-batch-1', '认证完成', '2 / 8', '集群 cluster-a', '近期提交作业', '300 秒', '云端作业']) expect(textOf(view.root)).toContain(label)
   })
 
   it('MRS 执行详情展示该次入队时的查询模式和资源上限', () => {

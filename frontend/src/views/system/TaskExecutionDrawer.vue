@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import type { TaskExecution } from '@/types/task-executions'
 import { fmtTime } from '@/utils/format'
+import { executionProgressContext } from './composables/taskExecutionPresentation'
 import TaskExecutionCard from './TaskExecutionCard.vue'
 
 const props = defineProps<{
@@ -60,7 +61,7 @@ const mrsOptions = computed(() => {
         <section v-if="mrsOptions.length" class="detail-section" aria-label="本次参数"><h3>本次参数</h3><dl class="detail-facts">
           <div v-for="item in mrsOptions" :key="item.label"><dt>{{ item.label }}</dt><dd>{{ item.value }}</dd></div>
         </dl></section>
-        <section class="detail-section" aria-label="执行阶段记录"><h3>阶段记录</h3><el-timeline v-if="props.execution.history.length"><el-timeline-item v-for="(event, index) in props.execution.history" :key="index" :timestamp="event.at || event.timestamp ? fmtTime(event.at || event.timestamp!) : ''"><b>{{ event.phase_label || event.phase || '阶段更新' }}</b><p v-if="event.message" class="event-message">{{ event.message }}</p><span v-if="event.current != null || event.total != null" class="text-3">{{ event.current ?? '—' }} / {{ event.total ?? '—' }} {{ event.unit ?? '' }}</span></el-timeline-item></el-timeline><p v-else class="detail-note text-3">后端尚未上报阶段记录。</p></section>
+        <section class="detail-section" aria-label="执行阶段记录"><h3>阶段记录</h3><el-timeline v-if="props.execution.history.length"><el-timeline-item v-for="(event, index) in props.execution.history" :key="index" :timestamp="event.at || event.timestamp ? fmtTime(event.at || event.timestamp!) : ''"><b>{{ event.phase_label || event.phase || '阶段更新' }}</b><p v-if="event.message" class="event-message">{{ event.message }}</p><p v-if="executionProgressContext(event)" class="event-context">{{ executionProgressContext(event) }}</p><span v-if="event.current != null || event.total != null" class="text-3">{{ event.current ?? '—' }} / {{ event.total ?? '—' }} {{ event.unit ?? '' }}</span></el-timeline-item></el-timeline><p v-else class="detail-note text-3">后端尚未上报阶段记录。</p></section>
       </template>
       <el-empty v-else-if="!props.loading && !props.error" description="没有可显示的执行详情" :image-size="70" />
     </div>
@@ -71,6 +72,6 @@ const mrsOptions = computed(() => {
 .execution-detail { min-width: 0; .el-alert { margin-bottom: 14px; } }
 .detail-section { margin-top: 22px; h3 { font-size: 14px; margin: 0 0 14px; } }
 .detail-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 0; div { min-width: 0; } dt { font-size: 12px; color: var(--hi-text-3); } dd { margin: 5px 0 0; font-size: 12px; overflow-wrap: anywhere; } }
-.detail-note, .event-message { font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
+.detail-note, .event-message, .event-context { font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
 @media (max-width: 600px) { .detail-facts { grid-template-columns: 1fr; } }
 </style>

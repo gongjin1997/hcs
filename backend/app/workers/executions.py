@@ -110,7 +110,7 @@ class Child:
 def _record_progress(row: TaskExecution, progress: dict, *, now) -> bool:
     previous = row.progress if isinstance(row.progress, dict) else {}
     changed = any(progress.get(key) != previous.get(key)
-                  for key in ("phase", "current", "total", "unit", "message"))
+                  for key in ("phase", "current", "total", "unit", "message", "cluster_id", "query"))
     if changed:
         history = list(row.history or [])
         event = {**progress, "at": progress.get("at") or now.isoformat()}

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { InspectionTask } from '@/api'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   task: InspectionTask
   serviceName: string
   cadence: string
@@ -10,6 +10,8 @@ const props = defineProps<{
   nextRunLabel: string
   timeoutLabel?: string
   checks: string[]
+  steps?: string[]
+  checksProvided?: boolean
   canEdit: boolean
   canRun: boolean
   submitting: boolean
@@ -17,7 +19,7 @@ const props = defineProps<{
   active: boolean
   hasEcsPolicy: boolean
   hasJobSelection: boolean
-}>()
+}>(), { steps: () => [], checksProvided: true })
 const emit = defineEmits<{
   detail: []
   run: []
@@ -51,7 +53,9 @@ function toggle(value: string | number | boolean) {
       <div><dt>资源范围</dt><dd>{{ resourceLabel }}</dd></div>
       <div v-if="timeoutLabel"><dt>整轮超时</dt><dd>{{ timeoutLabel }}</dd></div>
     </dl>
-    <p class="task-checks"><span class="text-3">检查：</span>{{ checks.join('、') || '后端未提供检查项' }}</p>
+    <p v-if="checks.length" class="task-checks"><span class="text-3">规则检查：</span>{{ checks.join('、') }}</p>
+    <p v-else-if="steps.length" class="task-checks"><span class="text-3">主要步骤：</span>{{ steps.slice(0, 2).join('、') }}</p>
+    <p v-else-if="!checksProvided" class="task-checks text-3">任务定义未提供检查说明</p>
     <div class="task-latest"><slot name="latest" /></div>
     <footer class="task-card-actions">
       <el-button v-if="canRun" type="primary" size="small" :loading="submitting" :disabled="!task.enabled || active" @click="emit('run')">{{ active ? '已有活跃执行' : '立即执行' }}</el-button>

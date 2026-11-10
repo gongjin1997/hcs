@@ -266,7 +266,7 @@ describe('TaskPanel 实际 Vue 模板的筛选和详情连接', () => {
     expect(card.props['scope-label']).toContain('测试租户')
     ;(card.props.onDetail as () => void)()
     await settlePersonnel()
-    const drawer = findNode(view.root, 'Component', node => 'steps' in node.props)
+    const drawer = findNode(view.root, 'Component', node => 'steps' in node.props && 'model-value' in node.props)
     expect(drawer.props.steps).toEqual(['筛选在线实例', '并发查询磁盘用量'])
     expect(drawer.props['model-value']).toBe(true)
     const search = findNode(view.root, 'Input', node => node.props['aria-label'] === '搜索巡检任务')

@@ -49,12 +49,13 @@ class Control:
         self.checkpoint()
         with self.lock:
             changed = phase is not None and phase != self.latest.get("phase")
+            context_changed = any(key in details and details[key] != self.latest.get(key)
+                                  for key in ("cluster_id", "query"))
             counts_changed = any(key in details and details[key] != self.latest.get(key)
                                  for key in ("current", "total", "unit"))
             message_changed = "message" in details and details["message"] != self.latest.get("message")
-            if changed:
-                # Counters and query metadata belong to a phase. Keep only run-wide
-                # counters when moving on so a new phase cannot inherit an old total.
+            if changed or context_changed:
+                # MRS reuses phases across clusters and query filters; their counters must not bleed.
                 self.latest = {key: self.latest[key] for key in ("api_calls", "resource_total", "abnormal_total")
                                if key in self.latest}
             self.latest.update({k: v for k, v in details.items()
@@ -62,13 +63,14 @@ class Control:
             if phase is not None:
                 self.latest["phase"] = phase
             now = time.monotonic()
-            if changed or counts_changed or message_changed or now - self.last_emit >= .5:
+            if changed or context_changed or counts_changed or message_changed or now - self.last_emit >= .5:
                 self.last_emit = now
                 self.latest["at"] = utcnow().isoformat()
                 log.info("execution_progress_reported", extra={"event": "execution_progress_reported",
                     "task_execution_id": self.execution_id, "run_id": self.run_id,
                     "phase": self.latest.get("phase"), "current": self.latest.get("current"),
                     "total": self.latest.get("total"), "unit": self.latest.get("unit"),
+                    "cluster_id": self.latest.get("cluster_id"), "query": self.latest.get("query"),
                     "progress_message": self.latest.get("message")})
                 try:
                     self.emit(dict(self.latest))

@@ -36,7 +36,9 @@ def _clusters(ctx: RunContext, request=None) -> list[dict]:
         if expected_total is not None and total != expected_total:
             raise HcsError(0, "LOCAL.INCOMPLETE_PAGE", "MRS 集群分页总数变化，未使用不完整清单")
         expected_total = total
-        mrs_progress(ctx, "mrs_clusters", current=params["currentPage"], unit="page", response_total=total,
+        total_pages = max(1, math.ceil(total / params["pageSize"]))
+        mrs_progress(ctx, "mrs_clusters", current=params["currentPage"], total=total_pages, unit="page",
+                     response_total=total,
                      returned_count=len(data["clusters"]) if isinstance(data.get("clusters"), list) else None)
         return data
 

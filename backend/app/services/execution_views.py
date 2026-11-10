@@ -38,7 +38,7 @@ PHASE_LABELS = {
     "DATAARTS_MRS_NODES_PROCESS": "检查 DataArts MRS 节点", "DATAARTS_MRS_COMPLETE": "DataArts MRS 采集完成",
 }
 PROGRESS_FIELDS = {"phase", "phase_label", "current", "total", "unit", "message", "at", "timestamp", "retry_of",
-                   "api_calls", "resource_total", "abnormal_total", "status"}
+                   "api_calls", "resource_total", "abnormal_total", "status", "cluster_id", "query"}
 
 
 def query(scope: Scope):

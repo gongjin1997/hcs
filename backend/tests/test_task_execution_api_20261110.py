@@ -178,9 +178,11 @@ def test_detail_whitelists_progress_history_and_snapshot_fields(mem_db, executio
     row.started_at = utcnow() - timedelta(seconds=17)
     row.heartbeat_at, row.deadline_at = utcnow(), utcnow() + timedelta(seconds=43)
     row.progress = {"phase": "collect", "phase_label": "采集资源", "current": 2, "total": 8, "unit": "集群",
+                    "cluster_id": "cluster-a", "query": "active_RUNNING",
                     "message": "page processed", "owner_token": "never-return-owner", "params": {"secret": "hidden"}}
     row.history = [{"phase": "auth", "message": "password=hidden-value", "headers": {"X-Auth-Token": "hidden"}},
-                   {"phase": "collect", "current": 2, "total": 8, "target": {"secret": "hidden"}}]
+                   {"phase": "collect", "current": 2, "total": 8, "cluster_id": "cluster-a",
+                    "query": "active_RUNNING", "target": {"secret": "hidden"}}]
     run = mem_db.get(InspectionRun, row.run_id)
     run.api_calls, run.resource_total, run.abnormal_total = 4, 9, 1
     mem_db.add(TaskExecutionCancel(execution_id=row.id, requested_by="operator"))
@@ -190,10 +192,12 @@ def test_detail_whitelists_progress_history_and_snapshot_fields(mem_db, executio
     assert data["phase_label"] == "采集资源" and data["current"] == 2 and data["total"] == 8
     assert data["elapsed_sec"] >= 17 and data["api_calls"] == 4 and data["resource_total"] == 9
     assert data["abnormal_total"] == 1 and data["cancel_requested"] is True
+    assert data["progress"]["cluster_id"] == "cluster-a" and data["progress"]["query"] == "active_RUNNING"
     for value in ("never-return-owner", "private-worker", "hidden-value", "X-Auth-Token"):
         assert value not in response.text
     assert data["history"][0]["phase"] == "auth" and data["history"][0]["phase_label"] == "认证"
     assert set(data["history"][0]) == {"phase", "phase_label", "message"}
+    assert data["history"][1]["cluster_id"] == "cluster-a" and data["history"][1]["query"] == "active_RUNNING"
     assert data["options"] == {"timeout_sec": 60, "p90_min_samples": None, "mrs": None}
 
 

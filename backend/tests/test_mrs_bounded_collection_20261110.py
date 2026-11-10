@@ -84,6 +84,18 @@ def test_max_calls_includes_discovery_and_stops_before_next_call():
     assert not ctx.stats["mrs_jobs"]["coverage_complete"]
 
 
+def test_cluster_discovery_reports_actual_page_total():
+    client = Client(clusters=tuple(f"c{i}" for i in range(51)))
+    ctx = context(client, max_calls=2)
+    updates = []
+    ctx.progress = lambda phase, **details: updates.append((phase, details))
+
+    MrsJobCollector().collect(ctx)
+
+    pages = [details for phase, details in updates if phase == "mrs_clusters" and details.get("total") is not None]
+    assert [(item["current"], item["total"]) for item in pages] == [(1, 2), (2, 2)]
+
+
 def test_max_pages_is_shared_across_queries_and_clusters():
     client = Client(clusters=("c1", "c2"))
     ctx = context(client, max_pages=2)
@@ -297,6 +309,8 @@ def test_progress_uses_actual_counts_and_deadline_exceptions_propagate():
     assert len(MrsJobCollector().collect(ctx)) == 1
     assert {p for p, _ in updates} >= {"mrs_clusters", "mrs_executions_page", "mrs_executions_process"}
     assert any(p == "mrs_executions_page" and d["current"] == d["total"] == 1 for p, d in updates)
+    assert any(p == "mrs_executions_page" and d.get("cluster_id") == "c1" and d.get("query") == "recent"
+               for p, d in updates)
     assert all("percent" not in d and "percentage" not in d for _, d in updates)
     assert any(p == "mrs_executions_process" and d["current"] == d["total"] == 1 for p, d in updates)
     client = Client()

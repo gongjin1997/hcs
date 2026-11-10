@@ -15,6 +15,8 @@ export interface TaskProgressEvent {
   resource_total?: number | null
   abnormal_total?: number | null
   status?: string | null
+  cluster_id?: string | null
+  query?: string | null
 }
 export interface MRSExecutionOptions {
   query_mode: 'active_and_recent' | 'active_only' | 'recent_only' | 'all_history'

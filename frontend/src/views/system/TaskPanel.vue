@@ -44,7 +44,8 @@
       <TaskDefinitionCard v-for="task in filteredTasks" :key="task.code" :task="task" :service-name="serviceLabel(task.service)"
         :cadence="task.cron ? cronText(task.cron) : `每 ${humanize(task.interval_sec)}`" :scope-label="task.code === 'data_cleanup' ? '平台全局内部任务' : definitionScope"
         :resource-label="task.types.map(typeName).join('、') || '平台任务'" :next-run-label="task.next_run ? nextText(task.next_run) : '后端未上报'"
-        :checks="task.details.checks" :can-edit="canEdit" :can-run="user.can('task:run') && (task.code !== 'data_cleanup' || globalConfigScope)" :submitting="executions.pendingTasks.has(task.code)"
+        :checks="task.details.checks" :steps="task.details.steps" :checks-provided="task.details.provided"
+        :can-edit="canEdit" :can-run="user.can('task:run') && (task.code !== 'data_cleanup' || globalConfigScope)" :submitting="executions.pendingTasks.has(task.code)"
         :toggling="toggling === task.code" :active="(task.active_execution_count ?? 0) > 0" :timeout-label="taskTimeout(task)"
         :has-ecs-policy="ECS_POLICY_TASKS.includes(task.code)" :has-job-selection="!!DATAARTS_SELECTION_TASKS[task.code] && user.can('collect:manage')"
         @detail="selectedTaskCode = task.code" @run="run(task)" @configure="openEdit(task)" @toggle="toggle(task, $event)"
@@ -82,7 +83,7 @@
       @update:model-value="!$event && (executions.targetTaskCode.value = '')" @submit="executionTargetTask && run(executionTargetTask, $event)" @refresh="executions.targets.refresh" @existing="executions.open" />
     <TaskDefinitionDrawer :model-value="!!selectedTask" :task="selectedTask" :service-name="selectedTask ? serviceLabel(selectedTask.service) : ''"
       :cadence="selectedTask ? selectedTask.cron ? cronText(selectedTask.cron) : `每 ${humanize(selectedTask.interval_sec)}` : ''"
-      :scope-label="selectedTask?.code === 'data_cleanup' ? '平台全局内部任务' : definitionScope" :checks="selectedTask?.details.checks ?? []" :steps="selectedTask?.details.steps ?? []" :can-edit="canEdit" :can-configure-cce="user.can('podevent:view')" :timeout-label="selectedTask ? taskTimeout(selectedTask) : ''"
+      :scope-label="selectedTask?.code === 'data_cleanup' ? '平台全局内部任务' : definitionScope" :checks="selectedTask?.details.checks ?? []" :steps="selectedTask?.details.steps ?? []" :checks-provided="selectedTask?.details.provided" :can-edit="canEdit" :can-configure-cce="user.can('podevent:view')" :timeout-label="selectedTask ? taskTimeout(selectedTask) : ''"
       @update:model-value="!$event && (selectedTaskCode = '')" @configure="selectedTask && openEdit(selectedTask)" @scope="scopeTask = selectedTask">
       <template #history><TaskRunHistory v-if="selectedTask" :task="selectedTask" :describe-run="statsText" :status="taskStatus" :project-label="projectLabel" @open-execution="executions.open" /></template>
     </TaskDefinitionDrawer>

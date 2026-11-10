@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { InspectionTask } from '@/api'
 
-defineProps<{
+withDefaults(defineProps<{
   modelValue: boolean
   task: InspectionTask | null
   serviceName: string
@@ -9,10 +9,11 @@ defineProps<{
   scopeLabel: string
   checks: string[]
   steps: string[]
+  checksProvided?: boolean
   canEdit: boolean
   canConfigureCce?: boolean
   timeoutLabel?: string
-}>()
+}>(), { checksProvided: true })
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
   configure: []
@@ -30,9 +31,12 @@ const emit = defineEmits<{
         <div class="definition-actions"><el-button v-if="canEdit" size="small" @click="emit('configure')">执行参数 / 周期</el-button><el-button v-if="task.types.length" size="small" @click="emit('scope')">查看 / 配置资源范围</el-button></div>
       </section>
       <section class="definition-section" aria-label="任务定义">
-        <h3 class="section-title">检查项</h3>
-        <div class="check-tags"><el-tag v-for="check in checks" :key="check" size="small" type="info">{{ check }}</el-tag><span v-if="!checks.length" class="text-3">后端未提供检查项</span></div>
-        <details class="definition-steps"><summary>执行步骤说明<span v-if="steps.length">（{{ steps.length }} 步）</span></summary><ol v-if="steps.length"><li v-for="(step, index) in steps" :key="index">{{ step }}</li></ol><p v-else class="text-3">后端未提供步骤说明</p></details>
+        <h3 class="section-title">规则检查与执行步骤</h3>
+        <div class="check-tags"><el-tag v-for="check in checks" :key="check" size="small" type="info">{{ check }}</el-tag>
+          <span v-if="!checks.length && checksProvided" class="text-3">未配置告警规则检查项</span>
+          <span v-else-if="!checks.length" class="text-3">旧任务定义未提供规则检查项</span>
+        </div>
+        <details class="definition-steps"><summary>采集与执行步骤<span v-if="steps.length">（{{ steps.length }} 步）</span></summary><ol v-if="steps.length"><li v-for="(step, index) in steps" :key="index">{{ step }}</li></ol><p v-else class="text-3">任务定义未提供执行步骤</p></details>
         <p v-if="['ecs_status', 'ecs_metrics', 'ecs_quota'].includes(task.code)" class="definition-note text-3">租户 ECS 策略中的频率、范围与指标优先于全局任务周期。</p>
         <p v-if="task.note" class="definition-note text-3">{{ task.note }}</p>
         <p v-if="task.code === 'cce_cluster_health' && canConfigureCce" class="definition-note"><router-link :to="{ path: '/pod-events', query: { tab: 'clusters' } }">容器事件 · 集群与节点采集配置</router-link></p>

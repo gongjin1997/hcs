@@ -161,6 +161,22 @@ def test_same_phase_progress_counts_are_kept_in_history():
     assert row.history[-1]["current"] == 2 and row.history[-1]["at"] == now.isoformat()
 
 
+def test_mrs_query_context_change_is_kept_in_history_without_count_change():
+    from types import SimpleNamespace
+
+    now = utcnow()
+    row = SimpleNamespace(status="RUNNING", progress={"phase": "mrs_executions_page", "current": 0, "total": None,
+        "unit": "page", "message": "读取执行分页", "cluster_id": "cluster-a", "query": "active_RUNNING"},
+        history=[{"phase": "mrs_executions_page", "current": 0, "total": None, "unit": "page",
+                  "message": "读取执行分页", "cluster_id": "cluster-a", "query": "active_RUNNING"}])
+
+    changed = _record_progress(row, {"phase": "mrs_executions_page", "current": 0, "total": None, "unit": "page",
+        "message": "读取执行分页", "cluster_id": "cluster-a", "query": "recent"}, now=now)
+
+    assert changed is True
+    assert row.history[-1]["query"] == "recent" and row.history[-1]["cluster_id"] == "cluster-a"
+
+
 def test_progress_emits_each_real_count_change_within_the_same_phase():
     events = []
     control = runtime.Control("execution", 1, "owner", time.monotonic() + 10, {}, events.append)
@@ -189,6 +205,24 @@ def test_progress_phase_transition_clears_previous_phase_counts_and_metadata():
     assert events[-1]["phase"] == "saving"
     assert events[-1]["current"] == events[-1]["total"] == 6
     assert "cluster_id" not in events[-1]
+
+
+def test_progress_context_transition_clears_stale_mrs_query_counters():
+    events = []
+    control = runtime.Control("execution", 1, "owner", time.monotonic() + 10, {}, events.append)
+    control.progress("mrs_executions_page", current=3, total=3, unit="page", cluster_id="cluster-a",
+                     query="active_RUNNING", message="读取活动作业分页")
+
+    control.progress("mrs_executions_page", current=0, total=None, unit="page", cluster_id="cluster-a",
+                     query="recent", message="读取近期作业分页")
+
+    assert events[-1]["phase"] == "mrs_executions_page"
+    assert events[-1]["current"] == 0 and events[-1]["total"] is None
+    assert events[-1]["cluster_id"] == "cluster-a" and events[-1]["query"] == "recent"
+    control.progress("mrs_executions_page", current=0, total=None, unit="page", cluster_id="cluster-b",
+                     query="active_RUNNING", message="读取下一个集群")
+    assert events[-1]["current"] == 0 and events[-1]["total"] is None
+    assert events[-1]["cluster_id"] == "cluster-b" and events[-1]["query"] == "active_RUNNING"
 
 
 def test_supervisor_persists_all_queued_page_progress_events_in_order():

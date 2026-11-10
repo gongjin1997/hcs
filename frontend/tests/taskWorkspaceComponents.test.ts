@@ -13,7 +13,7 @@ const task: InspectionTask = {
   note: '仅查询云作业', min_interval: 30, skipped_tenants: [], checks: ['job_status'], steps: ['查询清单', '查询详情'],
 }
 const cardProps = () => ({ task, serviceName: 'MRS', cadence: '每 2 分钟', scopeLabel: '租户甲 · 已启用项目', resourceLabel: 'MRS 原生执行',
-  nextRunLabel: '后端未上报', checks: ['作业状态'], canEdit: true, canRun: true, submitting: false, toggling: false,
+  nextRunLabel: '后端未上报', checks: ['作业状态'], steps: task.steps, checksProvided: true, canEdit: true, canRun: true, submitting: false, toggling: false,
   active: false, hasEcsPolicy: false, hasJobSelection: false })
 function mountCard(props: Record<string, unknown> = {}) {
   const view = mountPersonnel('system/TaskDefinitionCard.vue', { props: { ...cardProps(), ...props } })
@@ -33,6 +33,12 @@ describe('任务配置卡片与详情', () => {
     expect(scope).toHaveBeenCalledOnce()
     expect(run).toHaveBeenCalledOnce()
     expect(allNodes(view.root).some(node => node.tag === 'Table')).toBe(false)
+  })
+
+  it('无告警规则的采集任务显示实际步骤，不误报后端缺数据', () => {
+    const view = mountCard({ checks: [], steps: ['筛选已启用集群', '读取节点与节点池'] })
+    expect(textOf(view.root)).toContain('主要步骤：筛选已启用集群、读取节点与节点池')
+    expect(textOf(view.root)).not.toContain('后端未提供检查项')
   })
 
   it('只读用户保留详情与范围查看，不能触发执行或修改', async () => {
@@ -68,15 +74,28 @@ describe('任务配置卡片与详情', () => {
   it('详情中的说明步骤默认折叠，周期与资源范围操作独立', async () => {
     const onConfigure = vi.fn(), onScope = vi.fn()
     const view = mountPersonnel('system/TaskDefinitionDrawer.vue', { props: { modelValue: true, task, serviceName: 'MRS', cadence: '每 2 分钟',
-      scopeLabel: '租户甲 · 项目乙', checks: ['作业状态'], steps: task.steps, canEdit: true, timeoutLabel: '120 秒', onConfigure, onScope } })
+      scopeLabel: '租户甲 · 项目乙', checks: ['作业状态'], steps: task.steps, checksProvided: true, canEdit: true, timeoutLabel: '120 秒', onConfigure, onScope } })
     dispose.push(view.unmount)
     expect(findNode(view.root, 'details').props.open).toBeUndefined()
     expect(textOf(view.root)).toContain('查询清单查询详情')
+    expect(textOf(view.root)).toContain('规则检查与执行步骤')
     expect(textOf(view.root)).toContain('120 秒')
     await clickButton(view.root, '执行参数 / 周期')
     await clickButton(view.root, '查看 / 配置资源范围')
     expect(onConfigure).toHaveBeenCalledOnce()
     expect(onScope).toHaveBeenCalledOnce()
+  })
+
+  it('详情区分没有告警规则与任务定义缺字段', () => {
+    const noRules = mountPersonnel('system/TaskDefinitionDrawer.vue', { props: { modelValue: true, task, serviceName: 'CCE', cadence: '每 2 分钟',
+      scopeLabel: '租户甲 · 项目乙', checks: [], steps: ['读取节点'], checksProvided: true, canEdit: false } })
+    dispose.push(noRules.unmount)
+    expect(textOf(noRules.root)).toContain('未配置告警规则检查项')
+    expect(textOf(noRules.root)).toContain('读取节点')
+    const missing = mountPersonnel('system/TaskDefinitionDrawer.vue', { props: { modelValue: true, task, serviceName: 'CCE', cadence: '每 2 分钟',
+      scopeLabel: '租户甲 · 项目乙', checks: [], steps: [], checksProvided: false, canEdit: false } })
+    dispose.push(missing.unmount)
+    expect(textOf(missing.root)).toContain('旧任务定义未提供规则检查项')
   })
 
   it('组件模板可编译，样式限定在任务工作区', () => {
