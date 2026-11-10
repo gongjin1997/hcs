@@ -14,7 +14,7 @@ from app.hcs import HcsError
 from app.models import HcsAccount, HcsProject, InspectionRun, InspectionTask, SysSetting
 from app.models.base import utcnow
 from app.models.task_execution import TaskExecution, TaskExecutionCancel
-from app.schemas.task_execution import ExecutionOut
+from app.schemas.task_execution import ExecutionOptionsOut, ExecutionOut, MRSExecutionOptionsOut
 from app.services import cce_settings, collect_switch, collection_policy, platform_watch
 
 ACTIVE = ("QUEUED", "RUNNING")
@@ -155,6 +155,7 @@ def snapshots(db: Session, executions: Sequence[TaskExecution], *, now: datetime
             project_label = f"项目#{execution.project_ref}" if execution.project_ref is not None else \
                 "全局内部任务" if execution.task_code == "data_cleanup" and execution.tenant_id is None \
                 else "历史未知项目（未记录）"
+        options = _execution_options(execution)
         item: dict[str, Any] = {"id": execution.id, "execution_id": execution.id, "run_id": execution.run_id,
                 "task_code": execution.task_code, "task_name": task.name if task else execution.task_code,
                 "service": task.service if task else "", "tenant_id": execution.tenant_id,
@@ -166,7 +167,7 @@ def snapshots(db: Session, executions: Sequence[TaskExecution], *, now: datetime
                 "created_at": execution.created_at, "queued_at": execution.created_at,
                 "started_at": execution.started_at, "finished_at": execution.finished_at,
                 "heartbeat_at": execution.heartbeat_at, "deadline_at": execution.deadline_at,
-                "elapsed_sec": round(elapsed, 3), "timeout_sec": execution.timeout_sec,
+                "elapsed_sec": round(elapsed, 3), "timeout_sec": options["timeout_sec"], "options": options,
                 "cancel_requested": execution.id in cancelled, "api_calls": run.api_calls if run else 0,
                 "resource_total": run.resource_total if run else 0, "abnormal_total": run.abnormal_total if run else 0,
                 "error_summary": sanitize_text(run.error_summary) if run and run.error_summary else None,
@@ -178,6 +179,27 @@ def snapshots(db: Session, executions: Sequence[TaskExecution], *, now: datetime
                     item[field] = max(item[field], reported)
         out.append(ExecutionOut.model_validate(item).model_dump())
     return out
+
+
+def _execution_options(execution: TaskExecution) -> dict:
+    """Project only the public option schema from the immutable enqueue-time parameter copy."""
+    raw = execution.params if isinstance(execution.params, dict) else {}
+    timeout = execution.timeout_sec if type(execution.timeout_sec) is int and 15 <= execution.timeout_sec <= 3600 \
+        else DEFAULT_TIMEOUT_SEC
+    p90 = raw.get("p90_min_samples")
+    p90 = p90 if execution.task_code == "dgc_batch_instance" and type(p90) is int and 1 <= p90 <= 10000 else None
+    options: dict[str, Any] = {"timeout_sec": timeout}
+    if p90 is not None:
+        options["p90_min_samples"] = p90
+    if execution.task_code == "mrs_job_status":
+        schema = mrs_parameter_schema(execution.task_code)["properties"]
+        selected = {key: raw[key] for key in schema if key in raw}
+        try:
+            effective = validate_mrs_params(execution.task_code, selected, strict=False)
+        except HcsError:
+            effective = validate_mrs_params(execution.task_code, {}, strict=False)
+        options["mrs"] = MRSExecutionOptionsOut.model_validate(effective).model_dump(exclude_unset=True)
+    return ExecutionOptionsOut.model_validate(options).model_dump(exclude_none=True)
 
 
 def admission(db: Session, scope: Scope, result: dict) -> dict:

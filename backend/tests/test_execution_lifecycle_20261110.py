@@ -172,6 +172,25 @@ def test_progress_emits_each_real_count_change_within_the_same_phase():
         (0, 1), (1, 1), (0, None), (1, 1)]
 
 
+def test_progress_phase_transition_clears_previous_phase_counts_and_metadata():
+    events = []
+    control = runtime.Control("execution", 1, "owner", time.monotonic() + 10, {}, events.append)
+    control.progress("mrs_collection_complete", current=3, total=3, unit="cluster", cluster_id="cluster-a",
+                     api_calls=20, message="MRS 采集完成")
+    control.progress("evaluating", current=0, total=6, unit="规则项", message="准备规则检查")
+
+    assert events[-1]["phase"] == "evaluating"
+    assert events[-1]["current"] == 0 and events[-1]["total"] == 6 and events[-1]["unit"] == "规则项"
+    assert events[-1]["api_calls"] == 20 and events[-1]["message"] == "准备规则检查"
+    assert "cluster_id" not in events[-1]
+
+    control.progress("saving", current=6, total=6, unit="resource", message="保存巡检结果")
+
+    assert events[-1]["phase"] == "saving"
+    assert events[-1]["current"] == events[-1]["total"] == 6
+    assert "cluster_id" not in events[-1]
+
+
 def test_supervisor_persists_all_queued_page_progress_events_in_order():
     from collections import deque
     from types import SimpleNamespace

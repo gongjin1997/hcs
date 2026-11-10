@@ -16,6 +16,24 @@ export interface TaskProgressEvent {
   abnormal_total?: number | null
   status?: string | null
 }
+export interface MRSExecutionOptions {
+  query_mode: 'active_and_recent' | 'active_only' | 'recent_only' | 'all_history'
+  submitted_window_hours?: number | null
+  submitted_time_begin?: number | null
+  submitted_time_end?: number | null
+  page_size: number
+  max_pages: number
+  max_items: number
+  max_calls: number
+  max_clusters: number
+  job_offset_mode: 'page' | 'offset'
+  elapsed_time_unit?: 'milliseconds' | 'seconds' | null
+}
+export interface TaskExecutionOptions {
+  timeout_sec: number
+  p90_min_samples?: number | null
+  mrs?: MRSExecutionOptions | null
+}
 export interface TaskExecution {
   id: string
   execution_id: string
@@ -44,6 +62,7 @@ export interface TaskExecution {
   deadline_at: string | null
   elapsed_sec: number
   timeout_sec: number
+  options?: TaskExecutionOptions
   cancel_requested: boolean
   api_calls: number
   resource_total: number

@@ -104,6 +104,25 @@ describe('执行实例的真实展示与操作', () => {
     dispose.push(view.unmount)
     for (const label of ['execution-old', 'request-batch-1', '认证完成', '2 / 8', '300 秒', '云端作业']) expect(textOf(view.root)).toContain(label)
   })
+
+  it('MRS 执行详情展示该次入队时的查询模式和资源上限', () => {
+    const item = execution({ options: { timeout_sec: 300, mrs: {
+      query_mode: 'active_only', page_size: 50, max_pages: 10, max_items: 500,
+      max_calls: 20, max_clusters: 12, job_offset_mode: 'page', elapsed_time_unit: null,
+    } } })
+    const view = mountPersonnel('system/TaskExecutionDrawer.vue', { props: { modelValue: true, execution: item, loading: false, error: '', canCancel: false, canRetry: false } })
+    dispose.push(view.unmount)
+    for (const label of ['本次参数', '仅活动作业', '每页条数', '50 条', '调用预算', '20 次', '局点未确认']) expect(textOf(view.root)).toContain(label)
+    expect(textOf(view.root)).not.toContain('资源范围快照')
+  })
+
+  it('详情兼容不含 options 的旧 API 响应', () => {
+    const item = execution({ options: undefined })
+    const view = mountPersonnel('system/TaskExecutionDrawer.vue', { props: { modelValue: true, execution: item, loading: false, error: '', canCancel: false, canRetry: false } })
+    dispose.push(view.unmount)
+    expect(textOf(view.root)).toContain(item.execution_id)
+    expect(textOf(view.root)).not.toContain('本次参数')
+  })
 })
 
 describe('按项目执行的真实目标选择', () => {

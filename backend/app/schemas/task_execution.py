@@ -7,6 +7,33 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 ExecutionStatus = Literal[
     "QUEUED", "RUNNING", "SUCCESS", "PARTIAL", "FAILED", "TIMEOUT", "INTERRUPTED", "CANCELLED", "SKIPPED",
 ]
+MRSQueryMode = Literal["active_and_recent", "active_only", "recent_only", "all_history"]
+MRSOffsetMode = Literal["page", "offset"]
+MRSElapsedTimeUnit = Literal["milliseconds", "seconds"]
+
+
+class MRSExecutionOptionsOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query_mode: MRSQueryMode
+    submitted_window_hours: float | None = None
+    submitted_time_begin: int | None = None
+    submitted_time_end: int | None = None
+    page_size: int
+    max_pages: int
+    max_items: int
+    max_calls: int
+    max_clusters: int
+    job_offset_mode: MRSOffsetMode
+    elapsed_time_unit: MRSElapsedTimeUnit | None = None
+
+
+class ExecutionOptionsOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    timeout_sec: int
+    p90_min_samples: int | None = None
+    mrs: MRSExecutionOptionsOut | None = None
 
 
 class TaskRunIn(BaseModel):
@@ -51,6 +78,7 @@ class ExecutionOut(BaseModel):
     deadline_at: datetime | None = None
     elapsed_sec: float
     timeout_sec: int
+    options: ExecutionOptionsOut
     cancel_requested: bool
     api_calls: int
     resource_total: int

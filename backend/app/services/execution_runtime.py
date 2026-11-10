@@ -52,6 +52,11 @@ class Control:
             counts_changed = any(key in details and details[key] != self.latest.get(key)
                                  for key in ("current", "total", "unit"))
             message_changed = "message" in details and details["message"] != self.latest.get("message")
+            if changed:
+                # Counters and query metadata belong to a phase. Keep only run-wide
+                # counters when moving on so a new phase cannot inherit an old total.
+                self.latest = {key: self.latest[key] for key in ("api_calls", "resource_total", "abnormal_total")
+                               if key in self.latest}
             self.latest.update({k: v for k, v in details.items()
                                 if isinstance(v, (str, int, float, bool)) or v is None})
             if phase is not None:

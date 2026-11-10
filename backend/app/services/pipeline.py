@@ -394,7 +394,13 @@ def process_observations(db: Session, service: str, observations: list[Observati
         evaluated[resource_id][1] = unavailable
     extra = {"project": ctx.project_id, "region": ctx.region or None, "tenant": ctx.tenant_name or None,
              "tenant_code": ctx.account}
-    for o, rule, fp in checks:
+    evaluation_total = len(checks)
+    evaluation_step = max(1, math.ceil(evaluation_total / 20))
+    ctx.progress("evaluating", current=0, total=evaluation_total, unit="规则项", message="准备规则检查")
+    for check_index, (o, rule, fp) in enumerate(checks, 1):
+        if check_index > 1 and (check_index - 1) % evaluation_step == 0:
+            ctx.progress("evaluating", current=check_index - 1, total=evaluation_total,
+                         unit="规则项", message="检查告警规则")
         res = resources[(o.resource_type, o.resource_id)]
         if not res.monitored or res.lifecycle != "ACTIVE":
             continue
@@ -452,6 +458,8 @@ def process_observations(db: Session, service: str, observations: list[Observati
                                               extra={k: v for k, v in extra.items() if v})
             if ev:
                 events.append(ev)
+    ctx.progress("evaluating", current=evaluation_total, total=evaluation_total,
+                 unit="规则项", message="规则判定完成")
     if phase != "metrics":
         for resource in resources.values():
             known_count, missing_count = evaluated[resource.id]
@@ -575,7 +583,7 @@ def _run_task(db: Session, task_code: str, *, client: HcsClient | None, target: 
                 ctx.params["prometheus"] = dict(policy.prometheus.queries)
         ctx.progress("collecting", message="读取云资源状态")
         observations = collector.collect(ctx)
-        ctx.progress("evaluating", current=len(observations), unit="条观测", message="检查采集范围并评估规则")
+        ctx.progress("evaluating", message="检查采集范围并准备规则评估")
         if collector.service == "gaussdb":
             _inspection_task_scope(db, ctx)
             if "_inspection_tasks" in ctx.params and task_code not in ctx.params["_inspection_tasks"]:

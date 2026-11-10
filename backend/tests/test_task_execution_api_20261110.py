@@ -60,6 +60,7 @@ def test_run_accepts_persisted_queue_with_optional_body_and_safe_dto(mem_db, exe
     assert dto["started_at"] is None and dto["elapsed_sec"] == 0
     assert dto["phase"] == "queued" and dto["phase_label"] == "排队等待"
     assert dto["timeout_sec"] == 60 and dto["queued_at"] == dto["created_at"]
+    assert dto["options"] == {"timeout_sec": 60, "p90_min_samples": None, "mrs": None}
     assert dto["tenant_name"] == "租户1" and dto["project_label"] == "project-11"
     assert not {"params", "target", "owner_token", "worker_id", "request_key", "lease_expires_at"} & dto.keys()
     assert "do-not-expose" not in response.text
@@ -193,6 +194,30 @@ def test_detail_whitelists_progress_history_and_snapshot_fields(mem_db, executio
         assert value not in response.text
     assert data["history"][0]["phase"] == "auth" and data["history"][0]["phase_label"] == "认证"
     assert set(data["history"][0]) == {"phase", "phase_label", "message"}
+    assert data["options"] == {"timeout_sec": 60, "p90_min_samples": None, "mrs": None}
+
+
+def test_mrs_execution_detail_exposes_only_the_enqueue_time_option_whitelist(mem_db, execution_api):
+    client, _ = execution_api
+    mem_db.add(InspectionTask(code="mrs_job_status", name="MRS 原生作业", service="mrs", interval_sec=300,
+        enabled=True, params={"timeout_sec": 90, "query_mode": "active_only", "page_size": 50,
+                              "max_calls": 12, "secret": "must-not-leak", "owner_token": "private"}))
+    mem_db.commit()
+    row = enqueue(mem_db, code="mrs_job_status")
+
+    response = client.get(f"/api/v1/system/executions/{row.id}")
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["options"] == {
+        "timeout_sec": 90, "p90_min_samples": None,
+        "mrs": {"query_mode": "active_only", "submitted_window_hours": None,
+                "submitted_time_begin": None, "submitted_time_end": None, "page_size": 50,
+                "max_pages": 24, "max_items": 2000, "max_calls": 12, "max_clusters": 1000,
+                "job_offset_mode": "page", "elapsed_time_unit": None},
+    }
+    assert "must-not-leak" not in response.text and "private" not in response.text
+    assert "params" not in data and "target" not in data
 
 
 def test_cancel_and_retry_authorize_before_calling_internal_service(mem_db, execution_api, monkeypatch):
