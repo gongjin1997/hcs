@@ -145,7 +145,7 @@ def finish(db: Session, row: TaskExecution, status: str, message: str | None = N
         from .platform_watch import on_run
 
         db.flush()
-        on_run(db, run, durable=True)
+        on_run(db, run, commit=False)
     log.info("execution_finished", extra={"event": "execution_finished", "task_execution_id": row.id,
              "run_id": row.run_id, "task": row.task_code, "tenant_id": row.tenant_id,
              "project_ref": row.project_ref, "status": status, "error_code": code})
@@ -229,7 +229,7 @@ def reap(db: Session, *, legacy_before: datetime | None = None) -> int:
             from .platform_watch import on_run
 
             db.flush()
-            on_run(db, run, durable=True)
+            on_run(db, run, commit=False)
         changed += len(stale)
     db.commit()
     return changed

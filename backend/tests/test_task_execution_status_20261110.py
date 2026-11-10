@@ -8,7 +8,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from app.core.db import Base
-from app.models import AlarmEvent, InspectionRun, InspectionTask, TaskExecution
+from app.models import AlarmEvent, InspectionRun, InspectionTask, SysSetting, TaskExecution
 from app.models.base import utcnow
 from app.services import platform_watch, settings_service
 
@@ -189,6 +189,25 @@ def test_unmanaged_pipeline_keeps_its_existing_on_run_callback(mem_db, monkeypat
     monkeypatch.setattr(platform_watch, "_on_run", lambda db, run: observed.append(run.id))
     platform_watch.on_run(mem_db, row)
     assert observed == [row.id]
+
+
+def test_on_run_commit_false_isolates_failure_without_ending_outer_transaction(mem_db, monkeypatch):
+    row = watch_run(mem_db)
+    mem_db.commit()
+
+    def fail_after_write(db, _run):
+        db.add(SysSetting(key="watch-savepoint", value={"partial": True}))
+        db.flush()
+        raise RuntimeError("synthetic watch failure")
+
+    monkeypatch.setattr(platform_watch, "_on_run", fail_after_write)
+    platform_watch.on_run(mem_db, row, commit=False)
+
+    assert mem_db.in_transaction()
+    assert mem_db.get(SysSetting, "watch-savepoint") is None
+    mem_db.add(SysSetting(key="outer-transaction", value={"continues": True}))
+    mem_db.commit()
+    assert mem_db.get(SysSetting, "outer-transaction") is not None
 
 
 @pytest.mark.parametrize("status", ["SUCCESS", "PARTIAL", "FAILED", "TIMEOUT", "INTERRUPTED", "CANCELLED", "SKIPPED"])
