@@ -1,4 +1,8 @@
-"""API 进程内的请求计数与耗时直方图（/metrics 输出；只统计本进程，多进程部署时 Prometheus 按实例分别抓取）。"""
+"""API 进程内的请求计数与耗时直方图（/metrics 输出）。
+
+只统计本进程，部署默认 API_WORKERS=1。多个 worker 共用一个端口时，抓取值会在各进程的计数之间跳变；
+需要多进程时改用 prometheus_client 多进程模式（docs/部署运维手册.md 第 8 章）。
+"""
 import threading
 from collections import defaultdict
 

@@ -21,4 +21,6 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD python -c "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=4)"
 # --forwarded-allow-ips：信任 nginx 转发的客户端 IP（API 端口不对外暴露，只在 compose 内网可达）
-CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips '*' --workers ${API_WORKERS:-2} --timeout-graceful-shutdown ${API_GRACEFUL_TIMEOUT:-8}"]
+# --workers 默认 1：/metrics 的请求计数与实时连接数是进程内变量，多个进程共用一个端口时抓取值会在各进程之间跳变；
+# 需要多进程时先把这些指标改为 prometheus_client 多进程模式（docs/部署运维手册.md 第 8 章）
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips '*' --workers ${API_WORKERS:-1} --timeout-graceful-shutdown ${API_GRACEFUL_TIMEOUT:-8}"]

@@ -245,6 +245,7 @@ def test_redis_publish_failure_is_throttled_closes_connections_and_recovers(monk
     monkeypatch.setattr("redis.Redis.from_url", lambda *a, **kw: client)
     monkeypatch.setattr(events, "_publish_failures", 0)
     monkeypatch.setattr(events, "_publish_warned_at", 0)
+    monkeypatch.setattr(events, "_publisher", None)
     monkeypatch.setattr(events, "monotonic", lambda: 1)
     fallback = Mock()
     monkeypatch.setattr(events.broadcaster, "publish_threadsafe", fallback)
