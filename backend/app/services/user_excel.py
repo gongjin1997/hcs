@@ -148,7 +148,7 @@ def _boolean(value: str, label: str) -> bool:
     raise _bad(f"{label}只能填写是/否、true/false 或 1/0")
 
 
-def _body(values: dict[str, Any], user: User | None, roles: dict[str, int],
+def _body(values: dict[str, Any], user: User | None, roles: dict[str, int],  # noqa: C901  # T10
           tenants: dict[str, int]) -> UserCreateIn | UserPatchIn:
     data: dict[str, Any] = {}
     for key in ("display_name", "email", "phone"):
@@ -276,7 +276,7 @@ def _validate(db: Session, rows: list[ImportRow], actor: CurrentUser, users: dic
     return errors
 
 
-def parse(db: Session, content: bytes, actor: CurrentUser) -> tuple[ImportResult, ImportTodo]:
+def parse(db: Session, content: bytes, actor: CurrentUser) -> tuple[ImportResult, ImportTodo]:  # noqa: C901  # T10
     """返回安全预览和仅供 apply 使用的执行计划；任何错误都使整份计划不可执行。"""
     _manager(actor)
     _check_file(content)

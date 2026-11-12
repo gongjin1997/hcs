@@ -225,7 +225,7 @@ class DataArtsRealtimeCollector:
 
     code, service, name = "dgc_realtime_status", "dataarts", "DataArts 实时作业状态"
 
-    def collect(self, ctx: RunContext) -> list[Observation]:
+    def collect(self, ctx: RunContext) -> list[Observation]:  # noqa: C901  # T10
         obs: list[Observation] = []
         scope = scope_for_context(ctx, "dgc_realtime_job")
         for ws in dict.fromkeys(ctx.workspaces or [""]):
@@ -321,7 +321,7 @@ class DataArtsBatchCollector:
 
     code, service, name = "dgc_batch_instance", "dataarts", "DataArts 批作业与实例"
 
-    def collect(self, ctx: RunContext) -> list[Observation]:
+    def collect(self, ctx: RunContext) -> list[Observation]:  # noqa: C901  # T10
         minimum = ctx.params.get("p90_min_samples", 5)
         if type(minimum) is not int or minimum < 1:
             raise HcsError(0, "LOCAL.INVALID_CONFIG", "p90_min_samples 须为正整数，默认 5 是本地样本策略")

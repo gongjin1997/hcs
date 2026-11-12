@@ -307,7 +307,7 @@ def evidence_facts(observation: Observation, resource: Resource, rule: Rule, ctx
     return facts
 
 
-def interrupt_missing(db: Session, ctx: Context, rules: dict[tuple[str, str], list[Rule]],
+def interrupt_missing(db: Session, ctx: Context, rules: dict[tuple[str, str], list[Rule]],  # noqa: C901  # T10
                       checks: list[tuple[Observation, Rule, str]], now: datetime
                       ) -> tuple[dict[str, EvalState], dict[int, Resource], dict[int, int]]:
     """只清当前 task/tenant/project 的未返回指纹；旧库不可归属的孤儿留至首次有效观测重建。"""

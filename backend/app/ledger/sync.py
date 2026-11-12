@@ -134,7 +134,7 @@ def _change(db: Session, r: Resource, change_type: str, now: datetime, changes: 
                           source=source, operator=operator, detected_at=now))
 
 
-def apply_snapshot(db: Session, rtype: str, records: list[LedgerRecord], now: datetime | None = None,
+def apply_snapshot(db: Session, rtype: str, records: list[LedgerRecord], now: datetime | None = None,  # noqa: C901  # T10
                    region: str | None = None, tenant_id: int | None = None, project_ref: int | None = None) -> dict:
     """把某个项目某类资源的最新清单合并进台账，返回 {"total", "created", "updated", "deleted", "skipped_delete"}。"""
     now = now or utcnow()
@@ -222,7 +222,7 @@ def record_manual_change(db: Session, r: Resource, before: dict, operator: str) 
             propagate_owner(db, r)
 
 
-def sync_ledger(db: Session, *, client: HcsClient | None = None, target: Target | None = None,
+def sync_ledger(db: Session, *, client: HcsClient | None = None, target: Target | None = None,  # noqa: C901  # T10
                 types: list[str] | None = None, trigger: str = "SCHEDULE") -> InspectionRun:
     """同步一个租户项目的台账（target 为空时按环境变量单账号兜底）。"""
     sync_started = perf_counter()

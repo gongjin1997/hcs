@@ -112,7 +112,7 @@ def list_events(cluster_id: str | None = None, namespace: str | None = None, wor
 
 
 @router.get("/stats", summary="容器事件统计（按类型 / 趋势 / Top 工作负载 / Pod 概况）", dependencies=[VIEW])
-def stats(hours: int = Query(24, ge=1, le=24 * 30), cluster_id: str | None = None, namespace: str | None = None,
+def stats(hours: int = Query(24, ge=1, le=24 * 30), cluster_id: str | None = None, namespace: str | None = None,  # noqa: C901  # T10
           db: Session = Depends(get_db), scope: Scope = Depends(get_scope),
           tenant_id: int | None = Query(None, ge=1), project_ref: int | None = Query(None, ge=1),
           workload: str | None = None, workload_kind: Annotated[str | None, Query(max_length=32)] = None,

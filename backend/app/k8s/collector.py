@@ -203,7 +203,7 @@ class _Run:
             ev.detail = {**(ev.detail or {}), "closure_reason": reason, "recovery_confirmed": reason == "RECOVERED"}
 
     # ---------------- 单个集群 ----------------
-    def cluster(self, cid: str, cname: str) -> list[Observation]:
+    def cluster(self, cid: str, cname: str) -> list[Observation]:  # noqa: C901  # T10
         db, now = self.db_, self.now
         kube = KubeApi(self.ctx.client, cid)
         cl = (cid, cname)
@@ -411,7 +411,7 @@ class _Run:
             return (cl[0], ns, name) in self.out_pods
         return self._out(cl, ns, name)
 
-    def _k8s_events(self, cl: tuple[str, str], events: list[dict], states: dict[str, PodState]) -> None:
+    def _k8s_events(self, cl: tuple[str, str], events: list[dict], states: dict[str, PodState]) -> None:  # noqa: C901  # T10
         db, now, cid = self.db_, self.now, cl[0]
         pod_uids: dict[tuple[str, str], PodState | None] = {}
         workloads = {(st.namespace, st.workload_kind, st.workload) for st in states.values()
@@ -607,7 +607,7 @@ class _Run:
         st.data = data
 
     # ---------------- 汇总为巡检观测 ----------------
-    def _observations(self, cl: tuple[str, str], states: dict[str, PodState]) -> list[Observation]:
+    def _observations(self, cl: tuple[str, str], states: dict[str, PodState]) -> list[Observation]:  # noqa: C901  # T10
         cid, cname = cl
         now = self.now
         wl: dict[tuple[str, str, str], dict] = {}

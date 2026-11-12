@@ -274,7 +274,7 @@ class MrsJobCollector:
         with request_budget(attempts=config["max_calls"], seconds=math.inf):
             return self._collect(ctx, config)
 
-    def _collect(self, ctx: RunContext, config: dict) -> list[Observation]:
+    def _collect(self, ctx: RunContext, config: dict) -> list[Observation]:  # noqa: C901  # T10
         mode, unit = config["job_offset_mode"], config["elapsed_time_unit"]
         scope = ctx.scope("mrs_job")
         if scope.dims - {"cluster", "job", "id"}:

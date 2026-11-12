@@ -119,7 +119,7 @@ def _owner_changes(db: Session, resource: Resource, name: str | None, account: s
     return {key: value for key, value in values.items() if getattr(resource, key) != value}
 
 
-def parse(db: Session, content: bytes, tenant_ids: list[int] | None, dictionary: LedgerDict) -> tuple[ImportResult, list]:
+def parse(db: Session, content: bytes, tenant_ids: list[int] | None, dictionary: LedgerDict) -> tuple[ImportResult, list]:  # noqa: C901  # T10
     """解析并校验，返回（结果, 待写入的变更 [(resource, {field: new})]）。不修改数据库。"""
     try:
         wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)

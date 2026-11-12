@@ -212,7 +212,7 @@ def _recover_value(rule: Rule, facts: dict) -> str | None:
     return f"{round(v, 1) if isinstance(v, float) else v}{rule.expr.get('unit', '')}"[:64]
 
 
-def apply_decision(db: Session, *, rule: Rule, decision: Decision, fp: str, resource: Resource, obs: Observation,
+def apply_decision(db: Session, *, rule: Rule, decision: Decision, fp: str, resource: Resource, obs: Observation,  # noqa: C901  # T10
                    facts: dict, now: datetime, active: AlarmEvent | None, extra: dict | None = None,
                    cache: DecisionCache | None = None) -> dict | None:
     m, action = decision.match, decision.action

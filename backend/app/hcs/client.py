@@ -110,7 +110,7 @@ class HcsClient:
             finally:
                 progress(api_calls=self.calls, service=service)
 
-    def _send_scoped(self, service: str, method: str, path: str, *, params: dict | None = None, json: Any = None,
+    def _send_scoped(self, service: str, method: str, path: str, *, params: dict | None = None, json: Any = None,  # noqa: C901  # T10
                      headers: dict | None = None, host_vars: dict | None = None) -> httpx.Response:
         service = service.strip().lower()
         if service == "aom":

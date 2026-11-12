@@ -29,7 +29,7 @@ def snapshot_key(tenant_id: int, project_ref: int, cid: str) -> str:
 class CceHealthCollector:
     code, service, name = cce_settings.TASK_CODE, "cce", "CCE 节点健康与原生指标"
 
-    def collect(self, ctx: RunContext) -> list[Observation]:
+    def collect(self, ctx: RunContext) -> list[Observation]:  # noqa: C901  # T10
         db: Session = ctx.db
         if db is None or ctx.tenant_id is None or ctx.project_ref is None:
             ctx.stats["cce_skipped"] = "scope_missing"

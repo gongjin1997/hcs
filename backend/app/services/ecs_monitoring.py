@@ -110,7 +110,7 @@ def timestamp_semantics(source: str, metric: str, diagnostic: dict | None) -> Ti
     return "source_sample" if source in ("CES", "MANAGEONE") else "unknown"
 
 
-def save_readings(db: Session, resources: Sequence[Resource], readings: Mapping[str, Iterable[Reading]],
+def save_readings(db: Session, resources: Sequence[Resource], readings: Mapping[str, Iterable[Reading]],  # noqa: C901  # T10
                   collected_at: datetime, *, diagnostic: dict | None = None,
                   signature: str | None = None) -> tuple[dict[int, list[Reading]], int]:
     """批量幂等写入；同源同一采样点不重复累计，也不以新查询时间伪造新点。"""
@@ -194,7 +194,7 @@ def _stage_enabled(policy: dict, key: str) -> bool:
     return bool((policy.get(key) or {}).get("enabled", True))
 
 
-def instance_out(resource: Resource, tenant: HcsAccount | None, project: HcsProject | None,
+def instance_out(resource: Resource, tenant: HcsAccount | None, project: HcsProject | None,  # noqa: C901  # T10
                  policy: dict, *, master: bool, task_enabled: bool = True,
                  inspection_task_enabled: bool = True,
                  now: datetime | None = None) -> EcsInstanceOut:

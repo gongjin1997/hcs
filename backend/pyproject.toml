@@ -60,12 +60,17 @@ target-version = "py312"
 extend-exclude = ["migrations/versions"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP"]
+select = ["E", "F", "I", "B", "UP", "C90"]
 # py312 新增的 PEP 695 类型参数写法改写建议（UP040 / UP046 / UP047）：涉及 Pydantic 泛型模型，属不安全改写，另开提交处理
 ignore = ["UP040", "UP046", "UP047"]
 
+[tool.ruff.lint.mccabe]
+# 复杂度护栏（任务书 T03 / T10）：新写的函数不得超过 15；现有超标函数带 `# noqa: C901  # T10` 占位，拆分后删除占位，最后收紧到 12
+max-complexity = 15
+
 [tool.ruff.lint.per-file-ignores]
 "mock_hcs/inventory*.py" = ["E501"]     # 演示资源清单按表格排版，一行一个资源
+"app/demo/*.py" = ["C901"]              # 演示数据生成，只服务开发 / 演示环境，不在重构范围
 
 [tool.ruff.lint.flake8-bugbear]
 extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Header", "fastapi.File", "fastapi.Form", "app.core.deps.require_perm"]

@@ -180,7 +180,7 @@ class DcsCollector:
 
     code, service, name = "dcs_status", "dcs", "DCS 实例状态与内存"
 
-    def collect(self, ctx: RunContext) -> list[Observation]:
+    def collect(self, ctx: RunContext) -> list[Observation]:  # noqa: C901  # T10
         list_times = {}
 
         def page(params):

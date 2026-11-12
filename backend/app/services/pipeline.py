@@ -88,7 +88,7 @@ def _log_run(run: InspectionRun, started: float, **fields: object) -> None:
         "upstream_errors": hcs.get("errors", 0), "rate_limit_ms": hcs.get("rate_limit_ms", 0), **fields})
 
 
-def upsert_resource(db: Session, service: str, group: list[Observation], now: datetime,
+def upsert_resource(db: Session, service: str, group: list[Observation], now: datetime,  # noqa: C901  # T10
                     ctx: RunContext | None = None, known: dict[tuple[str, str], Resource] | None = None) -> Resource:
     first = group[0]
     res = known.get((first.resource_type, first.resource_id)) if known is not None else db.scalar(
@@ -282,7 +282,7 @@ def _save_dcs_memory_samples(db: Session, groups: dict[tuple[str, str], list[Obs
         db.execute(statement)
 
 
-def process_observations(db: Session, service: str, observations: list[Observation], ctx: RunContext,
+def process_observations(db: Session, service: str, observations: list[Observation], ctx: RunContext,  # noqa: C901  # T10
                          now: datetime) -> tuple[list[dict], int]:
     ecs_target = (any(observation.resource_type == "ecs_server" for observation in observations)
                   or "ecs_server" in inspection_evidence.task_types(ctx))
@@ -511,7 +511,7 @@ def run_task(db: Session, task_code: str, *, client: HcsClient | None = None, ta
             raise
 
 
-def _run_task(db: Session, task_code: str, *, client: HcsClient | None, target: Target | None,
+def _run_task(db: Session, task_code: str, *, client: HcsClient | None, target: Target | None,  # noqa: C901  # T10
               trigger: str) -> InspectionRun:
     started = perf_counter()
     if task_code == CLEANUP_TASK:                  # 数据清理：全局执行一次，不区分租户

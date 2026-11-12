@@ -153,7 +153,7 @@ def _controller(obj: dict, namespace: str) -> tuple[dict[str, Any] | None, str |
             "name": ref["name"], "uid": ref["uid"]}, None
 
 
-def resolve_pod_owners(kube: KubeApi, pods: list[dict], *, enabled: bool = False) -> dict[str, Any]:
+def resolve_pod_owners(kube: KubeApi, pods: list[dict], *, enabled: bool = False) -> dict[str, Any]:  # noqa: C901  # T10
     """Return per-Pod direct/top ownership plus independent ReplicaSet/Job sources.
 
     Calls only the necessary all-namespace ReplicaSet/Job GET lists, once per kind

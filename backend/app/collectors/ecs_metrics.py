@@ -40,7 +40,7 @@ def ip_index(resources: list[Resource]) -> dict[str, str]:
 class EcsMetricsCollector:
     code, service, name = "ecs_metrics", "ecs", "ECS 使用指标采样"
 
-    def collect(self, ctx: RunContext) -> list[Observation]:
+    def collect(self, ctx: RunContext) -> list[Observation]:  # noqa: C901  # T10
         if ctx.db is None:
             ctx.errors.append("ECS 指标采样需要本地资源台账")
             return []

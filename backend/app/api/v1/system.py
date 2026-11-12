@@ -210,7 +210,7 @@ def tasks(db: Session = Depends(get_db), scope: Scope = Depends(get_scope),
 
 
 @router.put("/tasks/{code}", summary="修改任务：周期（秒）/ crontab / 启停 / 清除旧 AOM 映射（调度进程最迟 30 秒生效）")
-def update_task(code: str, body: TaskPatch, db: Session = Depends(get_db), audit: Auditor = Depends(get_auditor),
+def update_task(code: str, body: TaskPatch, db: Session = Depends(get_db), audit: Auditor = Depends(get_auditor),  # noqa: C901  # T10
                 _: CurrentUser = Depends(require_perm("task:edit")), scope: Scope = Depends(get_scope)):
     if not scope.full:
         raise BizError(ErrorCode.FORBIDDEN, "任务调度为全局配置，修改需要全部租户的数据权限", 403)

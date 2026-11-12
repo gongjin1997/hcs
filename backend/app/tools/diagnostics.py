@@ -175,7 +175,7 @@ def private_directory(path: Path) -> int:
     return fd
 
 
-def sanitize_record(value: dict[str, Any]) -> dict[str, Any]:
+def sanitize_record(value: dict[str, Any]) -> dict[str, Any]:  # noqa: C901  # T10
     # 延迟导入纯脱敏函数；不调用 Settings/get_settings/setup_logging。
     from app.core.logging import safe_path, sanitize_log
 

@@ -39,7 +39,7 @@ def _iso(ts: int) -> str:
 class EcsStatusCollector:
     code, service, name = "ecs_status", "ecs", "ECS 云服务器状态与资源使用"
 
-    def collect(self, ctx: RunContext) -> list[Observation]:
+    def collect(self, ctx: RunContext) -> list[Observation]:  # noqa: C901  # T10
         from app.services.ecs_monitoring import parse_at
 
         policy = None

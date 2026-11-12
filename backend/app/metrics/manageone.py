@@ -268,7 +268,7 @@ def _sample_points(result: dict, object_id: str, indicator_id: int, start: datet
     return sorted(points.items()), rejected, None if points else "invalid_sample"
 
 
-def collect_manageone(ctx: RunContext, ids: list[str], aliases: list[str], diagnostic: dict,
+def collect_manageone(ctx: RunContext, ids: list[str], aliases: list[str], diagnostic: dict,  # noqa: C901  # T10
                       out: dict[str, list[EcsReading]]) -> None:
     """Read actual ManageOne samples only after source, identity and project checks."""
     for alias in aliases:

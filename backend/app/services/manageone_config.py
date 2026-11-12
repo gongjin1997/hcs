@@ -41,7 +41,7 @@ def public_config(tenant: HcsAccount) -> dict:
             "secret_set": secret_set, "selected": tenant.metrics_source == "MANAGEONE"}
 
 
-def save_config(db: Session, tenant: HcsAccount, body: ManageOneConfigUpdate, operator: str = "system") -> dict:
+def save_config(db: Session, tenant: HcsAccount, body: ManageOneConfigUpdate, operator: str = "system") -> dict:  # noqa: C901  # T10
     """由路由与审计一并提交；校验全部成功后才写配置及显式来源选择。"""
     locked = db.scalar(select(HcsAccount).where(HcsAccount.id == tenant.id).with_for_update()
                        .execution_options(populate_existing=True))

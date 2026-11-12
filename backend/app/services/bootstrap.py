@@ -38,7 +38,7 @@ def _mrs_scope_dims(value) -> set[str] | None:
     return dims
 
 
-def _mrs_split_config(db: Session, old: InspectionTask | None, *, fresh_install: bool) -> None:
+def _mrs_split_config(db: Session, old: InspectionTask | None, *, fresh_install: bool) -> None:  # noqa: C901  # T10
     """create_all/旧部署的幂等配置补齐；正式数据和告警迁移仍由 0022 负责。"""
     original = {row.tenant_id: row.enabled for row in db.scalars(select(CollectSwitch).where(
         CollectSwitch.resource_type == "mrs_job"))}

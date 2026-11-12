@@ -278,7 +278,7 @@ class Runner:
             return "项目未配置 DataArts 工作空间（租户接入 → 项目 → 工作空间）"
         return None
 
-    def run(self, p: Probe) -> dict:
+    def run(self, p: Probe) -> dict:  # noqa: C901  # T10
         res: dict[str, Any] = {"code": p.code, "name": p.name, "service": p.service, "used_by": p.used_by}
         if p.service == "aom":
             res.update(evidence_scope="disabled", product_metrics_verified=False, available=False,

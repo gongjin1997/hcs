@@ -60,7 +60,7 @@ def _schedule_valid(interval: int, cron: str | None) -> bool:
     return True
 
 
-def coverage(db: Session, scope: Scope, *, tenant_id: int | None = None,
+def coverage(db: Session, scope: Scope, *, tenant_id: int | None = None,  # noqa: C901  # T10
              now: datetime | None = None) -> MonitoringCoverageOut:
     """六类批量读取；空租户不访问环境变量兜底目标，权限按资源类型独立过滤。"""
     if tenant_id is not None and not scope.allows(tenant_id):

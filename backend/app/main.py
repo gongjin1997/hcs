@@ -43,7 +43,7 @@ def _err(status: int, code: int, message: str, data=None) -> JSONResponse:
     return JSONResponse(status_code=status, content={"code": code, "message": message, "data": jsonable_encoder(data)})
 
 
-def create_app() -> FastAPI:
+def create_app() -> FastAPI:  # noqa: C901  # T10
     settings = get_settings()
     setup_logging(service="api")
 

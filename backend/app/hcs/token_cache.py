@@ -207,7 +207,7 @@ class TokenCache:
             # 包括 InvalidTag；不回显密文、Token、配置摘要或解密异常的原文。
             raise HcsError(0, "IAM.CACHE_INVALID", "共享 IAM 缓存无法校验，请检查主密钥与缓存状态") from None
 
-    def _shared(self, scope: str, load: Callable[[], TokenRecord], options: dict, timeout: float) -> TokenRecord:
+    def _shared(self, scope: str, load: Callable[[], TokenRecord], options: dict, timeout: float) -> TokenRecord:  # noqa: C901  # T10
         settings = get_settings()
         assert settings.redis_url is not None
         if not settings.master_key:

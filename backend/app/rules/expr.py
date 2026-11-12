@@ -78,7 +78,7 @@ def evaluate(src: str, facts: dict[str, Any]) -> Any:
         raise ExprError(f"数值或函数参数无效：{e}") from e
 
 
-def _eval(node: ast.AST, facts: dict[str, Any]) -> Any:
+def _eval(node: ast.AST, facts: dict[str, Any]) -> Any:  # noqa: C901  # T10
     if isinstance(node, ast.Constant):
         return _finite(node.value)
     if isinstance(node, ast.Name):

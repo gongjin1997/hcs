@@ -130,7 +130,7 @@ def _pick(contacts: dict[int, Contact], ids: list[int]) -> list[dict]:
             for i in ids if i in contacts]
 
 
-def _check_match(db: Session, m: dict) -> dict:
+def _check_match(db: Session, m: dict) -> dict:  # noqa: C901  # T10
     if set(m) - set(MATCH_KEYS):
         raise BizError(ErrorCode.BAD_REQUEST, "匹配条件包含未知字段，请使用 tenant_ids/services/severities/resource_types")
     out: dict = {}

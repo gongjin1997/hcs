@@ -74,7 +74,7 @@ class DataArtsMrsNodeCollector:
 
     code, service, name = "dgc_mrs_node_status", "dataarts", "DataArts MRS 节点状态"
 
-    def collect(self, ctx: RunContext) -> list[Observation]:
+    def collect(self, ctx: RunContext) -> list[Observation]:  # noqa: C901  # T10
         scope = ctx.scope("dgc_mrs_node")
         if scope.dims - {"workspace", "job", "node"}:
             raise HcsError(0, "LOCAL.INVALID_CONFIG", "旧 native 范围不能映射为 DataArts 节点授权，请重新确认范围")

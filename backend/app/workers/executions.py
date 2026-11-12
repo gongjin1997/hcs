@@ -261,7 +261,7 @@ class Supervisor:
                 "exit_code": child.process.exitcode})
             self._release(execution_id)
 
-    def tick(self) -> None:
+    def tick(self) -> None:  # noqa: C901  # T10
         self._enforce_deadlines()
         for execution_id, child in list(self.children.items()):
             try:

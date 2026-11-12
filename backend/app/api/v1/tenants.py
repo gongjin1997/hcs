@@ -67,7 +67,7 @@ def _validate(body: TenantIn, creating: bool, existing: HcsAccount | None = None
         raise BizError(ErrorCode.BAD_REQUEST, "指标来源选择 Prometheus 时需要填写 Prometheus 地址")
 
 
-def _apply(db: Session, t: HcsAccount, body: TenantIn) -> list[str]:
+def _apply(db: Session, t: HcsAccount, body: TenantIn) -> list[str]:  # noqa: C901  # T10
     existing = {p.id: p for p in db.scalars(select(HcsProject).where(HcsProject.account_id == t.id))}
     by_key = {(p.region_id, p.project_id): p for p in existing.values()}
     for pin in body.projects:

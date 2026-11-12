@@ -29,7 +29,7 @@ def list_rule_targets() -> list[RuleTargetOut]:
     return targets
 
 
-def _expression_type(node: ast.AST, fields: Mapping[str, str]) -> str:
+def _expression_type(node: ast.AST, fields: Mapping[str, str]) -> str:  # noqa: C901  # T10
     """只推导类型，不执行用户表达式；避免通过算术创建巨型字符串或集合。"""
     numeric = {"number", "integer"}
     if isinstance(node, ast.Constant):
@@ -111,7 +111,7 @@ def _expression_type(node: ast.AST, fields: Mapping[str, str]) -> str:
     raise ExprError("不支持的表达式类型")
 
 
-def validate_rule(body: RuleIn, resource_type: str | None = None, check_item: str | None = None, *,
+def validate_rule(body: RuleIn, resource_type: str | None = None, check_item: str | None = None, *,  # noqa: C901  # T10
                   allow_unavailable: bool = False) -> None:
     try:
         target = None

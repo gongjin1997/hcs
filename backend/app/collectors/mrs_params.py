@@ -19,7 +19,7 @@ def mrs_parameter_schema(task_code: str) -> dict:
     return deepcopy(MRS_TASK_PARAM_SCHEMAS[task_code])
 
 
-def validate_mrs_params(task_code: str, params: dict, *, strict: bool = True) -> dict:
+def validate_mrs_params(task_code: str, params: dict, *, strict: bool = True) -> dict:  # noqa: C901  # T10
     """strict 用于 API；采集器 strict=False 保留公共内部参数及旧 window_hours 等兼容项。"""
     schema = mrs_parameter_schema(task_code)
     if not isinstance(params, dict):

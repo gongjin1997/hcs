@@ -159,7 +159,7 @@ def _ip_index(index: dict[str, str], ids: list[str]) -> dict[str, str]:
     return {host: sid for host, sid in out.items() if host not in ambiguous and sid in wanted}
 
 
-def _prometheus(ctx: RunContext, ids: list[str], index: dict[str, str], aliases: list[str], config: dict,
+def _prometheus(ctx: RunContext, ids: list[str], index: dict[str, str], aliases: list[str], config: dict,  # noqa: C901  # T10
                 diagnostic: dict, out: dict[str, list[EcsReading]]) -> None:
     try:
         prom: PromClient | None = prom_for(ctx)
@@ -271,7 +271,7 @@ def _prometheus(ctx: RunContext, ids: list[str], index: dict[str, str], aliases:
             entry.update(status="no_series", reason="no_matching_series")
 
 
-def _ces(ctx: RunContext, ids: list[str], aliases: list[str], config: dict, diagnostic: dict,
+def _ces(ctx: RunContext, ids: list[str], aliases: list[str], config: dict, diagnostic: dict,  # noqa: C901  # T10
          out: dict[str, list[EcsReading]]) -> None:
     if not use_ces(ctx.tenant):
         return
@@ -399,7 +399,7 @@ def _deduplicate(out: dict[str, list[EcsReading]], diagnostic: dict) -> dict[str
     return result
 
 
-def _finish(ctx: RunContext, out: dict[str, list[EcsReading]], source: str, diagnostic: dict,
+def _finish(ctx: RunContext, out: dict[str, list[EcsReading]], source: str, diagnostic: dict,  # noqa: C901  # T10
             ids: list[str]) -> EcsReadingsResult:
     out = _deduplicate(out, diagnostic)
     now = _now()

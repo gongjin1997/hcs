@@ -70,4 +70,5 @@ cd backend && .venv/bin/alembic revision --autogenerate --rev-id 0004 -m "resour
 - `default_rules.yaml` 只在规则不存在时写入，改了 YAML 已部署环境不会变（要么页面改，要么写迁移）
 - 采集开关（`services/collect_switch.py`）和静默（`services/silence_service.py`）会影响“有没有告警”，排查时先看这两处
 - `app/demo/` 只服务演示环境，复杂度高，不在重构范围
-- 现有代码未统一 `ruff format`，不要全量格式化；ruff 规则 `E,F,I,B,UP`，行宽 128
+- 现有代码未统一 `ruff format`，不要全量格式化；ruff 规则 `E,F,I,B,UP,C90`，行宽 128
+- 函数复杂度上限 15（C901）：新代码不得超标，也不要新增 `noqa: C901`；现有超标函数带 `# noqa: C901  # T10` 占位，按任务书 T10 拆分后删除占位
