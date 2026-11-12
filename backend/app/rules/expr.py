@@ -78,21 +78,16 @@ def evaluate(src: str, facts: dict[str, Any]) -> Any:
         raise ExprError(f"数值或函数参数无效：{e}") from e
 
 
-def _eval(node: ast.AST, facts: dict[str, Any]) -> Any:  # noqa: C901  # T10
+def _eval(node: ast.AST, facts: dict[str, Any]) -> Any:
+    # 栈深约束：表达式最长 500 个字符，求值占用的栈帧数不能超过字符数。连续负号一个字符一层嵌套，
+    # 所以负号、算术等必须在本函数里直接递归；and / or 与比较每层至少多出两个字符，才能拆到辅助函数（每层两帧）。
+    # 不要改成“按节点类型查表再调用处理函数”：500 个负号会超过默认递归上限，而 RecursionError 不会转成 ExprError。
     if isinstance(node, ast.Constant):
         return _finite(node.value)
     if isinstance(node, ast.Name):
-        if facts.get(node.id) is None:
-            raise MissingFact(f"缺少数据：{node.id}")
-        return _finite(facts[node.id])
-    if isinstance(node, ast.BoolOp):          # and 遇假即停、or 遇真即停，返回值语义与 Python 一致
-        is_and = isinstance(node.op, ast.And)
-        result: Any = is_and
-        for v in node.values:
-            result = _eval(v, facts)
-            if bool(result) != is_and:
-                return result
-        return result
+        return _fact(node.id, facts)
+    if isinstance(node, ast.BoolOp):
+        return _bool_op(node, facts)
     if isinstance(node, ast.UnaryOp):
         operand = _eval(node.operand, facts)
         return (not operand) if isinstance(node.op, ast.Not) else -operand
@@ -102,13 +97,7 @@ def _eval(node: ast.AST, facts: dict[str, Any]) -> Any:  # noqa: C901  # T10
             raise ExprError("算术运算只支持数值")
         return _finite(_BIN[type(node.op)](left, right))
     if isinstance(node, ast.Compare):
-        left = _eval(node.left, facts)
-        for cmp_op, comp in zip(node.ops, node.comparators, strict=True):
-            right = _eval(comp, facts)
-            if not _CMP[type(cmp_op)](left, right):
-                return False
-            left = right
-        return True
+        return _compare(node, facts)
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
         return _finite(_FUNCS[node.func.id](*[_eval(a, facts) for a in node.args]))
     if isinstance(node, ast.Tuple | ast.List):
@@ -116,3 +105,31 @@ def _eval(node: ast.AST, facts: dict[str, Any]) -> Any:  # noqa: C901  # T10
     if isinstance(node, ast.IfExp):
         return _eval(node.body, facts) if _eval(node.test, facts) else _eval(node.orelse, facts)
     raise ExprError(f"不支持的表达式节点：{type(node).__name__}")
+
+
+def _fact(name: str, facts: dict[str, Any]) -> Any:
+    if facts.get(name) is None:
+        raise MissingFact(f"缺少数据：{name}")
+    return _finite(facts[name])
+
+
+def _bool_op(node: ast.BoolOp, facts: dict[str, Any]) -> Any:
+    """and 遇假即停、or 遇真即停，返回值语义与 Python 一致。"""
+    is_and = isinstance(node.op, ast.And)
+    result: Any = is_and
+    for v in node.values:
+        result = _eval(v, facts)
+        if bool(result) != is_and:
+            return result
+    return result
+
+
+def _compare(node: ast.Compare, facts: dict[str, Any]) -> bool:
+    """链式比较从左到右求值，遇到不成立即停。"""
+    left = _eval(node.left, facts)
+    for cmp_op, comp in zip(node.ops, node.comparators, strict=True):
+        right = _eval(comp, facts)
+        if not _CMP[type(cmp_op)](left, right):
+            return False
+        left = right
+    return True
