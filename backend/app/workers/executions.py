@@ -6,13 +6,14 @@ import socket
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from threading import Event, Thread, Timer
 from uuid import uuid4
 
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.db import SessionLocal, engine
@@ -26,6 +27,10 @@ from app.services.catalog import CLEANUP_TASK_CODE
 from app.services.tenancy import resolve_targets
 
 log = logging.getLogger(__name__)
+# 监督器不读数据库的兜底期限比执行期限晚几秒：正常情况下数据库期限和子进程自己的定时器先生效。
+HARD_DEADLINE_GRACE = 5
+# 子进程已退出而执行记录仍被其他事务锁住时，等待写入准确终态的最长时间；之后让出槽位，记录交给 reap。
+LOCKED_EXIT_WAIT = 5
 
 
 def _finish_owned(execution_id: str, token: str, status: str, message: str, code: str | None = None) -> None:
@@ -36,11 +41,42 @@ def _finish_owned(execution_id: str, token: str, status: str, message: str, code
             db.commit()
 
 
-def _run_child(execution_id: str, token: str, sender) -> None:
+class _HardDeadline:
+    """子进程的硬期限：到期直接 os._exit(124)，不依赖数据库；只能收紧，不能放宽。"""
+
+    def __init__(self, seconds: float):
+        self.until = time.monotonic() + max(0.0, seconds)
+        self._timer = self._arm()
+
+    def _arm(self) -> Timer:
+        timer = Timer(self.remaining, lambda: os._exit(124))
+        timer.daemon = True
+        timer.start()
+        return timer
+
+    @property
+    def remaining(self) -> float:
+        return max(0.0, self.until - time.monotonic())
+
+    def tighten(self, seconds: float) -> float:
+        until = time.monotonic() + max(0.0, seconds)
+        if until < self.until:
+            self.until = until
+            previous, self._timer = self._timer, self._arm()  # 先启动新定时器再撤旧的，中间不留空档。
+            previous.cancel()
+        return self.remaining
+
+    def cancel(self) -> None:
+        self._timer.cancel()
+
+
+def _run_child(execution_id: str, token: str, sender, deadline_at: datetime) -> None:
+    # 领取时的期限随启动参数传入，先于日志初始化和任何数据库访问生效：
+    # 即使监督器崩溃、网络库卡死或首次数据库读取阻塞，子进程也不能无限存活。
+    deadline = _HardDeadline((deadline_at - utcnow()).total_seconds())
     setup_logging(service="inspection")
     # spawn 不继承连接；dispose 也防止嵌入调用时误用父进程连接。
     engine.dispose()
-    timer = None
     stopped = Event()
     parent_pid = os.getppid()
 
@@ -56,11 +92,8 @@ def _run_child(execution_id: str, token: str, sender) -> None:
                 row = db.get(TaskExecution, execution_id)
                 if row is None or row.status != "RUNNING" or row.owner_token != token:
                     return
-                seconds = max(0, (row.deadline_at - utcnow()).total_seconds()) if row.deadline_at else 0
-                # 即使监督器崩溃、网络库卡死或数据库不可用，子进程也不能无限存活。
-                timer = Timer(seconds, lambda: os._exit(124))
-                timer.daemon = True
-                timer.start()
+                # 数据库记录的期限只能收紧启动时取得的期限。
+                seconds = deadline.tighten((row.deadline_at - utcnow()).total_seconds() if row.deadline_at else 0)
                 control = runtime.Control(row.id, row.run_id, token, time.monotonic() + seconds,
                                           dict(row.params or {}), sender.send)
                 with runtime.managed(db, control, process=True), request_budget(attempts=50000, seconds=seconds):
@@ -92,8 +125,7 @@ def _run_child(execution_id: str, token: str, sender) -> None:
                           "LOCAL.WORKER_ERROR")
         finally:
             stopped.set()
-            if timer is not None:
-                timer.cancel()
+            deadline.cancel()
             sender.close()
 
 
@@ -102,9 +134,12 @@ class Child:
     process: BaseProcess
     receiver: Connection
     token: str
+    hard_deadline: float  # 单调时钟；监督器不读数据库也能判断子进程是否必须停止。
     last_heartbeat: float = 0
     pending: deque[dict] = field(default_factory=lambda: deque(maxlen=100))
     terminal_seen: float | None = None
+    expired: bool = False
+    locked_since: float | None = None
 
 
 def _record_progress(row: TaskExecution, progress: dict, *, now) -> bool:
@@ -195,17 +230,50 @@ class Supervisor:
         child.process.join(timeout=.1)
         child.process.close()
 
+    def _enforce_deadlines(self) -> None:
+        """不读数据库的期限检查：数据库不可用或记录被锁住时，超过期限的子进程同样必须停止。"""
+        now = time.monotonic()
+        for execution_id, child in self.children.items():
+            if child.expired or now < child.hard_deadline:
+                continue
+            child.expired = True
+            if child.process.is_alive():
+                log.warning("execution_hard_deadline_enforced", extra={
+                    "event": "execution_hard_deadline_enforced", "task_execution_id": execution_id})
+                self._stop_child(child)
+
+    def _row_unavailable(self, db: Session, execution_id: str, child: Child) -> None:
+        """SKIP LOCKED 没有返回记录：区分“记录已不存在”和“暂时被其他事务锁住”。"""
+        if db.scalar(select(TaskExecution.id).where(TaskExecution.id == execution_id)) is None:
+            # 记录已被删除，提交栅栏不会再放行任何结果：停止子进程并让出槽位。
+            log.warning("execution_record_missing", extra={"event": "execution_record_missing",
+                        "task_execution_id": execution_id, "child_alive": child.process.is_alive()})
+            self._stop_child(child)
+            self._release(execution_id)
+            return
+        if child.process.is_alive():
+            return  # 正在提交结果的子进程持有栅栏；下一轮再检查，存活上限由 _enforce_deadlines 保证。
+        child.locked_since = child.locked_since or time.monotonic()
+        if time.monotonic() - child.locked_since >= LOCKED_EXIT_WAIT:
+            # 子进程已退出：不再占用槽位，记录的终态由租约或期限到期后的 reap 写入。
+            log.warning("execution_slot_released_while_locked", extra={
+                "event": "execution_slot_released_while_locked", "task_execution_id": execution_id,
+                "exit_code": child.process.exitcode})
+            self._release(execution_id)
+
     def tick(self) -> None:
+        self._enforce_deadlines()
         for execution_id, child in list(self.children.items()):
             try:
                 while child.receiver.poll():
                     child.pending.append(child.receiver.recv())
-            except EOFError:
+            except (EOFError, OSError):  # 子进程被终止时可能留下不完整的进度消息。
                 pass
             with SessionLocal() as db:
                 row = db.scalar(select(TaskExecution).where(TaskExecution.id == execution_id)
                     .with_for_update(skip_locked=True))
-                if row is None:  # 正在提交结果的子进程持有栅栏；下一轮再检查。
+                if row is None:
+                    self._row_unavailable(db, execution_id, child)
                     continue
                 now = utcnow()
                 reason: tuple[str, str, str] | None = None
@@ -227,7 +295,8 @@ class Supervisor:
                     continue
                 if db.get(TaskExecutionCancel, row.id) is not None:
                     reason = ("CANCELLED", "已取消本地巡检；云作业继续运行", "LOCAL.CANCELLED")
-                elif row.deadline_at is None or row.deadline_at <= now or child.process.exitcode == 124:
+                elif (row.deadline_at is None or row.deadline_at <= now or child.expired
+                        or child.process.exitcode == 124):
                     reason = ("TIMEOUT", "已达到本次巡检执行期限", "LOCAL.DEADLINE")
                 elif row.lease_expires_at is None or row.lease_expires_at <= now:
                     reason = ("INTERRUPTED", "执行器租约已失效，请重新执行", "LOCAL.LEASE_LOST")
@@ -254,8 +323,11 @@ class Supervisor:
                 if row is None:
                     break
                 execution_id, token = row.id, row.owner_token or ""
+                deadline_at = row.deadline_at or utcnow()
+            hard_deadline = (time.monotonic() + max(0.0, (deadline_at - utcnow()).total_seconds())
+                             + HARD_DEADLINE_GRACE)
             receiver, sender = self.context.Pipe(duplex=False)
-            process = self.context.Process(target=_run_child, args=(execution_id, token, sender),
+            process = self.context.Process(target=_run_child, args=(execution_id, token, sender, deadline_at),
                                            name=f"inspection-{execution_id[:8]}")
             try:
                 process.start()
@@ -265,7 +337,7 @@ class Supervisor:
                 _finish_owned(execution_id, token, "FAILED", "无法启动执行子进程", "LOCAL.SPAWN_FAILED")
                 raise
             sender.close()
-            self.children[execution_id] = Child(process, receiver, token)
+            self.children[execution_id] = Child(process, receiver, token, hard_deadline)
 
     def close(self) -> None:
         self.stopped.set()
