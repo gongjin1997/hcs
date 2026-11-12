@@ -832,7 +832,8 @@ def mrs_native_job_executions(ds: DS, cluster_id: str, offset: int = Query(1, ge
     if not any(c["clusterId"] == cluster_id for c in oa.mrs_clusters(ds)):
         raise err(404, "cluster not found")
     base = _now_ms() - 300_000
-    rows = [{"job_id": f"mock-native-{i}", "job_name": "synthetic-native-job", "job_type": "Flink",
+    rows: list[dict[str, Any]] = [
+            {"job_id": f"mock-native-{i}", "job_name": "synthetic-native-job", "job_type": "Flink",
              "job_state": "FINISHED" if i == 1 else "RUNNING",
              "job_result": "SUCCEEDED" if i == 1 else "UNDEFINED",
              "submitted_time": base - 1000 * i, "started_time": base,
