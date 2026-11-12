@@ -10,6 +10,8 @@ __pycache__/
 htmlcov/
 coverage.xml
 *.db
+*.db-shm
+*.db-wal
 .env
 .runtime/
 output/playwright/
@@ -43,6 +45,9 @@ deploy/nginx/certs/*
 !deploy/nginx/certs/README.md
 deploy/certs/*
 !deploy/certs/README.md
+
+# 仓库根目录下的个人临时文件
+/tmp/
 
 # Claude Code 个人设置（项目共享配置 .claude/settings.json、.claude/commands/ 入库）
 .claude/settings.local.json

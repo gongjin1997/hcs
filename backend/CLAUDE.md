@@ -60,7 +60,7 @@ cd backend && .venv/bin/alembic revision --autogenerate --rev-id 0004 -m "resour
 - `tests/conftest.py` 在导入 app 前把库指向临时 SQLite，并开启演示数据。夹具：`client`（会话级 TestClient）、`admin`（admin 请求头）、`login(client, u, p)`、`demo_login(client, 用户名, tenant_id)`、`tenant_ids`、`mem_db`（空内存库）、`world`（空库 + 两个租户）、`mock_http`（进程内 Mock HCS）
 - 规则用 `tests/test_rules.py`（纯函数）；流水线 / 多租户用 `world` + `mock_http` 跑 `run_task`；接口用 `client` + `demo_login`
 - `client` 是会话级共享库：用例之间会互相看到数据，断言用“包含 / 增量”，不要断言全表条数；需要干净库用 `mem_db` / `world`
-- 全量约 23 秒；最慢的是首次启动写演示数据（约 5 秒）和 `test_bootstrap`（约 5 秒）
+- 全量约 11 分钟（2026-11-12 实测：5115 个用例 680 秒，含覆盖率统计）；开发时按文件 / 用例跑（`.venv/bin/pytest tests/test_x.py -k 关键字 -x`），提交前再跑全量
 - `make test-pg` 在 PostgreSQL 16 独立随机 schema 上执行全量测试；可用 `PG_URL` 指定测试库。部分索引、并发 Outbox、VARCHAR、JSONB 和时区均有专项用例；测试不会清空 public schema。
 
 ## 易踩的坑

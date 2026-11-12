@@ -17,7 +17,7 @@
 ## 技术栈
 
 - 后端 `backend/`：Python 3.12（镜像与 CI）· FastAPI · SQLAlchemy 2（同步 ORM）· Alembic · Pydantic v2 · APScheduler 3 · redis-py · httpx · openpyxl · Jinja2；测试 pytest，开发 / 测试库 SQLite
-- 前端 `frontend/`：Vue 3.5 + TypeScript 5.6 + Vite 6 + Element Plus 2.9（组件按需引入）+ Pinia + ECharts 5（按需）+ axios + dayjs
+- 前端 `frontend/`：Vue 3.5 + TypeScript 5.6 + Vite 6 + Element Plus 2.14（组件按需引入）+ Pinia + ECharts 6（按需）+ axios + dayjs；测试 Vitest
 
 ## 文档索引（只读与当前任务相关的）
 
@@ -38,7 +38,7 @@
 make init                     # 首次：venv + 依赖（backend/constraints.txt 锁版本）+ npm ci
 make dev-api / make dev-web   # 后端 :8000（SQLite + 演示数据，/api/docs）/ 前端 :5173
 make dev-mock                 # Mock HCS :9000；backend/.env 设 INSPECTOR_HCS_MOCK_URL=http://127.0.0.1:9000 走真实采集链路
-make check                    # 提交前必跑（= CI）：ruff + mypy + vue-tsc + pytest + 前端构建
+make check                    # 提交前必跑（= CI）：ruff + mypy + vue-tsc + pytest + Vitest + 脚本回归 + 前端构建（约 12 分钟）
 make lint / make test         # 只做静态检查 / 只跑后端测试
 cd backend && .venv/bin/pytest tests/test_rules.py -k expr -x   # 跑单个文件 / 用例
 make revision m="..."         # 生成迁移（建议加 --rev-id，见 backend/CLAUDE.md）；make migrate 升级
