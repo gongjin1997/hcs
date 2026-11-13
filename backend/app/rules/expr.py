@@ -99,7 +99,11 @@ def _eval(node: ast.AST, facts: dict[str, Any]) -> Any:
     if isinstance(node, ast.Compare):
         return _compare(node, facts)
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-        return _finite(_FUNCS[node.func.id](*[_eval(a, facts) for a in node.args]))
+        args = [_eval(a, facts) for a in node.args]
+        if node.func.id == "round" and len(args) == 2 and isinstance(args[1], int):
+            if not (-100 <= args[1] <= 100):
+                raise ExprError("round 精度参数必须是 -100 到 100 之间的整数")
+        return _finite(_FUNCS[node.func.id](*args))
     if isinstance(node, ast.Tuple | ast.List):
         return tuple(_eval(e, facts) for e in node.elts)
     if isinstance(node, ast.IfExp):
