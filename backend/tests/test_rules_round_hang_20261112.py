@@ -34,20 +34,20 @@ def test_round_does_not_hang_in_subprocess():
     """用子进程验证超范围的 round 调用在 5 秒内返回错误而不是挂起。"""
     script = textwrap.dedent("""
         import sys
-        sys.path.insert(0, %r)
+        sys.path.insert(0, {!r})
         from app.rules.expr import evaluate, ExprError
         try:
             # 这个调用在修复前会让 CPython 挂死
-            result = evaluate("round(n, -99999999999)", {"n": 7})
-            print(f"UNEXPECTED_SUCCESS: {result}")
+            result = evaluate("round(n, -99999999999)", {{"n": 7}})
+            print(f"UNEXPECTED_SUCCESS: {{result}}")
             sys.exit(1)
         except ExprError as e:
-            print(f"EXPECTED_ERROR: {e}")
+            print(f"EXPECTED_ERROR: {{e}}")
             sys.exit(0)
         except Exception as e:
-            print(f"UNEXPECTED_EXCEPTION: {type(e).__name__}: {e}")
+            print(f"UNEXPECTED_EXCEPTION: {{type(e).__name__}}: {{e}}")
             sys.exit(2)
-    """ % str(Path(__file__).resolve().parents[1]))
+    """).format(str(Path(__file__).resolve().parents[1]))
 
     result = subprocess.run([sys.executable, "-c", script],
                             capture_output=True, text=True, timeout=5,
